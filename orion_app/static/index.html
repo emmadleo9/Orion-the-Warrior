@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orion the Warrior</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand-box">
+          <div class="brand-mark">O</div>
+          <div>
+            <h1>Orion</h1>
+            <p>the Warrior</p>
+          </div>
+        </div>
+
+        <nav>
+          <button class="nav active">Dashboard</button>
+          <button class="nav">Social Hub</button>
+          <button class="nav">Device Control</button>
+          <button class="nav">AI Studio</button>
+          <button class="nav">Tasks</button>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Personal command center</p>
+            <h2>Mission Control</h2>
+          </div>
+          <div class="status-pill">System online</div>
+        </header>
+
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Local intelligence</p>
+            <h3>Nico de Angelo</h3>
+            <p class="hero-copy">
+              A private local assistant that can manage tasks, summarize activity, and generate visual concepts for your Orion workspace.
+            </p>
+          </div>
+          <button id="generate-image-btn">Generate image</button>
+        </section>
+
+        <section class="grid steel-grid">
+          <div class="panel">
+            <h3>AI prompt</h3>
+            <textarea id="prompt-box" rows="4" placeholder="Ask Nico de Angelo to analyze your day, schedule tasks, or plan a mission..."></textarea>
+            <button id="ask-ai-btn" class="primary">Ask Nico</button>
+          </div>
+
+          <div class="panel">
+            <h3>System response</h3>
+            <pre id="ai-response">Waiting for a command...</pre>
+          </div>
+        </section>
+
+        <section class="grid summary-grid">
+          <div class="panel">
+            <h3>Connected devices</h3>
+            <ul id="device-list"></ul>
+          </div>
+
+          <div class="panel">
+            <h3>Task queue</h3>
+            <ul id="task-list"></ul>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

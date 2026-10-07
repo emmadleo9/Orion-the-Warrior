@@ -1,0 +1,13 @@
+[project]
+name = "orion-the-warrior"
+version = "0.1.0"
+description = "Orion the Warrior local orchestration app"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "pillow>=10.4.0"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
