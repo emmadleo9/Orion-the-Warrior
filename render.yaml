@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: orion-the-warrior
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements-cloud.txt
+    startCommand: uvicorn orion_app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ORION_OLLAMA_URL
+        sync: false
+      - key: ORION_OLLAMA_MODEL
+        value: qwen2.5:3b
+      - key: ORION_INSTAGRAM_APP_ID
+        sync: false
+      - key: ORION_INSTAGRAM_APP_SECRET
+        sync: false
+      - key: ORION_INSTAGRAM_REDIRECT_URI
+        sync: false
