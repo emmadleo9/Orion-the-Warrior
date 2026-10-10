@@ -4,15 +4,15 @@ Orion the Warrior is a local-first command center and personal automation starte
 
 ## Features
 
-- AI assistant panel for summaries and action plans
-- Private, context-aware chat with Nico powered by a local Ollama model
-- Live web search, weather by named location, local time, and Orion device/task status
-- Persistent local chat archive (up to 999,999 messages per browser conversation) with relevant-history retrieval and streamed replies
-- Device registry and task queue for connected devices
-- Live Tasks monitor for Orion operation progress, logs, and outcomes
-- Archer image generation with selectable online and offline modes, generated-image preview, and a local Stable Diffusion Turbo model
-- Social Hub workspaces for WhatsApp, Discord, and Instagram with official web-app handoffs and browser-local message drafts
-- Orion brand artwork used as the app logo, favicon, and dashboard hero image, with the Matrix-green theme blended with gold and amber highlights
+- **Live Host Telemetry**: Real-time CPU, RAM, Disk storage, OS platform, and system uptime monitoring displayed in Mission Control and sidebar.
+- **Private Local AI Assistant ("Nico de Angelo")**: Context-aware chat powered by local Ollama models with streamed responses and rich Markdown rendering.
+- **Expanded AI Tools**: Live web search (DuckDuckGo), Open-Meteo weather forecasts, local time, Orion status, host system telemetry, deterministic safe math calculator, and device task dispatching.
+- **Conversation Management & Export**: Local SQLite archive with FTS5 indexing, model selector/switcher, and instant Markdown/JSON conversation export.
+- **Hardware & Device Control Hub**: Dedicated interactive device mesh view with SQLite persistence, device registration, ping heartbeats, and task lifecycle execution.
+- **Archer AI Studio**: Dedicated generative studio with curated art style presets (Cyberpunk, Cinematic, Dark Fantasy, Anime, Photorealistic), aspect ratio choices, and an interactive artwork gallery archive with lightbox and instant download.
+- **Live Task Activity Monitor**: Observability feed with live SSE streaming, category and status filters, and history cleanup.
+- **Social Hub**: Workspaces for WhatsApp, Discord, and official Meta Instagram API integration with in-memory token safety.
+- **Cyber-Tactical Aesthetic**: Matrix neon-green and amber/gold command center styling with glowing telemetry badges and responsive layout.
 
 ## Quick start
 

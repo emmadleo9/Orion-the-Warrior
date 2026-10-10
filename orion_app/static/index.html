@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orion the Warrior</title>
     <link rel="icon" type="image/png" href="/static/orion-logo.png" />
-    <link rel="stylesheet" href="/static/styles.css?v=10" />
+    <link rel="stylesheet" href="/static/styles.css?v=33" />
   </head>
   <body>
     <div class="shell">
@@ -20,103 +20,401 @@
 
         <nav>
           <button class="nav active" type="button" data-view="dashboard-view">Dashboard</button>
+          <button class="nav" type="button" data-view="devices-view">Device Control</button>
+          <button class="nav" type="button" data-view="ai-studio-view">AI Studio</button>
           <button class="nav" type="button" data-view="social-view">Social Hub</button>
-          <button class="nav">Device Control</button>
-          <button class="nav">AI Studio</button>
           <button class="nav" type="button" data-view="tasks-view">Tasks</button>
         </nav>
+
+        <!-- Diagnostics: host telemetry, then the live execution console -->
+        <section class="sidebar-diagnostics" aria-label="Diagnostics">
+          <div class="diagnostics-head">
+            <p class="eyebrow">DIAGNOSTICS</p>
+            <span class="diag-launcher-state" id="diag-launcher-state" title="start_orion.bat link status">BAT LINK · --</span>
+          </div>
+
+          <div class="sidebar-telemetry">
+            <div class="sidebar-stat"><span id="sb-cpu-label">CPU:</span> <strong id="sb-cpu-val">--%</strong></div>
+            <div class="sidebar-stat"><span id="sb-ram-label">RAM:</span> <strong id="sb-ram-val">--%</strong></div>
+            <div class="sidebar-stat"><span id="sb-uptime-label">Uptime:</span> <strong id="sb-uptime-val">--</strong></div>
+          </div>
+
+          <!-- Live execution console: in-app activity plus start_orion.bat output -->
+          <section class="sidebar-terminal-card" aria-label="Live execution console">
+            <div class="terminal-card-header">
+              <div class="term-title-wrapper">
+                <span class="term-live-pulse" id="term-live-dot" title="Live stream active"></span>
+                <strong class="term-card-title">LIVE EXECUTION</strong>
+              </div>
+              <div class="term-controls">
+                <button id="term-clear-btn" class="term-mini-btn" type="button" title="Clear console output">Clear</button>
+                <button id="term-scroll-btn" class="term-mini-btn active" type="button" title="Toggle autoscroll">Auto</button>
+              </div>
+            </div>
+            <div class="terminal-body" id="sidebar-terminal-body" role="log" aria-live="polite">
+              <div class="term-line system-msg">
+                <span class="term-time">[BOOT]</span>
+                <span class="term-text">Diagnostics console connected.</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Task Manager Panel — pinned at bottom of sidebar -->
+          <div class="taskman-border-wrap">
+            <section class="sidebar-taskman-card" aria-label="Task Manager">
+              <div class="taskman-header">
+                <div class="taskman-title-row">
+                  <span class="taskman-icon">⬡</span>
+                  <strong class="taskman-title">TASK MANAGER</strong>
+                  <span class="taskman-count" id="taskman-proc-count">— proc</span>
+                </div>
+                <div class="taskman-cols">
+                  <span class="tm-col-name">PROCESS</span>
+                  <span class="tm-col-cpu">CPU</span>
+                  <span class="tm-col-mem">MEM</span>
+                  <span class="tm-col-status">STATUS</span>
+                </div>
+              </div>
+              <div class="taskman-body" id="taskman-body">
+                <div class="tm-placeholder">Connecting to process monitor…</div>
+              </div>
+            </section>
+          </div>
+        </section>
       </aside>
 
       <main class="content">
+        <!-- ==================== DASHBOARD VIEW ==================== -->
         <div id="dashboard-view" class="app-view">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">Personal command center</p>
-            <h2>Mission Control</h2>
-          </div>
-          <div class="status-pill">System online</div>
-        </header>
-
-        <section class="hero">
-          <div>
-            <p class="eyebrow">Local intelligence</p>
-            <h3>Nico de Angelo</h3>
-            <p class="hero-copy">
-              Your private AI partner. Chat naturally, explore ideas, and plan your next move.
-            </p>
-          </div>
-        </section>
-
-        <section class="panel archer-panel" aria-labelledby="archer-title">
-          <div class="chat-heading">
-            <div class="archer-title">
-              <span class="archer-mark" aria-hidden="true">➶</span>
-              <div>
-                <p class="eyebrow">IMAGE GENERATION SYSTEM</p>
-                <h3 id="archer-title">Archer</h3>
-              </div>
-            </div>
-            <span class="model-status" id="archer-status" role="status">Checking Archer models...</span>
-          </div>
-          <form id="archer-form" class="archer-form">
-            <label for="archer-prompt">Describe the image</label>
-            <textarea id="archer-prompt" rows="3" maxlength="1000" placeholder="A moonlit forest citadel, cinematic concept art..." required></textarea>
-            <div class="archer-controls">
-              <label for="archer-mode">Generation mode</label>
-              <select id="archer-mode">
-                <option value="auto">Auto (online, then offline)</option>
-                <option value="offline">Offline · local model</option>
-                <option value="online">Online · cloud model</option>
-              </select>
-              <button id="generate-archer-btn" class="primary" type="submit">Generate Via Archer</button>
-            </div>
-          </form>
-          <p class="chat-hint" id="archer-message" role="status">Offline generation uses the locally installed Stable Diffusion Turbo model.</p>
-          <img id="archer-preview" class="archer-preview" alt="Image generated by Archer" hidden />
-        </section>
-
-        <section class="panel chat-panel">
-          <div class="chat-heading">
+          <header class="topbar">
             <div>
-              <p class="eyebrow">Private local model</p>
-              <h3>Chat with Nico</h3>
+              <p class="eyebrow">Personal command center</p>
+              <h2>Mission Control</h2>
             </div>
-            <div class="chat-controls">
-              <div>
-                <span class="model-status" id="model-status" role="status">Checking Ollama...</span>
-                <span class="memory-status" id="memory-status"></span>
+            <div class="status-pill" id="dashboard-system-pill">System online</div>
+          </header>
+
+          <!-- Telemetry Strip -->
+          <div class="telemetry-strip" id="telemetry-strip">
+            <div class="telemetry-item">
+              <span class="telemetry-label">CPU LOAD</span>
+              <strong id="telem-cpu-val" class="telemetry-value">--%</strong>
+              <div class="telemetry-bar"><div id="telem-cpu-bar" class="telemetry-bar-fill" style="width: 0%"></div></div>
+            </div>
+            <div class="telemetry-item">
+              <span class="telemetry-label">MEMORY RAM</span>
+              <strong id="telem-ram-val" class="telemetry-value">--%</strong>
+              <div class="telemetry-bar"><div id="telem-ram-bar" class="telemetry-bar-fill" style="width: 0%"></div></div>
+            </div>
+            <div class="telemetry-item">
+              <span class="telemetry-label">DISK STORAGE</span>
+              <strong id="telem-disk-val" class="telemetry-value">--%</strong>
+              <div class="telemetry-bar"><div id="telem-disk-bar" class="telemetry-bar-fill" style="width: 0%"></div></div>
+            </div>
+            <div class="telemetry-item">
+              <span class="telemetry-label">SYSTEM UPTIME</span>
+              <strong id="telem-uptime-val" class="telemetry-value">--</strong>
+              <small id="telem-os-val" class="telemetry-sub">Host</small>
+            </div>
+          </div>
+
+          <section class="hero">
+            <div>
+              <p class="eyebrow">Local intelligence</p>
+              <h3>Nico de Angelo &amp; Zara</h3>
+              <p class="hero-copy">
+                Your private AI partners. Nico handles system control &amp; live operations; Zara delivers witty, lighthearted offline creativity.
+              </p>
+            </div>
+          </section>
+
+          <!-- Quick Archer Panel -->
+          <section class="panel archer-panel" aria-labelledby="archer-title">
+            <div class="chat-heading">
+              <div class="archer-title">
+                <span class="archer-mark" aria-hidden="true">➶</span>
+                <div>
+                  <p class="eyebrow">IMAGE GENERATION SYSTEM</p>
+                  <h3 id="archer-title">Archer</h3>
+                </div>
               </div>
-              <button id="clear-memory-btn" class="secondary-button" type="button">Clear memory</button>
+              <span class="model-status" id="archer-status" role="status">Checking Archer models...</span>
             </div>
-          </div>
-          <div class="chat-messages" id="chat-messages" role="log" aria-live="polite" aria-label="Chat messages">
-            <div class="message assistant-message">
-              <span class="message-author">NICO</span>
-              <p>Hey. I'm Nico, your Orion assistant. What's on your mind?</p>
+            <form id="archer-form" class="archer-form">
+              <label for="archer-prompt">Describe the image</label>
+              <textarea id="archer-prompt" rows="3" maxlength="1000" placeholder="A moonlit forest citadel, cinematic concept art..." required></textarea>
+              <div class="archer-controls">
+                <label for="archer-mode">Generation mode</label>
+                <select id="archer-mode">
+                  <option value="auto">Auto (online, then offline)</option>
+                  <option value="offline">Offline · local model</option>
+                  <option value="online">Online · cloud model</option>
+                </select>
+                <button id="generate-archer-btn" class="primary" type="submit">Generate Via Archer</button>
+              </div>
+            </form>
+            <p class="chat-hint" id="archer-message" role="status">Offline generation uses the locally installed Stable Diffusion Turbo model.</p>
+            <img id="archer-preview" class="archer-preview" alt="Image generated by Archer" hidden />
+          </section>
+
+          <!-- Chat with Nico Panel (Emerald Matrix Theme) -->
+          <section class="panel chat-panel nico-panel">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow nico-eyebrow">PRIMARY LOCAL MODEL · MATRIX OPERATOR</p>
+                <h3 class="nico-title">Chat with Nico</h3>
+              </div>
+              <div class="chat-controls">
+                <div>
+                  <select id="model-selector" class="model-select" title="Active Model">
+                    <option value="">Loading models...</option>
+                  </select>
+                  <span class="model-status" id="model-status" role="status">Checking Ollama...</span>
+                  <span class="memory-status" id="memory-status"></span>
+                </div>
+                <div class="chat-action-buttons">
+                  <button id="export-chat-btn" class="secondary-button" type="button" title="Export conversation as Markdown">Export Chat</button>
+                  <button id="clear-memory-btn" class="secondary-button" type="button">Clear memory</button>
+                </div>
+              </div>
             </div>
-          </div>
-          <form class="chat-form" id="chat-form">
-            <label class="visually-hidden" for="prompt-box">Message Nico</label>
-            <textarea id="prompt-box" rows="2" maxlength="4000" placeholder="Message Nico..." required></textarea>
-            <button id="ask-ai-btn" class="primary" type="submit">Send message</button>
-          </form>
-          <p class="chat-hint">Enter to send · Shift+Enter for a new line · Local archive up to 999,999 messages; relevant context is recalled per reply. Search/weather queries go to public services.</p>
-          <pre id="ai-response" class="visually-hidden" aria-live="polite"></pre>
-        </section>
+            <div class="chat-messages" id="chat-messages" role="log" aria-live="polite" aria-label="Nico chat messages">
+              <div class="message assistant-message nico-msg">
+                <span class="message-author nico-author">NICO</span>
+                <div class="message-body"><p>Hey. I'm Nico, your Orion assistant. What's on your mind?</p></div>
+              </div>
+            </div>
+            <form class="chat-form" id="chat-form">
+              <label class="visually-hidden" for="prompt-box">Message Nico</label>
+              <textarea id="prompt-box" rows="2" maxlength="4000" placeholder="Message Nico... (Shift+Enter for newline, Enter to send)" required></textarea>
+              <button id="ask-ai-btn" class="primary btn-nico" type="submit">Send message</button>
+            </form>
+            <p class="chat-hint">Enter to send · Shift+Enter for newline · Built-in tools: Web search, weather, time, system telemetry, calculator &amp; device tasks.</p>
+            <pre id="ai-response" class="visually-hidden" aria-live="polite"></pre>
+          </section>
 
-        <section class="grid summary-grid">
-          <div class="panel">
-            <h3>Connected devices</h3>
-            <ul id="device-list"></ul>
-          </div>
+          <!-- Chat with Zara Panel (Celestial Gold Theme, Jolly & Light) -->
+          <section class="panel chat-panel zara-panel">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow zara-eyebrow">✨ BACKUP OFFLINE MODEL · CELESTIAL GOLD</p>
+                <h3 class="zara-title">Chat with Zara ✨</h3>
+              </div>
+              <div class="chat-controls">
+                <div>
+                  <select id="zara-model-selector" class="model-select zara-model-select" title="Zara's Active Model">
+                    <option value="">Loading models...</option>
+                  </select>
+                  <span class="model-status zara-model-status" id="zara-model-status">Checking…</span>
+                </div>
+                <div class="chat-action-buttons">
+                  <button id="zara-clear-btn" class="secondary-button zara-secondary-btn" type="button">Clear chat</button>
+                </div>
+              </div>
+            </div>
+            <div class="chat-messages zara-messages" id="zara-messages" role="log" aria-live="polite" aria-label="Zara chat messages">
+              <div class="message assistant-message zara-msg">
+                <span class="message-author zara-author">ZARA ✨</span>
+                <div class="message-body"><p>Hey hey! I'm Zara 😊 Nico's cheerful backup. No live web lookups from me (that's Nico's thing!) — but brainstorming, explanations, Orion Q&amp;A, and good vibes? All me! 🎉 What's up?</p></div>
+              </div>
+            </div>
+            <form class="chat-form" id="zara-form">
+              <label class="visually-hidden" for="zara-prompt">Message Zara</label>
+              <textarea id="zara-prompt" rows="2" maxlength="4000" placeholder="Message Zara… (Enter to send, Shift+Enter for newline)" required></textarea>
+              <button id="zara-send-btn" class="primary btn-zara" type="submit">Send ✨</button>
+            </form>
+            <p class="chat-hint zara-hint">Zara is your jolly offline backup — great for chat, ideas &amp; Orion questions! 🌟</p>
+          </section>
 
-          <div class="panel">
-            <h3>Task queue</h3>
-            <ul id="task-list"></ul>
-          </div>
-        </section>
+          <section class="grid summary-grid">
+            <div class="panel">
+              <div class="chat-heading">
+                <h3>Connected devices</h3>
+                <button class="secondary-button" type="button" onclick="document.querySelector('.nav[data-view=\'devices-view\']').click()">Manage ↗</button>
+              </div>
+              <ul id="device-list"></ul>
+            </div>
+
+            <div class="panel">
+              <div class="chat-heading">
+                <h3>Task queue</h3>
+                <button class="secondary-button" type="button" onclick="document.querySelector('.nav[data-view=\'devices-view\']').click()">Manage ↗</button>
+              </div>
+              <ul id="task-list"></ul>
+            </div>
+          </section>
         </div>
 
+        <!-- ==================== DEVICE CONTROL VIEW ==================== -->
+        <section id="devices-view" class="devices-view app-view" hidden aria-labelledby="devices-title">
+          <header class="topbar">
+            <div>
+              <p class="eyebrow">HARDWARE &amp; AUTOMATION CENTER</p>
+              <h2 id="devices-title">Device Control</h2>
+            </div>
+            <div class="status-pill">SQLite Persisted</div>
+          </header>
+          <p class="social-intro">
+            Manage your personal device mesh and queue automation tasks. Devices and task states persist permanently.
+          </p>
+
+          <div class="grid grid-2col">
+            <!-- Add Device Form -->
+            <article class="panel">
+              <p class="eyebrow">REGISTRATION</p>
+              <h3>Register New Device</h3>
+              <form id="device-register-form" class="simple-form">
+                <label for="dev-reg-name">Device Name</label>
+                <input id="dev-reg-name" type="text" placeholder="e.g. tablet-pro, backup-node" required maxlength="64" />
+                <label for="dev-reg-kind">Device Type</label>
+                <select id="dev-reg-kind">
+                  <option value="desktop">Desktop / Workstation</option>
+                  <option value="phone">Smartphone</option>
+                  <option value="tablet">Tablet</option>
+                  <option value="server">Server / Node</option>
+                  <option value="iot">IoT / Sensor</option>
+                </select>
+                <button class="primary" type="submit">Register Device</button>
+                <span id="dev-reg-status" class="chat-hint" role="status"></span>
+              </form>
+            </article>
+
+            <!-- Enqueue Task Form -->
+            <article class="panel">
+              <p class="eyebrow">AUTOMATION DISPATCH</p>
+              <h3>Queue Device Task</h3>
+              <form id="task-enqueue-form" class="simple-form">
+                <label for="task-target-device">Target Device</label>
+                <select id="task-target-device" required>
+                  <option value="">Select a device...</option>
+                </select>
+                <label for="task-description">Task Description</label>
+                <input id="task-description" type="text" placeholder="e.g. Sync offline archives, run diagnostics" required maxlength="200" />
+                <button class="primary" type="submit">Enqueue Task</button>
+                <span id="task-enqueue-status" class="chat-hint" role="status"></span>
+              </form>
+            </article>
+          </div>
+
+          <!-- Registered Devices Management -->
+          <section class="panel section-gap">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">ACTIVE MESH</p>
+                <h3>Registered Devices</h3>
+              </div>
+              <button id="refresh-devices-btn" class="secondary-button" type="button">Refresh Devices</button>
+            </div>
+            <div id="devices-manager-grid" class="devices-cards-grid">
+              <p class="chat-hint">Loading devices...</p>
+            </div>
+          </section>
+
+          <!-- Interactive Task Queue -->
+          <section class="panel section-gap">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">PIPELINE EXECUTION</p>
+                <h3>Device Task Queue</h3>
+              </div>
+              <div class="filter-chips" id="task-queue-filters">
+                <button class="filter-chip active" type="button" data-filter="all">All</button>
+                <button class="filter-chip" type="button" data-filter="queued">Queued</button>
+                <button class="filter-chip" type="button" data-filter="in_progress">In Progress</button>
+                <button class="filter-chip" type="button" data-filter="completed">Completed</button>
+              </div>
+            </div>
+            <div id="interactive-task-table" class="interactive-tasks-container">
+              <p class="chat-hint">Loading task pipeline...</p>
+            </div>
+          </section>
+        </section>
+
+        <!-- ==================== AI STUDIO VIEW ==================== -->
+        <section id="ai-studio-view" class="ai-studio-view app-view" hidden aria-labelledby="studio-title">
+          <header class="topbar">
+            <div>
+              <p class="eyebrow">GENERATIVE AI &amp; VISUAL ARTS</p>
+              <h2 id="studio-title">AI Studio</h2>
+            </div>
+            <div class="status-pill">Archer Stable Diffusion Turbo</div>
+          </header>
+          <p class="social-intro">
+            Full-featured visual creative suite. Generate images with curated art styles and manage your generated gallery.
+          </p>
+
+          <div class="panel">
+            <div class="chat-heading">
+              <div class="archer-title">
+                <span class="archer-mark" aria-hidden="true">➶</span>
+                <div>
+                  <p class="eyebrow">CREATIVE GENERATOR</p>
+                  <h3>Archer Generator</h3>
+                </div>
+              </div>
+              <span id="studio-archer-status" class="model-status">Checking models...</span>
+            </div>
+
+            <form id="studio-archer-form" class="archer-form">
+              <label for="studio-archer-prompt">Prompt Description</label>
+              <textarea id="studio-archer-prompt" rows="3" maxlength="1000" placeholder="A futuristic warrior guarding an emerald citadel, volumetric lighting, 8k resolution..." required></textarea>
+
+              <div class="prompt-presets">
+                <span class="presets-label">Style Presets:</span>
+                <button type="button" class="preset-btn" data-preset="Cyberpunk neon lighting, rain-slicked city streets, hyperdetailed digital art">Cyberpunk</button>
+                <button type="button" class="preset-btn" data-preset="Cinematic concept art, dramatic golden hour lighting, epic composition, unreal engine 5 render">Cinematic</button>
+                <button type="button" class="preset-btn" data-preset="Dark fantasy, brooding atmosphere, intricate armor and relics, oil painting style">Dark Fantasy</button>
+                <button type="button" class="preset-btn" data-preset="Vibrant anime aesthetic, Studio Ghibli inspired, lush scenery, soft lighting">Anime</button>
+                <button type="button" class="preset-btn" data-preset="Hyper-photorealistic, 85mm portrait photography, soft natural bokeh, highly detailed">Photorealistic</button>
+              </div>
+
+              <div class="archer-controls">
+                <div>
+                  <label for="studio-archer-ratio">Resolution</label>
+                  <select id="studio-archer-ratio">
+                    <option value="512x512">Square (512 × 512)</option>
+                    <option value="768x512">Landscape (768 × 512)</option>
+                    <option value="512x768">Portrait (512 × 768)</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="studio-archer-mode">Backend Mode</label>
+                  <select id="studio-archer-mode">
+                    <option value="auto">Auto (Online, fallback to Offline)</option>
+                    <option value="offline">Offline (Local SD-Turbo)</option>
+                    <option value="online">Online (Pollinations Cloud)</option>
+                  </select>
+                </div>
+                <button id="studio-generate-btn" class="primary" type="submit">Generate Artwork</button>
+              </div>
+            </form>
+
+            <span id="studio-generate-status" class="chat-hint" role="status"></span>
+            <div id="studio-preview-box" class="studio-preview-wrapper" hidden>
+              <img id="studio-preview-img" class="archer-preview" alt="Generated artwork preview" />
+              <div class="preview-actions">
+                <a id="studio-download-btn" class="secondary-button" href="#" download="archer-art.png">Download Image</a>
+                <button id="studio-open-btn" class="secondary-button" type="button">Open Full Screen</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Generated Image Gallery -->
+          <section class="panel section-gap">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">ARCHIVE &amp; ASSETS</p>
+                <h3>Generated Gallery</h3>
+              </div>
+              <button id="refresh-gallery-btn" class="secondary-button" type="button">Refresh Gallery</button>
+            </div>
+            <div id="gallery-grid" class="gallery-grid">
+              <p class="chat-hint">Loading artwork gallery...</p>
+            </div>
+          </section>
+        </section>
+
+        <!-- ==================== SOCIAL HUB VIEW ==================== -->
         <section id="social-view" class="social-view app-view" hidden aria-labelledby="social-title">
           <header class="topbar">
             <div>
@@ -135,7 +433,7 @@
                 <span class="social-icon" aria-hidden="true">W</span>
                 <div><p class="eyebrow">MESSAGING</p><h3>WhatsApp</h3></div>
               </div>
-              <span class="connection-state">NOT LINKED</span>
+              <span class="connection-state">READY</span>
               <p>Open WhatsApp Web to review chats, calls, and updates.</p>
               <button class="secondary-button open-social" type="button" data-platform="whatsapp">Open WhatsApp Web ↗</button>
             </article>
@@ -145,7 +443,7 @@
                 <span class="social-icon" aria-hidden="true">D</span>
                 <div><p class="eyebrow">COMMUNITY</p><h3>Discord</h3></div>
               </div>
-              <span class="connection-state">NOT LINKED</span>
+              <span class="connection-state">READY</span>
               <p>Open Discord to view your servers, channels, and direct messages.</p>
               <button class="secondary-button open-social" type="button" data-platform="discord">Open Discord ↗</button>
             </article>
@@ -176,7 +474,7 @@
               <button id="instagram-connect" class="primary" type="button">Connect Instagram</button>
               <button id="instagram-disconnect" class="secondary-button" type="button" hidden>Disconnect</button>
               <button id="instagram-refresh" class="secondary-button" type="button" hidden>Refresh access</button>
-              <button id="instagram-load-profile" class="secondary-button" type="button" hidden>Load profile & media</button>
+              <button id="instagram-load-profile" class="secondary-button" type="button" hidden>Load profile &amp; media</button>
               <button id="instagram-load-insights" class="secondary-button" type="button" hidden>Load insights</button>
               <button id="instagram-load-inbox" class="secondary-button" type="button" hidden>Load inbox</button>
             </div>
@@ -235,6 +533,7 @@
           </section>
         </section>
 
+        <!-- ==================== TASKS VIEW ==================== -->
         <section id="tasks-view" class="app-view" hidden aria-labelledby="tasks-title">
           <header class="topbar">
             <div>
@@ -244,7 +543,7 @@
             <span id="task-stream-status" class="model-status" role="status">Connecting to live activity...</span>
           </header>
           <p class="social-intro">
-            Live progress for Orion operations, including Nico responses, Archer image generation, Instagram actions, and device task requests. Submitted code is not executed.
+            Live progress for Orion operations, including Nico responses, Archer image generation, Instagram actions, and device task requests.
           </p>
           <div class="task-metrics" aria-label="Task run totals">
             <article class="panel task-metric">
@@ -266,7 +565,10 @@
                 <p class="eyebrow">RECENT RUNS</p>
                 <h3 id="task-runs-title">Operations</h3>
               </div>
-              <button id="task-refresh" class="secondary-button" type="button">Refresh history</button>
+              <div class="chat-controls">
+                <button id="task-clear-btn" class="secondary-button" type="button">Clear finished</button>
+                <button id="task-refresh" class="secondary-button" type="button">Refresh history</button>
+              </div>
             </div>
             <div id="task-runs" class="task-runs" aria-live="polite">
               <p class="chat-hint">Loading recent task activity...</p>
@@ -276,6 +578,15 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=15"></script>
+    <!-- Image Lightbox Modal -->
+    <div id="image-modal" class="image-modal" hidden>
+      <div class="image-modal-content">
+        <button id="close-modal-btn" class="modal-close" type="button">&times;</button>
+        <img id="modal-img" alt="Enlarged artwork" />
+        <p id="modal-caption" class="modal-caption"></p>
+      </div>
+    </div>
+
+    <script src="/static/app.js?v=34"></script>
   </body>
 </html>

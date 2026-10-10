@@ -104,6 +104,20 @@ class ConversationMemory:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def export(self, conversation_id: str, export_format: str = "markdown") -> str:
+        import json
+        messages = self.recent(conversation_id, limit=500)
+        if export_format.lower() == "json":
+            return json.dumps(messages, indent=2, ensure_ascii=False)
+        lines = [f"# Orion Chat Export - Conversation: {conversation_id}", ""]
+        for msg in messages:
+            sender = "Nico de Angelo" if msg.get("role") == "assistant" else "User"
+            timestamp = msg.get("created_at", "")
+            lines.append(f"### {sender} ({timestamp})")
+            lines.append(msg.get("content", ""))
+            lines.append("")
+        return "\n".join(lines)
+
     def context(self, conversation_id: str, query: str, recent_limit: int = 8) -> list[dict]:
         terms = [
             term for term in dict.fromkeys(re.findall(r"[A-Za-z0-9_]{3,}", query.lower()))

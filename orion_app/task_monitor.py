@@ -56,11 +56,19 @@ class TaskMonitor:
             self._publish_locked(run)
             self._trim_history_locked()
 
-    def list_runs(self, limit: int = 50) -> list[dict]:
-        if not 1 <= limit <= self._max_runs:
+    def list_runs(self, limit: int | None = None) -> list[dict]:
+        if limit is not None and not 1 <= limit <= self._max_runs:
             raise ValueError(f"limit must be between 1 and {self._max_runs}.")
         with self._lock:
-            return copy.deepcopy(self._runs[:limit])
+            if limit is not None:
+                return copy.deepcopy(self._runs[:limit])
+            return copy.deepcopy(self._runs)
+
+    def clear_finished(self) -> int:
+        with self._lock:
+            before = len(self._runs)
+            self._runs = [run for run in self._runs if run["status"] == "running"]
+            return before - len(self._runs)
 
     @contextmanager
     def subscribe(self) -> Iterator[queue.Queue[dict]]:
