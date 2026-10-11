@@ -1,0 +1,19 @@
+{
+  "name": "Orion The Warrior",
+  "short_name": "Orion",
+  "description": "Orion Local AI & Device Management Platform",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#7c3aed",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/static/orion-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
+

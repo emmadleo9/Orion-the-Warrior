@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+from dotenv import load_dotenv
+load_dotenv()
 import json
 import os
 import queue
@@ -9,20 +10,28 @@ from pathlib import Path
 from typing import Callable, Literal, TypeVar
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 
-from .ai import ArcherGenerationError, LiveDataError, NicoAssistant, NicoModelError, ZaraAssistant
+from .config import load_config
+
+load_config()
+
+from .ai import ArcherGenerationError, LiveDataError, NicoAssistant, NicoModelError, LeoAssistant, ZaraAssistant
 from .devices import DeviceManager
-from .instagram import InstagramError, InstagramIntegration
+from .instagram import InstagramError, InstagramIntegration, InstagramManager
 from .launcher import LauncherMonitor
 from .memory import MAX_MESSAGES_PER_CONVERSATION, ConversationMemory
 from .task_monitor import TaskMonitor
 from .telemetry import get_system_telemetry
+from .telegram_client import telegram_client
+from .telegram_proxy_manager import telegram_proxy_manager
 
 BASE_DIR = Path(__file__).resolve().parent
 assistant = NicoAssistant()
-zara = ZaraAssistant()
+leo = LeoAssistant()
+zara = leo  # Backwards compatibility alias
 device_manager = DeviceManager()
 task_monitor = TaskMonitor()
 memory = ConversationMemory(
@@ -37,13 +46,32 @@ Result = TypeVar("Result")
 async def lifespan(_app: FastAPI):
     """Follow the Orion launcher log for the lifetime of the server."""
     launcher_monitor.start()
+    # Start Telegram proxy manager background scheduler
+    try:
+        telegram_proxy_manager.start_scheduler()
+        telegram_client.start()
+    except Exception:
+        pass
     try:
         yield
     finally:
         launcher_monitor.stop()
+        try:
+            telegram_proxy_manager.stop_scheduler()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="Orion the Warrior", version="0.1.0", lifespan=lifespan)
+
+# Allow the phone (and any origin) to reach the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def run_tracked(title: str, category: str, operation: Callable[[], Result]) -> Result:
@@ -102,17 +130,18 @@ class InstagramReplyRequest(BaseModel):
         return message
 
 
-class InstagramMessageRequest(BaseModel):
+class InstagramSendRequest(BaseModel):
     recipient_id: str = Field(min_length=1, max_length=200)
-    message: str = Field(min_length=1, max_length=1000)
+    text: str = Field(default="", max_length=1000)
+    message: str = Field(default="", max_length=1000)
 
-    @field_validator("message")
+    @field_validator("text", "message", mode="after")
     @classmethod
-    def message_must_not_be_blank(cls, message: str) -> str:
-        message = message.strip()
-        if not message:
-            raise ValueError("message must not be blank")
-        return message
+    def strip_text(cls, v: str) -> str:
+        return v.strip() if v else ""
+
+
+InstagramMessageRequest = InstagramSendRequest
 
 
 class InstagramPublishRequest(BaseModel):
@@ -123,6 +152,39 @@ class InstagramPublishRequest(BaseModel):
 @app.get("/")
 def read_index() -> FileResponse:
     return FileResponse(BASE_DIR / "static" / "index.html")
+
+
+@app.get("/instagram", response_class=HTMLResponse)
+def read_instagram_inbox() -> HTMLResponse:
+    """Built-in Instagram inbox for Orion, styled with dark theme and Tailwind."""
+    inbox_html = BASE_DIR / "static" / "instagram.html"
+    if not inbox_html.is_file():
+        raise HTTPException(status_code=404, detail="Instagram inbox view not found")
+    return HTMLResponse(content=inbox_html.read_text(encoding="utf-8"))
+
+
+@app.get("/telegram", response_class=HTMLResponse)
+def read_telegram() -> HTMLResponse:
+    """Built-in Telegram client for Orion, styled with Orion warrior dark theme."""
+    tg_html = BASE_DIR / "static" / "telegram.html"
+    if not tg_html.is_file():
+        raise HTTPException(status_code=404, detail="Telegram module not found")
+    return HTMLResponse(content=tg_html.read_text(encoding="utf-8"))
+
+
+@app.get("/manifest.json")
+def read_manifest() -> FileResponse:
+    return FileResponse(BASE_DIR / "static" / "manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def read_sw() -> FileResponse:
+    """Serve the service worker from root scope so it can control all pages."""
+    return FileResponse(
+        BASE_DIR / "static" / "sw.js",
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/"},
+    )
 
 
 @app.get("/static/{filename}")
@@ -136,6 +198,12 @@ def read_static(filename: str) -> FileResponse:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "app": "Orion the Warrior", "assistant": assistant.name}
+
+
+@app.get("/api/diagnostics")
+def diagnostics() -> dict:
+    """System-wide diagnostic snapshot used by the dashboard."""
+    return get_system_telemetry()
 
 
 @app.get("/api/launcher/status")
@@ -289,6 +357,22 @@ def instagram_reply(comment_id: str, payload: InstagramReplyRequest) -> dict:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
+@app.get("/api/instagram/inbox")
+def instagram_inbox() -> dict:
+    status = instagram.status()
+    connected = bool(status.get("connected", False))
+    conversations = []
+    if connected:
+        try:
+            conversations = instagram.get_conversations()
+        except Exception:
+            conversations = []
+    return {
+        "connected": connected,
+        "conversations": conversations,
+    }
+
+
 @app.get("/api/instagram/conversations")
 def instagram_conversations() -> dict:
     try:
@@ -301,25 +385,45 @@ def instagram_conversations() -> dict:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
+@app.get("/api/instagram/conversation/{conversation_id}/messages")
 @app.get("/api/instagram/conversations/{conversation_id}/messages")
 def instagram_conversation_messages(conversation_id: str) -> dict:
+    if not conversation_id or len(conversation_id) > 200:
+        raise HTTPException(status_code=400, detail="Invalid conversation_id")
     try:
-        return run_tracked(
+        raw = run_tracked(
             "Load Instagram conversation",
             "social",
             lambda: instagram.conversation_messages(conversation_id),
         )
+        messages = []
+        if isinstance(raw, dict):
+            if "messages" in raw and isinstance(raw["messages"], dict):
+                messages = raw["messages"].get("data", [])
+            elif "data" in raw and isinstance(raw["data"], list):
+                messages = raw["data"]
+            elif "messages" in raw and isinstance(raw["messages"], list):
+                messages = raw["messages"]
+        return {
+            "conversation_id": conversation_id,
+            "messages": messages,
+            "raw": raw,
+        }
     except InstagramError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
+@app.post("/api/instagram/send")
 @app.post("/api/instagram/messages")
-def instagram_send_message(payload: InstagramMessageRequest) -> dict:
+def instagram_send_message(payload: InstagramSendRequest) -> dict:
+    content = payload.text or payload.message
+    if not content:
+        raise HTTPException(status_code=400, detail="text or message must not be blank")
     try:
         return run_tracked(
             "Send Instagram message",
             "social",
-            lambda: instagram.send_message(payload.recipient_id, payload.message),
+            lambda: instagram.send_message(payload.recipient_id, text=content),
         )
     except InstagramError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
@@ -456,14 +560,15 @@ def archer_status() -> dict:
     return assistant.archer_status()
 
 
-# ── Zara — backup offline chatbot ────────────────────────────────────────────
+# ── Leo Valdez — backup offline chatbot ──────────────────────────────────────────
 
+@app.get("/api/leo/status")
 @app.get("/api/zara/status")
-def zara_status() -> dict:
-    return zara.model_status()
+def leo_status() -> dict:
+    return leo.model_status()
 
 
-class ZaraChatRequest(BaseModel):
+class LeoChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=64, pattern="^[A-Za-z0-9_-]+$")
     message: str = Field(min_length=1, max_length=4000)
 
@@ -476,49 +581,53 @@ class ZaraChatRequest(BaseModel):
         return v
 
 
+ZaraChatRequest = LeoChatRequest
+
+
+@app.post("/api/leo/chat")
 @app.post("/api/zara/chat")
-def zara_chat(payload: ZaraChatRequest) -> StreamingResponse:
-    """Streaming chat endpoint for Zara, Orion's jolly backup assistant."""
-    zara_conv_key = f"zara:{payload.conversation_id}"
-    history = memory.recent(zara_conv_key, limit=30)
-    memory.add_message(zara_conv_key, "user", payload.message)
-    run_id = task_monitor.start("Zara assistant response", "ai")
-    task_monitor.log(run_id, "Zara is thinking…")
+def leo_chat(payload: LeoChatRequest) -> StreamingResponse:
+    """Streaming chat endpoint for Leo Valdez, Orion's witty backup mechanic assistant."""
+    conv_key = f"leo:{payload.conversation_id}"
+    history = memory.recent(conv_key, limit=30)
+    memory.add_message(conv_key, "user", payload.message)
+    run_id = task_monitor.start("Leo Valdez assistant response", "ai")
+    task_monitor.log(run_id, "Leo Valdez is tinkering with a response… 🔥")
     events: queue.Queue[dict | None] = queue.Queue()
 
-    def run_zara() -> None:
+    def run_leo() -> None:
         streamed_chunks = 0
 
         def on_delta(text: str) -> None:
             nonlocal streamed_chunks
             streamed_chunks += 1
             if streamed_chunks == 1:
-                task_monitor.log(run_id, "Zara stream started.")
+                task_monitor.log(run_id, "Leo stream started.")
             events.put({"type": "delta", "content": text})
 
         try:
-            result = zara.chat(payload.message, history=history, on_delta=on_delta)
+            result = leo.chat(payload.message, history=history, on_delta=on_delta)
         except NicoModelError as error:
-            task_monitor.finish(run_id, "failed", "Zara could not complete the request.")
+            task_monitor.finish(run_id, "failed", "Leo Valdez could not complete the request.")
             events.put({"type": "error", "message": str(error)})
         except Exception:
-            task_monitor.finish(run_id, "failed", "Zara encountered an unexpected error.")
+            task_monitor.finish(run_id, "failed", "Leo Valdez encountered an unexpected error.")
             events.put({"type": "error", "message": "An unexpected error occurred."})
         else:
-            memory.add_message(zara_conv_key, "assistant", result["message"])
-            task_monitor.finish(run_id, "completed", "Zara finished her response. ✨")
+            memory.add_message(conv_key, "assistant", result["message"])
+            task_monitor.finish(run_id, "completed", "Leo Valdez finished his response. 🔥")
             events.put({
                 "type": "done",
                 "message": result["message"],
                 "model": result["model"],
-                "memory_count": memory.count(zara_conv_key),
+                "memory_count": memory.count(conv_key),
                 "memory_limit": MAX_MESSAGES_PER_CONVERSATION,
             })
         finally:
             events.put(None)
 
     def stream_events():
-        worker = threading.Thread(target=run_zara, daemon=True)
+        worker = threading.Thread(target=run_leo, daemon=True)
         worker.start()
         while True:
             try:
@@ -537,10 +646,11 @@ def zara_chat(payload: ZaraChatRequest) -> StreamingResponse:
     )
 
 
+@app.delete("/api/leo/memory/{conversation_id}")
 @app.delete("/api/zara/memory/{conversation_id}")
-def clear_zara_memory(conversation_id: str) -> dict:
-    zara_conv_key = f"zara:{conversation_id}"
-    memory.clear(zara_conv_key)
+def clear_leo_memory(conversation_id: str) -> dict:
+    memory.clear(f"leo:{conversation_id}")
+    memory.clear(f"zara:{conversation_id}")
     return {"cleared": True, "conversation_id": conversation_id}
 
 
@@ -641,7 +751,9 @@ def system_processes(limit: int = 30) -> dict:
                 "name": (info["name"] or "?")[:40],
                 "status": info["status"] or "unknown",
                 "cpu": round(info["cpu_percent"] or 0.0, 1),
+                "cpu_percent": round(info["cpu_percent"] or 0.0, 1),
                 "mem_mb": mem_mb,
+                "memory_mb": mem_mb,
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -698,6 +810,7 @@ def export_conversation_memory(conversation_id: str, format: str = "markdown") -
 
 
 @app.get("/api/ollama/models")
+@app.get("/api/ai/models")
 def get_ollama_models() -> dict:
     return assistant.model_status()
 
@@ -731,3 +844,131 @@ def delete_archer_image(filename: str) -> dict:
 def clear_task_runs() -> dict:
     cleared = task_monitor.clear_finished()
     return {"cleared_count": cleared}
+
+
+# ---------------------------------------------------------------------------
+# Telegram Module Endpoints
+# ---------------------------------------------------------------------------
+from fastapi import File, Form, UploadFile  # noqa: E402 – imported late to keep top clean
+
+
+@app.get("/api/telegram/status")
+def telegram_status() -> dict:
+    """Return Telegram connection and proxy status."""
+    return telegram_client.get_status()
+
+
+@app.post("/api/telegram/login")
+def telegram_login(payload: dict) -> dict:
+    phone = str(payload.get("phone", "")).strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone is required")
+    return telegram_client.login(phone)
+
+
+@app.post("/api/telegram/verify")
+def telegram_verify(payload: dict) -> dict:
+    code = str(payload.get("code", "")).strip()
+    phone_code_hash = str(payload.get("phone_code_hash", "")).strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required")
+    return telegram_client.verify_code(phone_code_hash, code)
+
+
+@app.get("/api/telegram/me")
+def telegram_me() -> dict:
+    return telegram_client.get_me()
+
+
+@app.get("/api/telegram/chats")
+def telegram_chats(limit: int = 100) -> list:
+    return telegram_client.get_chats(limit=limit)
+
+
+@app.get("/api/telegram/messages/{chat_id}")
+def telegram_messages(chat_id: int, limit: int = 50) -> list:
+    return telegram_client.get_messages(chat_id, limit=limit)
+
+
+@app.post("/api/telegram/send")
+def telegram_send(payload: dict) -> dict:
+    chat_id = payload.get("chat_id")
+    text = str(payload.get("text", "")).strip()
+    if not chat_id or not text:
+        raise HTTPException(status_code=400, detail="chat_id and text are required")
+    return telegram_client.send_message(int(chat_id), text)
+
+
+@app.post("/api/telegram/send_media")
+async def telegram_send_media(
+    chat_id: int = Form(...),
+    file: UploadFile = File(...),
+    caption: str = Form(default=""),
+) -> dict:
+    import shutil
+    import tempfile
+
+    suffix = Path(file.filename).suffix if file.filename else ""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+    try:
+        return telegram_client.send_media(chat_id, tmp_path, caption)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+@app.get("/api/telegram/profile/{user_id}")
+def telegram_profile(user_id: str) -> dict:
+    return telegram_client.get_profile(user_id)
+
+
+@app.post("/api/telegram/profile/edit")
+def telegram_edit_profile(payload: dict) -> dict:
+    first_name = str(payload.get("first_name", "")).strip()
+    last_name = str(payload.get("last_name", "")).strip()
+    bio = str(payload.get("bio", "")).strip()
+    if not first_name:
+        raise HTTPException(status_code=400, detail="first_name is required")
+    return telegram_client.edit_profile(first_name, last_name, bio)
+
+
+@app.get("/api/telegram/contacts")
+def telegram_contacts() -> list:
+    return telegram_client.get_contacts()
+
+
+@app.post("/api/telegram/search")
+def telegram_search(payload: dict) -> list:
+    query = str(payload.get("query", "")).strip()
+    return telegram_client.search_chats(query)
+
+
+@app.get("/api/telegram/members/{chat_id}")
+def telegram_members(chat_id: int) -> list:
+    return telegram_client.get_chat_members(chat_id)
+
+
+@app.get("/api/telegram/proxies")
+def telegram_proxies_list() -> list:
+    return telegram_proxy_manager.get_proxies()
+
+
+@app.post("/api/telegram/proxies")
+def telegram_add_proxy(payload: dict) -> dict:
+    return telegram_proxy_manager.add_proxy(payload)
+
+
+@app.post("/api/telegram/proxies/refresh")
+def telegram_refresh_proxies() -> dict:
+    proxies = telegram_proxy_manager.test_all_proxies()
+    best = telegram_proxy_manager.get_best_proxy()
+    return {"refreshed": True, "proxies_count": len(proxies), "best_proxy": best}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("orion_app.main:app", host="0.0.0.0", port=8000, reload=False)

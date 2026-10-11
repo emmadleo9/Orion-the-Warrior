@@ -55,6 +55,24 @@ const closeModalBtn = document.getElementById('close-modal-btn');
 
 // Social Hub Elements
 const MEMORY_KEY = 'orion-conversation-id';
+
+function getConversationId() {
+  try {
+    let id = localStorage.getItem(MEMORY_KEY);
+    if (!id) {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        id = crypto.randomUUID();
+      } else {
+        id = 'orion-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
+      }
+      try { localStorage.setItem(MEMORY_KEY, id); } catch (_) {}
+    }
+    return id;
+  } catch (_) {
+    return 'orion-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
+  }
+}
+
 const conversationId = getConversationId();
 const SOCIAL_DRAFT_KEY = 'orion-social-draft:';
 const socialPlatform = document.getElementById('social-platform');
@@ -94,68 +112,141 @@ const termRunLogCounts = new Map();
 const socialPlatforms = {
   whatsapp: { name: 'WhatsApp', url: 'https://web.whatsapp.com/' },
   discord: { name: 'Discord', url: 'https://discord.com/app' },
-  instagram: { name: 'Instagram', url: 'https://www.instagram.com/' },
+  instagram: { name: 'Instagram', url: '/instagram' },
 };
 
-function getConversationId() {
-  let id = localStorage.getItem(MEMORY_KEY);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(MEMORY_KEY, id);
-  }
-  return id;
-}
+const API = (path) => path.startsWith('/api') ? path : '/api/' + (path.startsWith('/') ? path.slice(1) : path);
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  const finalUrl = url.startsWith('/api') || url.startsWith('/') ? url : API(url);
+  try {
+    const response = await fetch(finalUrl, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new Error(error.detail || 'Request failed');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `Request failed: ${response.status}` }));
+      console.error(`[ORION] fetch error for ${finalUrl}:`, error);
+      throw new Error(error.detail || `Request failed: ${response.status}`);
+    }
+
+    return response.json();
+  } catch (err) {
+    console.error(`[ORION] request exception for ${finalUrl}:`, err);
+    throw err;
   }
-
-  return response.json();
 }
 
 /* ==========================================================================
-   SYSTEM TELEMETRY
+   SYSTEM TELEMETRY & DIAGNOSTICS
    ========================================================================== */
-async function loadSystemTelemetry() {
+async function loadMetrics() {
   try {
-    const data = await fetchJson('/api/system/metrics');
-    // Dashboard strip
-    if (document.getElementById('telem-cpu-val')) {
-      const cpuVal = data.cpu?.usage_percent ?? 0;
-      document.getElementById('telem-cpu-val').textContent = `${cpuVal}%`;
-      document.getElementById('telem-cpu-bar').style.width = `${Math.min(100, cpuVal)}%`;
+    const res = await fetch('/api/diagnostics', { cache: 'no-store' });
+    if (!res.ok) throw new Error('diagnostics failed ' + res.status);
+    const data = await res.json();
+    console.log('[ORION] diagnostics data:', data);
+
+    const cpu = Number(data.cpu?.usage_percent ?? data.cpu_percent ?? 0);
+    const ram = Number(data.memory?.usage_percent ?? data.memory_percent ?? data.ram_percent ?? 0);
+    const disk = Number(data.disk?.usage_percent ?? data.disk_percent ?? 0);
+
+    const cpuFix = Math.min(100, Math.max(0, isNaN(cpu) ? 0 : cpu));
+    const ramFix = Math.min(100, Math.max(0, isNaN(ram) ? 0 : ram));
+    const diskFix = Math.min(100, Math.max(0, isNaN(disk) ? 0 : disk));
+
+    // Update all possible dashboard selectors - robust
+    function setTextByLabel(labelUpper, value) {
+      const all = document.querySelectorAll('div, span, p');
+      for (const el of all) {
+        if (el.textContent.toUpperCase().trim() === labelUpper) {
+          // find sibling with % or --%
+          let sib = el.nextElementSibling;
+          let attempts = 0;
+          while (sib && attempts < 5) {
+            if (sib.textContent.includes('%') || sib.textContent.includes('--')) {
+              sib.textContent = Math.round(value) + '%';
+              return true;
+            }
+            sib = sib.nextElementSibling;
+            attempts++;
+          }
+          // check parent card
+          const card = el.closest('div');
+          if (card) {
+            const pct = Array.from(card.querySelectorAll('div')).find(
+              (d) => d.textContent.trim() === '--%' || (d.textContent.includes('%') && d !== el)
+            );
+            if (pct) {
+              pct.textContent = Math.round(value) + '%';
+              return true;
+            }
+          }
+        }
+      }
+      return false;
     }
-    if (document.getElementById('telem-ram-val')) {
-      const ramVal = data.memory?.usage_percent ?? 0;
-      document.getElementById('telem-ram-val').textContent = `${ramVal}%`;
-      document.getElementById('telem-ram-bar').style.width = `${Math.min(100, ramVal)}%`;
-    }
-    if (document.getElementById('telem-disk-val')) {
-      const diskVal = data.disk?.usage_percent ?? 0;
-      document.getElementById('telem-disk-val').textContent = `${diskVal}%`;
-      document.getElementById('telem-disk-bar').style.width = `${Math.min(100, diskVal)}%`;
-    }
-    if (document.getElementById('telem-uptime-val')) {
-      document.getElementById('telem-uptime-val').textContent = data.uptime?.formatted || 'Active';
-      document.getElementById('telem-os-val').textContent = `${data.platform?.system || 'Host'} · Python ${data.platform?.python_version || ''}`;
-    }
-    // Sidebar stats
-    if (document.getElementById('sb-cpu-val')) {
-      document.getElementById('sb-cpu-val').textContent = `${data.cpu?.usage_percent ?? 0}%`;
-      document.getElementById('sb-ram-val').textContent = `${data.memory?.usage_percent ?? 0}%`;
-      document.getElementById('sb-uptime-val').textContent = data.uptime?.formatted || '--';
-    }
-  } catch (error) {
-    // Graceful silent ignore on telemetry error
+
+    setTextByLabel('CPU LOAD', cpuFix);
+    setTextByLabel('MEMORY RAM', ramFix);
+    setTextByLabel('DISK STORAGE', diskFix);
+    setTextByLabel('RAM', ramFix);
+    setTextByLabel('DISK', diskFix);
+    setTextByLabel('CPU:', cpuFix);
+    setTextByLabel('RAM:', ramFix);
+
+    // Also direct ID update if exists
+    const byId = (id, val) => {
+      const e = document.getElementById(id);
+      if (e) e.textContent = Math.round(val) + '%';
+    };
+    byId('cpu-load', cpuFix);
+    byId('ram-load', ramFix);
+    byId('disk-load', diskFix);
+    byId('cpu_percent', cpuFix);
+    byId('memory_percent', ramFix);
+    byId('disk_percent', diskFix);
+    byId('cpu', cpuFix);
+    byId('ram', ramFix);
+    byId('disk', diskFix);
+
+    // Existing Orion element IDs
+    byId('telem-cpu-val', cpuFix);
+    byId('telem-ram-val', ramFix);
+    byId('telem-disk-val', diskFix);
+    byId('sb-cpu-val', cpuFix);
+    byId('sb-ram-val', ramFix);
+
+    const cpuBar = document.getElementById('telem-cpu-bar');
+    if (cpuBar) cpuBar.style.width = `${cpuFix}%`;
+    const ramBar = document.getElementById('telem-ram-bar');
+    if (ramBar) ramBar.style.width = `${ramFix}%`;
+    const diskBar = document.getElementById('telem-disk-bar');
+    if (diskBar) diskBar.style.width = `${diskFix}%`;
+
+    const uptimeStr = data.uptime?.formatted || (data.uptime?.seconds ? `${Math.floor(data.uptime.seconds / 3600)}h ${Math.floor((data.uptime.seconds % 3600) / 60)}m` : 'Active');
+    const telemUptime = document.getElementById('telem-uptime-val');
+    if (telemUptime) telemUptime.textContent = uptimeStr;
+    const sbUptime = document.getElementById('sb-uptime-val');
+    if (sbUptime) sbUptime.textContent = uptimeStr;
+    const osEl = document.getElementById('telem-os-val');
+    if (osEl) osEl.textContent = `${data.platform?.system || data.platform || 'Host'} · Python ${data.platform?.python_version || ''}`;
+
+  } catch (err) {
+    console.error('[ORION] metrics error:', err);
   }
 }
+
+const loadSystemTelemetry = loadMetrics;
+const updateTelemetry = loadMetrics;
+window.updateTelemetry = loadMetrics;
+window.loadMetrics = loadMetrics;
+window.loadSystemTelemetry = loadMetrics;
+
+setInterval(loadMetrics, 2000);
+window.addEventListener('load', loadMetrics);
+loadMetrics();
 
 async function loadLauncherState() {
   const badge = document.getElementById('diag-launcher-state');
@@ -178,11 +269,10 @@ async function loadLauncherState() {
   } catch (err) {
     badge.textContent = 'BAT LINK · --';
     badge.className = 'diag-launcher-state';
+    console.error('[ORION] launcher status error:', err);
   }
 }
 
-setInterval(loadSystemTelemetry, 4000);
-loadSystemTelemetry();
 setInterval(loadLauncherState, 5000);
 loadLauncherState();
 
@@ -210,14 +300,16 @@ async function loadProcessList() {
     }
 
     const rows = procs.map(p => {
+      const cpuNum = p.cpu_percent ?? p.cpu ?? 0;
+      const memNum = p.mem_mb ?? p.memory_mb ?? 0;
       // CPU colour class
-      const cpuCls = p.cpu >= 20 ? 'hot' : p.cpu >= 5 ? 'warm' : '';
+      const cpuCls = cpuNum >= 20 ? 'hot' : cpuNum >= 5 ? 'warm' : '';
       // Status colour class
       const stCls  = p.status === 'running' ? 'running'
                    : (p.status === 'stopped' || p.status === 'zombie') ? 'stopped' : '';
-      const cpuStr  = p.cpu > 0 ? `${p.cpu}%` : '0%';
-      const memStr  = p.mem_mb >= 1000 ? `${(p.mem_mb / 1024).toFixed(1)}G`
-                                       : `${p.mem_mb}M`;
+      const cpuStr  = cpuNum > 0 ? `${cpuNum}%` : '0%';
+      const memStr  = memNum >= 1000 ? `${(memNum / 1024).toFixed(1)}G`
+                                       : `${memNum}M`;
       return `<div class="tm-row">
         <span class="tm-name" title="${p.name} [PID ${p.pid}]">${p.name}</span>
         <span class="tm-cpu ${cpuCls}">${cpuStr}</span>
@@ -236,66 +328,65 @@ setInterval(loadProcessList, 4000);
 loadProcessList();
 
 /* ==========================================================================
-   ZARA — Backup offline chatbot JS
+   LEO VALDEZ — Backup offline chatbot JS
    ========================================================================== */
-const zaraMessages    = document.getElementById('zara-messages');
-const zaraForm        = document.getElementById('zara-form');
-const zaraPrompt      = document.getElementById('zara-prompt');
-const zaraSendBtn     = document.getElementById('zara-send-btn');
-const zaraModelSel    = document.getElementById('zara-model-selector');
-const zaraModelStatus = document.getElementById('zara-model-status');
-const zaraClearBtn    = document.getElementById('zara-clear-btn');
+const leoMessages    = document.getElementById('leo-messages') || document.getElementById('zara-messages');
+const leoForm        = document.getElementById('leo-form') || document.getElementById('zara-form');
+const leoPrompt      = document.getElementById('leo-prompt') || document.getElementById('zara-prompt');
+const leoSendBtn     = document.getElementById('leo-send-btn') || document.getElementById('zara-send-btn');
+const leoModelSel    = document.getElementById('leo-model-selector') || document.getElementById('zara-model-selector');
+const leoModelStatus = document.getElementById('leo-model-status') || document.getElementById('zara-model-status');
+const leoClearBtn    = document.getElementById('leo-clear-btn') || document.getElementById('zara-clear-btn');
 
-async function loadZaraStatus() {
-  if (!zaraModelStatus) return;
+async function loadLeoStatus() {
+  if (!leoModelStatus) return;
   try {
-    const data = await fetchJson('/api/zara/status');
-    if (zaraModelStatus) zaraModelStatus.textContent = data.status_text || (data.ollama_reachable ? `✨ ${data.model}` : 'Offline');
-    if (zaraModelSel && data.installed_models?.length) {
-      const current = zaraModelSel.value || data.model;
-      zaraModelSel.innerHTML = data.installed_models
+    const data = await fetchJson('/api/leo/status');
+    if (leoModelStatus) leoModelStatus.textContent = data.status_text || (data.ollama_reachable ? `🔥 ${data.model}` : 'Offline');
+    if (leoModelSel && data.installed_models?.length) {
+      const current = leoModelSel.value || data.model;
+      leoModelSel.innerHTML = data.installed_models
         .map(m => `<option value="${m}" ${m === current ? 'selected' : ''}>${m}</option>`)
         .join('');
     }
   } catch (_) {
-    if (zaraModelStatus) zaraModelStatus.textContent = 'Zara offline';
+    if (leoModelStatus) leoModelStatus.textContent = 'Leo offline';
   }
 }
 
-function addZaraMessage(role, text, pending = false) {
-  if (!zaraMessages) return null;
+function addLeoMessage(role, text, pending = false) {
+  if (!leoMessages) return null;
   const div = document.createElement('div');
-  div.className = `message ${role === 'user' ? 'user-message' : 'assistant-message'}`;
+  div.className = `message ${role === 'user' ? 'user-message' : 'assistant-message leo-msg zara-msg'}`;
   if (pending) div.classList.add('pending-message');
   const author = document.createElement('span');
-  author.className = 'message-author' + (role !== 'user' ? ' zara-author' : '');
-  author.textContent = role === 'user' ? 'YOU' : 'ZARA ✨';
+  author.className = 'message-author' + (role !== 'user' ? ' leo-author zara-author' : '');
+  author.textContent = role === 'user' ? 'YOU' : 'LEO VALDEZ 🔥';
   const body = document.createElement('div');
   body.className = 'message-body';
   body.innerHTML = renderMarkdown(text);
   div.append(author, body);
-  zaraMessages.append(div);
-  zaraMessages.scrollTop = zaraMessages.scrollHeight;
+  leoMessages.append(div);
+  leoMessages.scrollTop = leoMessages.scrollHeight;
   return div;
 }
 
-async function askZara() {
-  if (!zaraPrompt || !zaraSendBtn) return;
-  const msg = zaraPrompt.value.trim();
+async function askLeo() {
+  if (!leoPrompt || !leoSendBtn) return;
+  const msg = leoPrompt.value.trim();
   if (!msg) return;
-  zaraPrompt.value = '';
-  zaraSendBtn.disabled = true;
-  addZaraMessage('user', msg);
-  const pendingDiv = addZaraMessage('assistant', '…', true);
+  leoPrompt.value = '';
+  leoSendBtn.disabled = true;
+  addLeoMessage('user', msg);
+  const pendingDiv = addLeoMessage('assistant', '…', true);
 
   try {
-    // Switch model if selector changed
-    const chosenModel = zaraModelSel ? zaraModelSel.value : '';
+    const chosenModel = leoModelSel ? leoModelSel.value : '';
     if (chosenModel) {
-      await fetchJson('/api/zara/status');  // lightweight ping; model switch via env only for now
+      await fetchJson('/api/leo/status');
     }
 
-    const resp = await fetch('/api/zara/chat', {
+    const resp = await fetch('/api/leo/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversation_id: conversationId, message: msg }),
@@ -317,7 +408,7 @@ async function askZara() {
           fullText += event.content;
           if (pendingDiv) {
             pendingDiv.querySelector('.message-body').innerHTML = renderMarkdown(fullText);
-            zaraMessages.scrollTop = zaraMessages.scrollHeight;
+            leoMessages.scrollTop = leoMessages.scrollHeight;
           }
         } else if (event.type === 'done') {
           fullText = event.message || fullText;
@@ -333,33 +424,33 @@ async function askZara() {
   } catch (err) {
     if (pendingDiv) pendingDiv.querySelector('.message-body').innerHTML = `<p class="error-text">⚠️ ${err.message}</p>`;
   } finally {
-    zaraSendBtn.disabled = false;
-    zaraPrompt.focus();
+    leoSendBtn.disabled = false;
+    leoPrompt.focus();
   }
 }
 
-if (zaraForm) {
-  zaraForm.addEventListener('submit', e => { e.preventDefault(); askZara(); });
-  if (zaraPrompt) {
-    zaraPrompt.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); askZara(); }
+if (leoForm) {
+  leoForm.addEventListener('submit', e => { e.preventDefault(); askLeo(); });
+  if (leoPrompt) {
+    leoPrompt.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); askLeo(); }
     });
   }
 }
 
-if (zaraClearBtn) {
-  zaraClearBtn.addEventListener('click', async () => {
-    if (!window.confirm("Clear Zara's conversation memory?")) return;
-    await fetchJson(`/api/zara/memory/${encodeURIComponent(conversationId)}`, { method: 'DELETE' }).catch(() => {});
-    if (zaraMessages) {
-      zaraMessages.innerHTML = '';
-      addZaraMessage('assistant', "Memory wiped! 🧹 Fresh start — what's on your mind? 😊");
+if (leoClearBtn) {
+  leoClearBtn.addEventListener('click', async () => {
+    if (!window.confirm("Clear Leo Valdez's conversation memory?")) return;
+    await fetchJson(`/api/leo/memory/${encodeURIComponent(conversationId)}`, { method: 'DELETE' }).catch(() => {});
+    if (leoMessages) {
+      leoMessages.innerHTML = '';
+      addLeoMessage('assistant', "Memory wiped! 🧹 Fresh start — what are we building today? 🔥🔧");
     }
   });
 }
 
-setInterval(loadZaraStatus, 8000);
-loadZaraStatus();
+setInterval(loadLeoStatus, 8000);
+loadLeoStatus();
 
 /* ==========================================================================
    MARKDOWN & CHAT RENDERING
@@ -1214,7 +1305,10 @@ if (taskClearBtn) {
   });
 }
 
-document.getElementById('task-refresh').addEventListener('click', loadTaskRuns);
+const taskRefreshBtn = document.getElementById('task-refresh');
+if (taskRefreshBtn) {
+  taskRefreshBtn.addEventListener('click', loadTaskRuns);
+}
 
 /* ==========================================================================
    SOCIAL HUB & INSTAGRAM
@@ -1243,7 +1337,13 @@ function saveSocialDraft(platform = socialPlatform.value) {
 
 function openSocialPlatform(platform) {
   const service = socialPlatforms[platform];
-  if (service) window.open(service.url, '_blank', 'noopener,noreferrer');
+  if (service) {
+    if (platform === 'instagram' || service.url.startsWith('/')) {
+      window.location.assign(service.url);
+    } else {
+      window.open(service.url, '_blank', 'noopener,noreferrer');
+    }
+  }
 }
 
 function setInstagramControls(connected) {
@@ -1289,61 +1389,237 @@ async function loadInstagramStatus() {
 document.querySelectorAll('.open-social').forEach((button) => {
   button.addEventListener('click', () => openSocialPlatform(button.dataset.platform));
 });
-document.getElementById('social-draft-form').addEventListener('submit', (event) => {
+
+addListenerSafe('social-draft-form', 'submit', (event) => {
   event.preventDefault();
   saveSocialDraft();
 });
-socialPlatform.addEventListener('change', () => {
-  saveSocialDraft(activeSocialPlatform);
-  activeSocialPlatform = socialPlatform.value;
-  loadSocialDraft(socialPlatform.value);
-});
-document.getElementById('open-draft-platform').addEventListener('click', () => {
-  openSocialPlatform(socialPlatform.value);
+
+if (socialPlatform) {
+  socialPlatform.addEventListener('change', () => {
+    saveSocialDraft(activeSocialPlatform);
+    activeSocialPlatform = socialPlatform.value;
+    loadSocialDraft(socialPlatform.value);
+  });
+}
+
+addListenerSafe('open-draft-platform', 'click', () => {
+  if (socialPlatform) openSocialPlatform(socialPlatform.value);
 });
 
 // Instagram actions
-document.getElementById('instagram-connect').addEventListener('click', () => {
+addListenerSafe('instagram-connect', 'click', () => {
   window.location.assign('/api/instagram/connect');
 });
-document.getElementById('instagram-disconnect').addEventListener('click', async () => {
+
+addListenerSafe('instagram-disconnect', 'click', async () => {
   try {
     await fetchJson('/api/instagram/connection', { method: 'DELETE' });
-    instagramProfile.replaceChildren();
-    instagramMedia.replaceChildren();
-    instagramInbox.replaceChildren();
-    instagramInsights.replaceChildren();
-    instagramActionStatus.textContent = 'Instagram disconnected.';
+    if (instagramProfile) instagramProfile.replaceChildren();
+    if (instagramMedia) instagramMedia.replaceChildren();
+    if (instagramInbox) instagramInbox.replaceChildren();
+    if (instagramInsights) instagramInsights.replaceChildren();
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Instagram disconnected.';
     await loadInstagramStatus();
   } catch (error) {
-    instagramActionStatus.textContent = `Could not disconnect: ${error.message}`;
+    if (instagramActionStatus) instagramActionStatus.textContent = `Could not disconnect: ${error.message}`;
   }
 });
-document.getElementById('instagram-refresh').addEventListener('click', async () => {
+
+addListenerSafe('instagram-refresh', 'click', async () => {
   try {
     await fetchJson('/api/instagram/refresh', { method: 'POST' });
-    instagramActionStatus.textContent = 'Instagram access refreshed.';
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Instagram access refreshed.';
     await loadInstagramStatus();
   } catch (error) {
-    instagramActionStatus.textContent = `Could not refresh: ${error.message}`;
+    if (instagramActionStatus) instagramActionStatus.textContent = `Could not refresh: ${error.message}`;
+  }
+});
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[char]));
+}
+
+function renderInstagramError(container, label, error) {
+  container.replaceChildren();
+  const notice = document.createElement('p');
+  notice.className = 'chat-hint';
+  notice.textContent = `${label} failed: ${error.message}`;
+  container.appendChild(notice);
+  instagramActionStatus.textContent = `${label} failed: ${error.message}`;
+}
+
+const addListenerSafe = (id, event, fn) => {
+  const el = typeof id === 'string' ? document.getElementById(id) : id;
+  if (el) el.addEventListener(event, fn);
+};
+
+addListenerSafe('instagram-load-profile', 'click', async () => {
+  if (instagramActionStatus) instagramActionStatus.textContent = 'Loading Instagram profile...';
+  try {
+    const [profile, media] = await Promise.all([
+      fetchJson('/api/instagram/profile'),
+      fetchJson('/api/instagram/media?limit=12'),
+    ]);
+    if (instagramProfile) {
+      instagramProfile.replaceChildren();
+      const heading = document.createElement('p');
+      heading.className = 'chat-hint';
+      heading.textContent = `@${profile.username ?? 'unknown'} · ${profile.account_type ?? 'account'} · ${profile.media_count ?? 0} posts`;
+      instagramProfile.appendChild(heading);
+    }
+
+    if (instagramMedia) {
+      instagramMedia.replaceChildren();
+      const items = Array.isArray(media.data) ? media.data : [];
+      if (!items.length) {
+        const empty = document.createElement('p');
+        empty.className = 'chat-hint';
+        empty.textContent = 'No recent media found.';
+        instagramMedia.appendChild(empty);
+      } else {
+        const grid = document.createElement('div');
+        grid.className = 'instagram-media-grid';
+        items.forEach((item) => {
+          const link = document.createElement('a');
+          link.href = item.permalink || '#';
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.title = item.caption ? String(item.caption).slice(0, 120) : 'Instagram media';
+          const img = document.createElement('img');
+          img.loading = 'lazy';
+          img.alt = link.title;
+          img.src = item.thumbnail_url || item.media_url || '';
+          link.appendChild(img);
+          grid.appendChild(link);
+        });
+        instagramMedia.appendChild(grid);
+      }
+    }
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Instagram profile and media loaded.';
+  } catch (error) {
+    if (instagramProfile) renderInstagramError(instagramProfile, 'Loading profile', error);
+  }
+});
+
+addListenerSafe('instagram-load-insights', 'click', async () => {
+  if (instagramActionStatus) instagramActionStatus.textContent = 'Loading Instagram insights...';
+  try {
+    const insights = await fetchJson('/api/instagram/insights?period=day');
+    if (instagramInsights) {
+      instagramInsights.replaceChildren();
+      const rows = Array.isArray(insights.data) ? insights.data : [];
+      if (!rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'chat-hint';
+        empty.textContent = 'No insights available for this account yet.';
+        instagramInsights.appendChild(empty);
+      } else {
+        rows.forEach((row) => {
+          const total = Array.isArray(row.values) && row.values.length ? row.values[0].value : 0;
+          const line = document.createElement('p');
+          line.className = 'chat-hint';
+          line.textContent = `${row.title || row.name}: ${total}`;
+          instagramInsights.appendChild(line);
+        });
+      }
+    }
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Instagram insights loaded.';
+  } catch (error) {
+    if (instagramInsights) renderInstagramError(instagramInsights, 'Loading insights', error);
+  }
+});
+
+addListenerSafe('instagram-load-inbox', 'click', async () => {
+  if (instagramActionStatus) instagramActionStatus.textContent = 'Loading Instagram inbox...';
+  try {
+    const inbox = await fetchJson('/api/instagram/conversations');
+    if (instagramInbox) {
+      instagramInbox.replaceChildren();
+      const conversations = Array.isArray(inbox.data) ? inbox.data : [];
+      if (!conversations.length) {
+        const empty = document.createElement('p');
+        empty.className = 'chat-hint';
+        empty.textContent = 'No Instagram conversations found.';
+        instagramInbox.appendChild(empty);
+      } else {
+        conversations.forEach((conversation) => {
+          const line = document.createElement('p');
+          line.className = 'chat-hint';
+          line.textContent = `Conversation ${conversation.id} · updated ${conversation.updated_time || 'unknown'}`;
+          instagramInbox.appendChild(line);
+        });
+      }
+    }
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Instagram inbox loaded.';
+  } catch (error) {
+    if (instagramInbox) renderInstagramError(instagramInbox, 'Loading inbox', error);
+  }
+});
+
+addListenerSafe('instagram-publish-form', 'submit', async (event) => {
+  event.preventDefault();
+  const inputEl = document.getElementById('instagram-image-url');
+  const captionEl = document.getElementById('instagram-caption');
+  const imageUrl = inputEl ? inputEl.value.trim() : '';
+  const caption = captionEl ? captionEl.value : '';
+  if (!imageUrl) return;
+  if (instagramActionStatus) instagramActionStatus.textContent = 'Publishing image to Instagram...';
+  try {
+    await fetchJson('/api/instagram/publish', {
+      method: 'POST',
+      body: JSON.stringify({ image_url: imageUrl, caption }),
+    });
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Image published to Instagram.';
+    event.target.reset();
+  } catch (error) {
+    if (instagramActionStatus) instagramActionStatus.textContent = `Publishing failed: ${error.message}`;
+  }
+});
+
+addListenerSafe('instagram-message-form', 'submit', async (event) => {
+  event.preventDefault();
+  const recipEl = document.getElementById('instagram-recipient-id');
+  const textEl = document.getElementById('instagram-message-text');
+  const recipientId = recipEl ? recipEl.value.trim() : '';
+  const message = textEl ? textEl.value.trim() : '';
+  if (!recipientId || !message) return;
+  if (instagramActionStatus) instagramActionStatus.textContent = 'Sending Instagram message...';
+  try {
+    await fetchJson('/api/instagram/messages', {
+      method: 'POST',
+      body: JSON.stringify({ recipient_id: recipientId, message }),
+    });
+    if (instagramActionStatus) instagramActionStatus.textContent = 'Instagram message sent.';
+    event.target.reset();
+  } catch (error) {
+    if (instagramActionStatus) instagramActionStatus.textContent = `Sending failed: ${error.message}`;
   }
 });
 
 /* ==========================================================================
    FORM LISTENERS & BOOTSTRAP
    ========================================================================== */
-chatForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  askAi();
-});
-promptBox.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+if (chatForm) {
+  chatForm.addEventListener('submit', (event) => {
     event.preventDefault();
-    chatForm.requestSubmit();
-  }
-});
-archerForm.addEventListener('submit', generateArcherImage);
-document.getElementById('clear-memory-btn').addEventListener('click', clearMemory);
+    askAi();
+  });
+}
+if (promptBox) {
+  promptBox.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      if (chatForm) chatForm.requestSubmit();
+    }
+  });
+}
+if (archerForm) {
+  archerForm.addEventListener('submit', generateArcherImage);
+}
+addListenerSafe('clear-memory-btn', 'click', clearMemory);
 
 // Initialize all modules
 loadModelStatus();

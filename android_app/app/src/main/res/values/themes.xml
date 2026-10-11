@@ -1,0 +1,18 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.OrionTheWarrior" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Primary brand color. -->
+        <item name="colorPrimary">@color/orion_purple</item>
+        <item name="colorPrimaryVariant">@color/orion_purple_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <!-- Secondary brand color. -->
+        <item name="colorSecondary">@color/orion_purple_accent</item>
+        <item name="colorSecondaryVariant">@color/orion_purple_dark</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <!-- Status bar color. -->
+        <item name="android:statusBarColor">@color/orion_dark</item>
+        <item name="android:navigationBarColor">@color/orion_dark</item>
+        <item name="android:windowBackground">@color/orion_dark</item>
+    </style>
+</resources>
+

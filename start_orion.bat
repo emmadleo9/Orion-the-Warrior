@@ -21,7 +21,7 @@ if not exist "%ORION_PYTHON%" (
 
 echo Starting Orion from:
 echo "%~dp0"
-echo Open http://127.0.0.1:8000 after the server reports startup.
+echo Open http://192.168.18.144:8000 after the server reports startup.
 echo Press Ctrl+C in this window to stop Orion.
 echo.
 "%ORION_PYTHON%" "%~dp0main.py"

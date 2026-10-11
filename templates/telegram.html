@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Orion > Telegram — Cyber Command Client</title>
+  <link rel="icon" type="image/png" href="/static/orion-logo.png" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            orionBg: '#02140d',
+            orionBgAlt: '#03140b',
+            orionCard: '#071a12',
+            orionCardElevated: '#0b2318',
+            orionBorder: 'rgba(117, 255, 176, 0.2)',
+            orionBorderStrong: 'rgba(82, 247, 163, 0.45)',
+            orionText: '#d9ffe9',
+            orionMuted: '#8ad6a8',
+            orionAccent: '#52f7a3',
+            orionAccentStrong: '#00ff9d',
+            orionGold: '#ffe04a',
+            orionDanger: '#ff7b7b',
+          },
+          fontFamily: {
+            mono: ['Consolas', 'Segoe UI', 'monospace'],
+            sans: ['Segoe UI', 'Inter', 'system-ui', 'sans-serif'],
+          }
+        }
+      }
+    };
+  </script>
+
+  <style>
+    :root {
+      --bg: #03140b;
+      --bg-panel: rgba(7, 26, 18, 0.95);
+      --line: rgba(117, 255, 176, 0.2);
+      --text: #d9ffe9;
+      --muted: #8ad6a8;
+      --accent: #52f7a3;
+      --accent-glow: rgba(82, 247, 163, 0.25);
+    }
+
+    body {
+      background:
+        radial-gradient(ellipse at 58% 0%, rgba(133, 91, 16, 0.18), transparent 32%),
+        radial-gradient(circle at top, rgba(32, 99, 72, 0.55), transparent 34%),
+        linear-gradient(180deg, #02140d 0%, #03140b 100%);
+      color: #d9ffe9;
+      font-family: "Segoe UI", "Consolas", monospace;
+      letter-spacing: 0.02em;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.015),
+        rgba(255, 255, 255, 0.015) 1px,
+        transparent 1px,
+        transparent 4px
+      );
+      pointer-events: none;
+      z-index: 50;
+    }
+
+    /* Custom Scrollbars */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(82, 247, 163, 0.25); border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(82, 247, 163, 0.5); }
+
+    /* Orion Style Bubbles */
+    .bubble-in {
+      background: rgba(7, 26, 18, 0.95);
+      border: 1px solid rgba(117, 255, 176, 0.22);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    }
+    .bubble-out {
+      background: linear-gradient(135deg, rgba(82, 247, 163, 0.22) 0%, rgba(0, 255, 157, 0.12) 100%);
+      border: 1px solid rgba(82, 247, 163, 0.5);
+      box-shadow: 0 4px 16px rgba(82, 247, 163, 0.15);
+    }
+
+    .orion-glow {
+      box-shadow: 0 0 16px rgba(82, 247, 163, 0.25);
+    }
+    .orion-gold-glow {
+      box-shadow: 0 0 16px rgba(255, 224, 74, 0.3);
+    }
+
+    /* Modal transition */
+    .modal-backdrop {
+      background: rgba(2, 15, 10, 0.85);
+      backdrop-filter: blur(8px);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col font-sans selection:bg-emerald-500 selection:text-black overflow-hidden select-none">
+
+  <!-- ========================================================================= -->
+  <!-- TOP NAVIGATION HEADER -->
+  <!-- ========================================================================= -->
+  <header class="h-14 shrink-0 border-b border-orionBorder bg-orionCard/90 backdrop-blur-md px-4 sm:px-6 flex items-center justify-between z-30">
+    <div class="flex items-center space-x-3 sm:space-x-4">
+      <a href="/" class="flex items-center space-x-2 text-orionMuted hover:text-orionAccent text-xs font-semibold uppercase tracking-wider transition-colors py-1.5 px-3 rounded-lg hover:bg-orionCardElevated border border-transparent hover:border-orionBorder" title="Return to Orion Main Dashboard">
+        <i data-lucide="arrow-left" class="w-4 h-4 text-orionAccent"></i>
+        <span class="hidden sm:inline">Back to Orion</span>
+      </a>
+
+      <div class="h-5 w-[1px] bg-orionBorder"></div>
+
+      <!-- Module Title -->
+      <div class="flex items-center space-x-2.5">
+        <img src="/static/orion-logo.png" class="w-7 h-7 rounded-lg border border-orionGold/60 object-cover orion-gold-glow" alt="Orion" />
+        <div class="flex items-center gap-2">
+          <h1 class="text-sm font-bold tracking-wider text-orionText uppercase font-mono">
+            ORION <span class="text-orionAccent">&gt;</span> TELEGRAM
+          </h1>
+          <span class="hidden md:inline-flex text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-950/80 text-orionAccent border border-orionBorderStrong">
+            RAWALPINDI NODE · SECURE PROXY
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Header Right: Proxy Pill & Profile -->
+    <div class="flex items-center space-x-2.5">
+      <!-- HIDDEN PROXY PILL BADGE -->
+      <button id="proxy-pill-btn" type="button" class="flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-950/70 border border-orionBorderStrong text-xs font-mono text-orionAccent hover:bg-emerald-900/60 transition-all cursor-pointer orion-glow" title="Click to view proxy status and latency">
+        <span id="proxy-pill-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span id="proxy-pill-label" class="font-bold">Proxy: Auto <span id="proxy-pill-ping">85ms</span></span>
+        <i data-lucide="shield" class="w-3.5 h-3.5 text-orionAccent"></i>
+      </button>
+
+      <!-- Account / Me Button -->
+      <button id="auth-status-btn" type="button" class="flex items-center space-x-2 px-3 py-1 rounded-lg bg-orionCardElevated border border-orionBorder text-xs text-orionText hover:border-orionAccent transition-colors">
+        <span id="header-user-avatar" class="w-5 h-5 rounded-full bg-orionAccent/20 text-orionAccent text-[10px] font-bold flex items-center justify-center border border-orionAccent/40">OW</span>
+        <span id="header-user-name" class="hidden sm:inline font-mono text-xs">@orion_warrior</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ========================================================================= -->
+  <!-- MAIN WORKSPACE: 3-PANEL LAYOUT (LEFT 35% | MIDDLE 45% | RIGHT 20%) -->
+  <!-- ========================================================================= -->
+  <div class="flex-1 flex overflow-hidden relative">
+
+    <!-- ----------------------------------------------------------------------- -->
+    <!-- LEFT PANEL (35%): Search, Categories, Chat List -->
+    <!-- ----------------------------------------------------------------------- -->
+    <aside id="left-panel" class="w-full md:w-[35%] lg:w-[32%] xl:w-[30%] shrink-0 border-r border-orionBorder bg-orionCard/80 flex flex-col z-20 transition-all duration-300">
+
+      <!-- Search & Self Profile Bar -->
+      <div class="p-3 border-b border-orionBorder flex items-center gap-2">
+        <button id="my-profile-btn" class="w-9 h-9 rounded-xl bg-emerald-950/70 border border-orionBorder hover:border-orionAccent flex items-center justify-center text-orionAccent transition-colors shrink-0" title="Edit Profile">
+          <i data-lucide="user-cog" class="w-4 h-4"></i>
+        </button>
+
+        <div class="relative flex-1">
+          <i data-lucide="search" class="w-4 h-4 text-orionMuted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"></i>
+          <input
+            id="chat-search-input"
+            type="text"
+            placeholder="Search chats, contacts, channels..."
+            class="w-full bg-orionBg/90 border border-orionBorder rounded-xl pl-9 pr-3 py-2 text-xs text-orionText placeholder:text-orionMuted/60 focus:outline-none focus:border-orionAccent transition-colors font-mono"
+          />
+        </div>
+
+        <button id="new-chat-btn" class="w-9 h-9 rounded-xl bg-orionAccent text-black hover:bg-orionAccentStrong flex items-center justify-center font-bold transition-all shrink-0" title="New Message">
+          <i data-lucide="edit" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Categories Tabs: All | Groups | Channels | Contacts -->
+      <div class="flex items-center px-3 pt-2 pb-1 border-b border-orionBorder gap-1 text-xs font-mono overflow-x-auto">
+        <button class="chat-tab active px-3 py-1.5 rounded-lg bg-emerald-950/80 text-orionAccent font-bold border border-orionBorderStrong transition-colors whitespace-nowrap" data-tab="all">
+          All
+        </button>
+        <button class="chat-tab px-3 py-1.5 rounded-lg text-orionMuted hover:text-orionText hover:bg-orionCardElevated transition-colors whitespace-nowrap" data-tab="groups">
+          Groups
+        </button>
+        <button class="chat-tab px-3 py-1.5 rounded-lg text-orionMuted hover:text-orionText hover:bg-orionCardElevated transition-colors whitespace-nowrap" data-tab="channels">
+          Channels
+        </button>
+        <button class="chat-tab px-3 py-1.5 rounded-lg text-orionMuted hover:text-orionText hover:bg-orionCardElevated transition-colors whitespace-nowrap" data-tab="contacts">
+          Contacts
+        </button>
+      </div>
+
+      <!-- Chat List Scroll Area -->
+      <div id="chat-list" class="flex-1 overflow-y-auto divide-y divide-orionBorder/40">
+        <!-- Rendered via JavaScript -->
+        <div class="p-8 text-center text-xs text-orionMuted font-mono">
+          <i data-lucide="loader" class="w-5 h-5 mx-auto animate-spin mb-2 text-orionAccent"></i>
+          Loading secure Telegram chats via proxy...
+        </div>
+      </div>
+    </aside>
+
+    <!-- ----------------------------------------------------------------------- -->
+    <!-- MIDDLE PANEL (45%): Active Chat Header, Messages, Input Area -->
+    <!-- ----------------------------------------------------------------------- -->
+    <main id="middle-panel" class="hidden md:flex flex-1 flex-col bg-orionBg/95 relative overflow-hidden">
+
+      <!-- Active Chat Header -->
+      <header id="chat-header" class="h-16 shrink-0 border-b border-orionBorder bg-orionCard/80 backdrop-blur-md px-4 flex items-center justify-between z-10">
+        <div class="flex items-center space-x-3 min-w-0">
+          <!-- Mobile Back Button -->
+          <button id="mobile-back-btn" class="md:hidden p-1.5 rounded-lg text-orionMuted hover:text-orionAccent hover:bg-orionCardElevated">
+            <i data-lucide="arrow-left" class="w-5 h-5"></i>
+          </button>
+
+          <!-- Avatar -->
+          <div id="active-chat-avatar-wrapper" class="relative shrink-0">
+            <div id="active-chat-avatar" class="w-10 h-10 rounded-xl bg-emerald-950 border border-orionBorderStrong flex items-center justify-center font-bold text-sm text-orionAccent">
+              RC
+            </div>
+            <span id="active-chat-online-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-orionBg absolute -bottom-0.5 -right-0.5"></span>
+          </div>
+
+          <!-- Title & Subtitle -->
+          <div class="min-w-0">
+            <h2 id="active-chat-title" class="text-sm font-bold text-orionText truncate font-mono flex items-center gap-2">
+              Rawalpindi Tech & Cyber Command
+            </h2>
+            <p id="active-chat-subtitle" class="text-[11px] text-orionMuted truncate font-mono">
+              1,420 members • proxy relay active
+            </p>
+          </div>
+        </div>
+
+        <!-- Chat Header Actions -->
+        <div class="flex items-center space-x-1 sm:space-x-2">
+          <!-- Toggle Profile Drawer -->
+          <button id="toggle-profile-btn" class="p-2 rounded-lg text-orionMuted hover:text-orionAccent hover:bg-orionCardElevated transition-colors" title="Toggle Info Panel">
+            <i data-lucide="panel-right" class="w-4 h-4"></i>
+          </button>
+
+          <!-- 3-Dots Dropdown Menu Button -->
+          <div class="relative">
+            <button id="chat-menu-btn" class="p-2 rounded-lg text-orionMuted hover:text-orionAccent hover:bg-orionCardElevated transition-colors">
+              <i data-lucide="more-vertical" class="w-4 h-4"></i>
+            </button>
+            <div id="chat-dropdown-menu" class="hidden absolute right-0 top-full mt-1 w-48 bg-orionCard border border-orionBorder rounded-xl shadow-2xl py-1 text-xs font-mono z-30">
+              <button id="menu-view-profile" class="w-full text-left px-3 py-2 text-orionText hover:bg-orionCardElevated hover:text-orionAccent flex items-center gap-2">
+                <i data-lucide="user" class="w-3.5 h-3.5"></i> View Profile
+              </button>
+              <button id="menu-view-members" class="w-full text-left px-3 py-2 text-orionText hover:bg-orionCardElevated hover:text-orionAccent flex items-center gap-2">
+                <i data-lucide="users" class="w-3.5 h-3.5"></i> View Members
+              </button>
+              <button id="menu-mark-read" class="w-full text-left px-3 py-2 text-orionText hover:bg-orionCardElevated hover:text-orionAccent flex items-center gap-2">
+                <i data-lucide="check-check" class="w-3.5 h-3.5"></i> Mark as Read
+              </button>
+              <button id="menu-mute" class="w-full text-left px-3 py-2 text-orionText hover:bg-orionCardElevated hover:text-orionAccent flex items-center gap-2">
+                <i data-lucide="bell-off" class="w-3.5 h-3.5"></i> Mute Chat
+              </button>
+              <div class="h-[1px] bg-orionBorder my-1"></div>
+              <button id="menu-delete-chat" class="w-full text-left px-3 py-2 text-orionDanger hover:bg-red-950/50 flex items-center gap-2">
+                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Clear / Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Messages Scroll Area -->
+      <div id="messages-container" class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 flex flex-col">
+        <!-- Messages rendered via JavaScript -->
+      </div>
+
+      <!-- Bottom Input Form -->
+      <div class="p-3 sm:p-4 border-t border-orionBorder bg-orionCard/80 backdrop-blur-md">
+        <!-- Hidden file input for attachment -->
+        <input id="media-file-input" type="file" class="hidden" />
+
+        <form id="message-form" class="flex items-end gap-2">
+          <!-- Attachment Button -->
+          <button id="attach-btn" type="button" class="p-2.5 rounded-xl bg-orionCardElevated border border-orionBorder text-orionMuted hover:text-orionAccent hover:border-orionAccent transition-colors shrink-0" title="Attach Document or Image">
+            <i data-lucide="paperclip" class="w-4 h-4"></i>
+          </button>
+
+          <!-- Emoji Button -->
+          <button id="emoji-btn" type="button" class="p-2.5 rounded-xl bg-orionCardElevated border border-orionBorder text-orionMuted hover:text-orionGold hover:border-orionGold transition-colors shrink-0" title="Insert Emoji">
+            <i data-lucide="smile" class="w-4 h-4"></i>
+          </button>
+
+          <!-- Text Input -->
+          <div class="flex-1 relative">
+            <textarea
+              id="message-input"
+              rows="1"
+              placeholder="Write a message in Orion..."
+              class="w-full bg-orionBg border border-orionBorder rounded-xl px-3.5 py-2.5 text-xs text-orionText placeholder:text-orionMuted/50 focus:outline-none focus:border-orionAccent transition-colors resize-none max-h-32 leading-relaxed"
+            ></textarea>
+          </div>
+
+          <!-- Send Button -->
+          <button
+            id="send-message-btn"
+            type="submit"
+            class="px-4 py-2.5 rounded-xl bg-orionAccent hover:bg-orionAccentStrong text-black font-bold flex items-center justify-center gap-1.5 transition-all orion-glow shrink-0 cursor-pointer"
+          >
+            <span class="hidden sm:inline text-xs font-mono">Send</span>
+            <i data-lucide="send" class="w-4 h-4"></i>
+          </button>
+        </form>
+      </div>
+
+    </main>
+
+    <!-- ----------------------------------------------------------------------- -->
+    <!-- RIGHT PANEL (20% Toggle): Chat Profile, Members, Media -->
+    <!-- ----------------------------------------------------------------------- -->
+    <aside id="right-panel" class="hidden lg:flex w-[25%] xl:w-[22%] shrink-0 border-l border-orionBorder bg-orionCard/90 flex-col z-20 overflow-y-auto">
+      <!-- Right Header -->
+      <div class="h-16 px-4 border-b border-orionBorder flex items-center justify-between shrink-0">
+        <h3 class="text-xs font-bold uppercase tracking-wider font-mono text-orionAccent">Chat Details</h3>
+        <button id="close-profile-btn" class="p-1.5 rounded-lg text-orionMuted hover:text-orionText hover:bg-orionCardElevated">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Profile Overview Card -->
+      <div class="p-5 text-center border-b border-orionBorder">
+        <div id="profile-avatar" class="w-20 h-20 rounded-2xl mx-auto mb-3 bg-emerald-950 border-2 border-orionBorderStrong flex items-center justify-center font-bold text-2xl text-orionAccent orion-glow">
+          RC
+        </div>
+        <h4 id="profile-title" class="text-sm font-bold text-orionText font-mono">Rawalpindi Cyber Command</h4>
+        <p id="profile-username" class="text-xs text-orionAccent font-mono mt-0.5">@pindi_command</p>
+        <p id="profile-bio" class="text-xs text-orionMuted mt-2 leading-relaxed">
+          Cybersecurity, automation & telemetry node for Rawalpindi & Islamabad.
+        </p>
+      </div>
+
+      <!-- Profile Metadata Stats -->
+      <div class="p-4 border-b border-orionBorder space-y-2.5 text-xs font-mono">
+        <div class="flex items-center justify-between">
+          <span class="text-orionMuted">Phone / Route</span>
+          <span id="profile-phone" class="text-orionText">+92 300 1234567</span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span class="text-orionMuted">Members</span>
+          <span id="profile-members-count" class="text-orionText">1,420 members</span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span class="text-orionMuted">Security Relay</span>
+          <span class="text-orionAccent">Protected via SOCKS5</span>
+        </div>
+      </div>
+
+      <!-- Members List / Media Section -->
+      <div class="flex-1 p-4">
+        <h5 class="text-[11px] font-bold uppercase text-orionMuted tracking-wider font-mono mb-2">Members</h5>
+        <div id="profile-members-list" class="space-y-2 text-xs font-mono">
+          <!-- Rendered dynamically -->
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: PROXY MANAGER & AUTO-SWITCH (Top Right Pill Click) -->
+  <!-- ========================================================================= -->
+  <div id="proxy-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden p-4">
+    <div class="bg-orionCard border border-orionBorder rounded-2xl w-full max-w-lg shadow-2xl p-6 font-mono text-xs max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between pb-3 border-b border-orionBorder">
+        <div class="flex items-center gap-2">
+          <i data-lucide="shield-check" class="w-5 h-5 text-orionAccent"></i>
+          <h3 class="text-sm font-bold text-orionText uppercase">Telegram Proxy Engine</h3>
+        </div>
+        <button id="close-proxy-modal" class="text-orionMuted hover:text-orionText p-1">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <p class="text-orionMuted text-[11px] my-3">
+        Auto-proxy system active for Pakistan / restricted networks. All Telegram connections are routed through verified relays with weekly refresh (Sundays 3 AM PKT).
+      </p>
+
+      <!-- Active Proxy Status Box -->
+      <div class="p-3 rounded-xl bg-orionCardElevated border border-orionBorderStrong mb-4 flex items-center justify-between">
+        <div>
+          <p class="text-[10px] text-orionMuted uppercase tracking-wider font-bold">Active Relay Node</p>
+          <p id="modal-active-proxy-name" class="text-xs text-orionAccent font-bold">Singapore SOCKS5 High-Speed</p>
+          <p id="modal-active-proxy-detail" class="text-[10px] text-orionMuted">142.93.245.164:1080 • Ping: 68ms</p>
+        </div>
+        <span class="px-2.5 py-1 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-500/50 font-bold text-[10px]">
+          ACTIVE
+        </span>
+      </div>
+
+      <!-- Proxy List Container -->
+      <div class="flex-1 overflow-y-auto mb-4 border border-orionBorder rounded-xl divide-y divide-orionBorder/40">
+        <div class="p-2 bg-orionBg text-[10px] uppercase font-bold text-orionMuted flex justify-between">
+          <span>Configured Proxies</span>
+          <span>Latency</span>
+        </div>
+        <div id="proxy-list-items" class="divide-y divide-orionBorder/30">
+          <!-- Rendered via JS -->
+        </div>
+      </div>
+
+      <!-- Add Manual Proxy Toggle -->
+      <details class="mb-4 bg-orionBg/80 p-3 rounded-xl border border-orionBorder">
+        <summary class="cursor-pointer text-orionAccent font-bold text-[11px] select-none">
+          + Add Manual Proxy (SOCKS5 / MTProto)
+        </summary>
+        <form id="add-proxy-form" class="mt-3 space-y-2 text-xs">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] text-orionMuted">Type</label>
+              <select id="new-proxy-type" class="w-full bg-orionCard border border-orionBorder rounded-lg px-2 py-1.5 text-orionText">
+                <option value="socks5">SOCKS5</option>
+                <option value="mtproto">MTProto</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-[10px] text-orionMuted">Host / IP</label>
+              <input id="new-proxy-host" type="text" placeholder="127.0.0.1" required class="w-full bg-orionCard border border-orionBorder rounded-lg px-2 py-1.5 text-orionText" />
+            </div>
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <label class="text-[10px] text-orionMuted">Port</label>
+              <input id="new-proxy-port" type="number" placeholder="1080" required class="w-full bg-orionCard border border-orionBorder rounded-lg px-2 py-1.5 text-orionText" />
+            </div>
+            <div>
+              <label class="text-[10px] text-orionMuted">User (Optional)</label>
+              <input id="new-proxy-user" type="text" class="w-full bg-orionCard border border-orionBorder rounded-lg px-2 py-1.5 text-orionText" />
+            </div>
+            <div>
+              <label class="text-[10px] text-orionMuted">Password</label>
+              <input id="new-proxy-pass" type="password" class="w-full bg-orionCard border border-orionBorder rounded-lg px-2 py-1.5 text-orionText" />
+            </div>
+          </div>
+          <button type="submit" class="w-full py-1.5 rounded-lg bg-orionCardElevated hover:bg-emerald-950 border border-orionAccent text-orionAccent font-bold transition-colors">
+            Test & Save Proxy
+          </button>
+        </form>
+      </details>
+
+      <!-- Action Buttons -->
+      <div class="flex items-center justify-between pt-2">
+        <button id="refresh-proxies-btn" type="button" class="px-4 py-2 rounded-xl bg-orionCardElevated hover:bg-orionCard border border-orionBorder text-orionMuted hover:text-orionAccent flex items-center gap-1.5 transition-colors">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Refresh & Test All
+        </button>
+        <button id="close-proxy-btn-bottom" type="button" class="px-5 py-2 rounded-xl bg-orionAccent hover:bg-orionAccentStrong text-black font-bold transition-colors">
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: LOGIN / AUTHENTICATION (Telegram Official) -->
+  <!-- ========================================================================= -->
+  <div id="login-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden p-4">
+    <div class="bg-orionCard border border-orionBorder rounded-2xl w-full max-w-md shadow-2xl p-6 font-mono text-xs">
+      <div class="flex items-center justify-between pb-3 border-b border-orionBorder">
+        <h3 class="text-sm font-bold text-orionText uppercase flex items-center gap-2">
+          <i data-lucide="log-in" class="w-4 h-4 text-orionAccent"></i> Sign in to Telegram
+        </h3>
+        <button id="close-login-modal" class="text-orionMuted hover:text-orionText p-1">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Step 1: Phone Form -->
+      <div id="login-step-phone">
+        <p class="text-orionMuted text-[11px] my-3 leading-relaxed">
+          Enter your Telegram phone number with country code. Connection will be established securely through Orion's hidden SOCKS5 relay.
+        </p>
+        <form id="login-phone-form" class="space-y-3">
+          <div>
+            <label class="text-[10px] text-orionMuted uppercase tracking-wider block mb-1">Phone Number</label>
+            <input
+              id="login-phone-input"
+              type="tel"
+              placeholder="+92 300 1234567"
+              required
+              class="w-full bg-orionBg border border-orionBorder rounded-xl px-3 py-2 text-sm text-orionText placeholder:text-orionMuted/50 focus:border-orionAccent outline-none font-mono"
+            />
+          </div>
+          <button
+            id="btn-send-code"
+            type="submit"
+            class="w-full py-2.5 rounded-xl bg-orionAccent hover:bg-orionAccentStrong text-black font-bold transition-all orion-glow"
+          >
+            Send Verification Code
+          </button>
+        </form>
+      </div>
+
+      <!-- Step 2: Code Verification Form -->
+      <div id="login-step-code" class="hidden">
+        <p class="text-orionMuted text-[11px] my-3 leading-relaxed">
+          A verification code was sent to your Telegram app. Enter it below to unlock full access.
+        </p>
+        <form id="login-code-form" class="space-y-3">
+          <div>
+            <label class="text-[10px] text-orionMuted uppercase tracking-wider block mb-1">Telegram Code</label>
+            <input
+              id="login-code-input"
+              type="text"
+              placeholder="12345"
+              required
+              class="w-full bg-orionBg border border-orionBorder rounded-xl px-3 py-2 text-base tracking-widest text-center text-orionAccent placeholder:text-orionMuted/50 focus:border-orionAccent outline-none font-mono font-bold"
+            />
+          </div>
+          <button
+            id="btn-verify-code"
+            type="submit"
+            class="w-full py-2.5 rounded-xl bg-orionAccent hover:bg-orionAccentStrong text-black font-bold transition-all orion-glow"
+          >
+            Verify & Connect
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: EDIT PROFILE -->
+  <!-- ========================================================================= -->
+  <div id="edit-profile-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden p-4">
+    <div class="bg-orionCard border border-orionBorder rounded-2xl w-full max-w-md shadow-2xl p-6 font-mono text-xs">
+      <div class="flex items-center justify-between pb-3 border-b border-orionBorder">
+        <h3 class="text-sm font-bold text-orionText uppercase">Edit Profile</h3>
+        <button id="close-edit-modal" class="text-orionMuted hover:text-orionText p-1">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <form id="edit-profile-form" class="space-y-3 my-4">
+        <div>
+          <label class="text-[10px] text-orionMuted block mb-1">First Name</label>
+          <input id="edit-fname" type="text" required class="w-full bg-orionBg border border-orionBorder rounded-xl px-3 py-2 text-xs text-orionText focus:border-orionAccent outline-none" />
+        </div>
+        <div>
+          <label class="text-[10px] text-orionMuted block mb-1">Last Name</label>
+          <input id="edit-lname" type="text" class="w-full bg-orionBg border border-orionBorder rounded-xl px-3 py-2 text-xs text-orionText focus:border-orionAccent outline-none" />
+        </div>
+        <div>
+          <label class="text-[10px] text-orionMuted block mb-1">Bio</label>
+          <textarea id="edit-bio" rows="3" class="w-full bg-orionBg border border-orionBorder rounded-xl px-3 py-2 text-xs text-orionText focus:border-orionAccent outline-none resize-none"></textarea>
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" id="cancel-edit-btn" class="px-4 py-2 rounded-xl bg-orionCardElevated border border-orionBorder text-orionMuted">Cancel</button>
+          <button type="submit" class="px-5 py-2 rounded-xl bg-orionAccent hover:bg-orionAccentStrong text-black font-bold">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <!-- ========================================================================= -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 space-y-2 pointer-events-none"></div>
+
+  <!-- ========================================================================= -->
+  <!-- FRONTEND APPLICATION JAVASCRIPT -->
+  <!-- ========================================================================= -->
+  <script>
+    // State
+    let activeChatId = -100192837482;
+    let chatsList = [];
+    let currentTab = 'all';
+    let phoneCodeHash = '';
+    let meProfile = null;
+
+    // Helper: Toast
+    function showToast(text, duration = 3000) {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'px-4 py-2.5 rounded-xl bg-orionCard border border-orionBorderStrong text-orionText text-xs font-mono shadow-2xl flex items-center gap-2 orion-glow pointer-events-auto transition-all transform duration-200';
+      toast.innerHTML = `<i data-lucide="info" class="w-4 h-4 text-orionAccent"></i><span>${text}</span>`;
+      container.appendChild(toast);
+      lucide.createIcons();
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 200);
+      }, duration);
+    }
+
+    // Helper: Fetch JSON
+    async function api(path, options = {}) {
+      try {
+        const res = await fetch(path, options);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: 'Request failed' }));
+          throw new Error(err.detail || `Error ${res.status}`);
+        }
+        return await res.json();
+      } catch (e) {
+        console.error(`API Error on ${path}:`, e);
+        throw e;
+      }
+    }
+
+    // Load Me
+    async function loadMe() {
+      try {
+        const user = await api('/api/telegram/me');
+        meProfile = user;
+        const nameEl = document.getElementById('header-user-name');
+        const avatarEl = document.getElementById('header-user-avatar');
+        if (nameEl) nameEl.textContent = user.username ? `@${user.username}` : user.first_name;
+        if (avatarEl) avatarEl.textContent = (user.first_name || 'TG').slice(0, 2).toUpperCase();
+      } catch (_) {}
+    }
+
+    // Load Status & Proxy Pill
+    async function loadStatus() {
+      try {
+        const status = await api('/api/telegram/status');
+        const pingEl = document.getElementById('proxy-pill-ping');
+        const dotEl = document.getElementById('proxy-pill-dot');
+        const labelEl = document.getElementById('proxy-pill-label');
+
+        if (status.current_proxy) {
+          const ping = status.ping || status.current_proxy.ping || 85;
+          if (pingEl) pingEl.textContent = `${ping}ms`;
+          if (dotEl) {
+            dotEl.className = status.connected ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse' : 'w-2 h-2 rounded-full bg-amber-400';
+          }
+          if (labelEl) {
+            labelEl.innerHTML = `Proxy: Auto <span id="proxy-pill-ping">${ping}ms</span>`;
+          }
+
+          // Modal active proxy details
+          const modalName = document.getElementById('modal-active-proxy-name');
+          const modalDetail = document.getElementById('modal-active-proxy-detail');
+          if (modalName) modalName.textContent = status.current_proxy.name || 'SOCKS5 Auto Relay';
+          if (modalDetail) {
+            modalDetail.textContent = `${status.current_proxy.host || status.current_proxy.server}:${status.current_proxy.port} • Ping: ${ping}ms`;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Load Chats
+    async function loadChats() {
+      try {
+        const chats = await api('/api/telegram/chats');
+        chatsList = chats;
+        renderChatList();
+        if (chats.length && !activeChatId) {
+          selectChat(chats[0].id);
+        }
+      } catch (err) {
+        document.getElementById('chat-list').innerHTML = `<div class="p-6 text-center text-xs text-orionDanger font-mono">Could not load chats: ${err.message}</div>`;
+      }
+    }
+
+    // Filter and Render Chat List
+    function renderChatList() {
+      const container = document.getElementById('chat-list');
+      const search = document.getElementById('chat-search-input').value.toLowerCase().trim();
+
+      const filtered = chatsList.filter((c) => {
+        // Tab filtering
+        if (currentTab === 'groups' && c.type !== 'group' && c.type !== 'supergroup') return false;
+        if (currentTab === 'channels' && c.type !== 'channel') return false;
+        if (currentTab === 'contacts' && c.type !== 'private') return false;
+
+        // Search filtering
+        if (search) {
+          return c.title.toLowerCase().includes(search) ||
+                 (c.username && c.username.toLowerCase().includes(search)) ||
+                 (c.last_message && c.last_message.text.toLowerCase().includes(search));
+        }
+        return true;
+      });
+
+      if (!filtered.length) {
+        container.innerHTML = '<div class="p-8 text-center text-xs text-orionMuted font-mono">No matching chats found.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map((c) => {
+        const isActive = c.id === activeChatId;
+        const activeClass = isActive ? 'bg-emerald-950/70 border-l-2 border-orionAccent' : 'hover:bg-orionCardElevated/50';
+        const lastMsg = c.last_message?.text || 'No messages yet';
+        const lastDate = c.last_message?.date || '';
+        const unread = c.unread_count > 0 ? `<span class="px-2 py-0.5 rounded-full bg-orionAccent text-black text-[10px] font-bold">${c.unread_count}</span>` : '';
+        const iconType = c.type === 'channel' ? '<i data-lucide="megaphone" class="w-3 h-3 text-orionMuted inline mr-1"></i>' : c.type === 'supergroup' || c.type === 'group' ? '<i data-lucide="users" class="w-3 h-3 text-orionMuted inline mr-1"></i>' : '';
+
+        return `
+          <div
+            onclick="selectChat(${c.id})"
+            class="p-3.5 flex items-center gap-3 cursor-pointer transition-colors ${activeClass}"
+          >
+            <!-- Avatar -->
+            <div class="relative shrink-0">
+              <div class="w-11 h-11 rounded-xl bg-emerald-950/90 border border-orionBorderStrong flex items-center justify-center font-bold text-xs text-orionAccent font-mono">
+                ${c.initials || 'TG'}
+              </div>
+              ${c.online ? '<span class="w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-orionCard absolute -bottom-0.5 -right-0.5"></span>' : ''}
+            </div>
+
+            <!-- Meta -->
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center justify-between gap-1 mb-1">
+                <span class="text-xs font-bold text-orionText truncate font-mono">${iconType}${c.title}</span>
+                <span class="text-[10px] text-orionMuted/80 shrink-0 font-mono">${lastDate}</span>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <p class="text-[11px] text-orionMuted truncate leading-tight">${lastMsg}</p>
+                ${unread}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      lucide.createIcons();
+    }
+
+    // Select Chat
+    async function selectChat(chatId) {
+      activeChatId = chatId;
+      renderChatList();
+
+      const chat = chatsList.find(c => c.id === chatId);
+      if (chat) {
+        document.getElementById('active-chat-title').textContent = chat.title;
+        document.getElementById('active-chat-avatar').textContent = chat.initials || 'TG';
+        const subtitle = chat.type === 'supergroup' || chat.type === 'group'
+          ? `${chat.members_count || 1420} members • secure proxy relay`
+          : chat.type === 'channel'
+          ? `${chat.members_count || 8900} subscribers • broadcast`
+          : 'online • SOCKS5 active';
+        document.getElementById('active-chat-subtitle').textContent = subtitle;
+
+        // Update Right Panel Profile
+        updateRightProfile(chat);
+      }
+
+      // Show middle panel on mobile
+      document.getElementById('left-panel').classList.add('hidden', 'md:flex');
+      document.getElementById('middle-panel').classList.remove('hidden');
+
+      // Load Messages
+      await loadMessages(chatId);
+    }
+
+    // Load Messages for Chat
+    async function loadMessages(chatId) {
+      const container = document.getElementById('messages-container');
+      container.innerHTML = '<div class="p-8 text-center text-xs text-orionMuted font-mono"><i data-lucide="loader" class="w-4 h-4 mx-auto animate-spin mb-1 text-orionAccent"></i>Loading encrypted messages...</div>';
+      lucide.createIcons();
+
+      try {
+        const msgs = await api(`/api/telegram/messages/${chatId}?limit=50`);
+        if (!msgs.length) {
+          container.innerHTML = `
+            <div class="m-auto text-center p-8 max-w-xs bg-orionCard/60 border border-orionBorder rounded-2xl">
+              <i data-lucide="shield-check" class="w-8 h-8 text-orionAccent mx-auto mb-2"></i>
+              <h4 class="text-xs font-bold font-mono text-orionText uppercase">End-to-End Routed</h4>
+              <p class="text-[11px] text-orionMuted mt-1">No previous messages in local cache. Send a message to start communicating securely.</p>
+            </div>
+          `;
+          lucide.createIcons();
+          return;
+        }
+
+        container.innerHTML = msgs.map((m) => {
+          const isOut = m.outgoing;
+          const bubbleClass = isOut ? 'bubble-out ml-auto' : 'bubble-in mr-auto';
+          const senderName = !isOut && m.from_user?.first_name ? `<p class="text-[10px] text-orionAccent font-bold font-mono mb-1">${m.from_user.first_name}</p>` : '';
+          const checkmarks = isOut ? '<span class="text-orionAccent ml-1">✓✓</span>' : '';
+
+          return `
+            <div class="max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-2.5 text-xs text-orionText font-mono relative ${bubbleClass}">
+              ${senderName}
+              <div class="leading-relaxed whitespace-pre-wrap break-words">${escapeHtml(m.text)}</div>
+              <div class="text-[9px] text-orionMuted/80 text-right mt-1 flex items-center justify-end">
+                <span>${m.date || 'Now'}</span>
+                ${checkmarks}
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        container.scrollTop = container.scrollHeight;
+        lucide.createIcons();
+      } catch (err) {
+        container.innerHTML = `<div class="p-6 text-center text-xs text-orionDanger font-mono">Error: ${err.message}</div>`;
+      }
+    }
+
+    // Send Message
+    async function sendMessage(e) {
+      if (e) e.preventDefault();
+      const input = document.getElementById('message-input');
+      const text = input.value.trim();
+      if (!text || !activeChatId) return;
+
+      input.value = '';
+      input.style.height = 'auto';
+
+      try {
+        const msg = await api('/api/telegram/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: activeChatId, text: text }),
+        });
+
+        // Append locally to chat view
+        const container = document.getElementById('messages-container');
+        const bubble = document.createElement('div');
+        bubble.className = 'max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-2.5 text-xs text-orionText font-mono relative bubble-out ml-auto';
+        bubble.innerHTML = `
+          <div class="leading-relaxed whitespace-pre-wrap break-words">${escapeHtml(text)}</div>
+          <div class="text-[9px] text-orionMuted/80 text-right mt-1 flex items-center justify-end">
+            <span>Just now</span>
+            <span class="text-orionAccent ml-1">✓✓</span>
+          </div>
+        `;
+        container.appendChild(bubble);
+        container.scrollTop = container.scrollHeight;
+
+        // Refresh chat list snippet
+        loadChats();
+      } catch (err) {
+        showToast(`Send failed: ${err.message}`);
+      }
+    }
+
+    // Update Right Profile
+    async function updateRightProfile(chat) {
+      document.getElementById('profile-avatar').textContent = chat.initials || 'TG';
+      document.getElementById('profile-title').textContent = chat.title;
+      document.getElementById('profile-username').textContent = chat.username ? `@${chat.username}` : '';
+      document.getElementById('profile-bio').textContent = chat.bio || 'Encrypted Telegram communication channel.';
+      document.getElementById('profile-phone').textContent = chat.phone || (chat.type === 'private' ? '+92 300 1234567' : 'Group Channel');
+      document.getElementById('profile-members-count').textContent = `${chat.members_count || 1} members`;
+
+      // Load members
+      const membersContainer = document.getElementById('profile-members-list');
+      try {
+        const members = await api(`/api/telegram/members/${chat.id}`);
+        membersContainer.innerHTML = members.map(m => `
+          <div class="flex items-center justify-between py-1 border-b border-orionBorder/30">
+            <span class="text-orionText">${m.first_name} ${m.last_name || ''}</span>
+            <span class="text-[10px] text-orionAccent uppercase">${m.status || 'member'}</span>
+          </div>
+        `).join('');
+      } catch (_) {
+        membersContainer.innerHTML = '<p class="text-orionMuted">Members list unavailable.</p>';
+      }
+    }
+
+    // Load Proxies in Modal
+    async function loadProxiesModal() {
+      const container = document.getElementById('proxy-list-items');
+      container.innerHTML = '<div class="p-3 text-center text-orionMuted">Loading proxy nodes...</div>';
+      try {
+        const proxies = await api('/api/telegram/proxies');
+        container.innerHTML = proxies.map((p, idx) => `
+          <div class="p-3 flex items-center justify-between hover:bg-orionCardElevated cursor-pointer transition-colors">
+            <div class="flex items-center gap-2.5">
+              <span class="w-2 h-2 rounded-full ${p.status === 'online' ? 'bg-emerald-400' : 'bg-red-400'}"></span>
+              <div>
+                <p class="text-xs font-bold text-orionText">${p.name || `${p.host || p.server}:${p.port}`}</p>
+                <p class="text-[10px] text-orionMuted uppercase">${p.type} • ${p.country || 'Relay'}</p>
+              </div>
+            </div>
+            <div class="text-right">
+              <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${p.status === 'online' ? 'bg-emerald-950 text-emerald-400 border border-emerald-500/40' : 'bg-red-950 text-red-400'}">
+                ${p.ping ? p.ping + 'ms' : 'Ready'}
+              </span>
+            </div>
+          </div>
+        `).join('');
+      } catch (err) {
+        container.innerHTML = `<div class="p-3 text-orionDanger">Error loading proxies: ${err.message}</div>`;
+      }
+    }
+
+    // Escape HTML helper
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // =========================================================================
+    // EVENT LISTENERS & INITIALIZATION
+    // =========================================================================
+    document.addEventListener('DOMContentLoaded', () => {
+      loadMe();
+      loadStatus();
+      loadChats();
+
+      // Poll status every 8 seconds
+      setInterval(loadStatus, 8000);
+
+      // Search input dynamic filter
+      document.getElementById('chat-search-input').addEventListener('input', renderChatList);
+
+      // Category Tabs
+      document.querySelectorAll('.chat-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          document.querySelectorAll('.chat-tab').forEach(t => {
+            t.classList.remove('active', 'bg-emerald-950/80', 'text-orionAccent', 'font-bold', 'border', 'border-orionBorderStrong');
+            t.classList.add('text-orionMuted');
+          });
+          tab.classList.add('active', 'bg-emerald-950/80', 'text-orionAccent', 'font-bold', 'border', 'border-orionBorderStrong');
+          tab.classList.remove('text-orionMuted');
+          currentTab = tab.dataset.tab;
+          renderChatList();
+        });
+      });
+
+      // Form Send Message
+      document.getElementById('message-form').addEventListener('submit', sendMessage);
+      document.getElementById('message-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+
+      // Mobile back button
+      document.getElementById('mobile-back-btn').addEventListener('click', () => {
+        document.getElementById('left-panel').classList.remove('hidden');
+        document.getElementById('middle-panel').classList.add('hidden');
+      });
+
+      // Toggle Right Profile Panel
+      const rightPanel = document.getElementById('right-panel');
+      document.getElementById('toggle-profile-btn').addEventListener('click', () => {
+        rightPanel.classList.toggle('hidden');
+      });
+      document.getElementById('close-profile-btn').addEventListener('click', () => {
+        rightPanel.classList.add('hidden');
+      });
+
+      // 3-Dots Menu Dropdown
+      const chatMenuBtn = document.getElementById('chat-menu-btn');
+      const chatDropdownMenu = document.getElementById('chat-dropdown-menu');
+      chatMenuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        chatDropdownMenu.classList.toggle('hidden');
+      });
+      document.addEventListener('click', () => chatDropdownMenu.classList.add('hidden'));
+
+      // Proxy Modal Open / Close
+      const proxyModal = document.getElementById('proxy-modal');
+      document.getElementById('proxy-pill-btn').addEventListener('click', () => {
+        proxyModal.classList.remove('hidden');
+        loadProxiesModal();
+      });
+      document.getElementById('close-proxy-modal').addEventListener('click', () => proxyModal.classList.add('hidden'));
+      document.getElementById('close-proxy-btn-bottom').addEventListener('click', () => proxyModal.classList.add('hidden'));
+
+      // Refresh Proxies Button
+      document.getElementById('refresh-proxies-btn').addEventListener('click', async () => {
+        showToast('Testing all Telegram proxies...');
+        try {
+          await api('/api/telegram/proxies/refresh', { method: 'POST' });
+          await loadProxiesModal();
+          await loadStatus();
+          showToast('Proxies refreshed & best node active.');
+        } catch (err) {
+          showToast(`Refresh error: ${err.message}`);
+        }
+      });
+
+      // Add Manual Proxy Form
+      document.getElementById('add-proxy-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+          type: document.getElementById('new-proxy-type').value,
+          host: document.getElementById('new-proxy-host').value.trim(),
+          port: parseInt(document.getElementById('new-proxy-port').value, 10),
+          username: document.getElementById('new-proxy-user').value.trim(),
+          password: document.getElementById('new-proxy-pass').value.trim(),
+        };
+        try {
+          showToast('Testing manual proxy...');
+          const added = await api('/api/telegram/proxies', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          showToast(`Proxy ${added.host} status: ${added.status} (${added.ping}ms)`);
+          loadProxiesModal();
+          loadStatus();
+          e.target.reset();
+        } catch (err) {
+          showToast(`Error: ${err.message}`);
+        }
+      });
+
+      // Login Modal Open / Close
+      const loginModal = document.getElementById('login-modal');
+      document.getElementById('auth-status-btn').addEventListener('click', () => {
+        loginModal.classList.remove('hidden');
+      });
+      document.getElementById('close-login-modal').addEventListener('click', () => loginModal.classList.add('hidden'));
+
+      // Step 1: Send Phone Code
+      document.getElementById('login-phone-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const phone = document.getElementById('login-phone-input').value.trim();
+        const btn = document.getElementById('btn-send-code');
+        btn.disabled = true;
+        btn.textContent = 'Connecting via proxy...';
+        try {
+          const res = await api('/api/telegram/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: phone }),
+          });
+          phoneCodeHash = res.phone_code_hash;
+          showToast(res.message || 'Code sent!');
+          document.getElementById('login-step-phone').classList.add('hidden');
+          document.getElementById('login-step-code').classList.remove('hidden');
+        } catch (err) {
+          showToast(`Login error: ${err.message}`);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Send Verification Code';
+        }
+      });
+
+      // Step 2: Verify Code
+      document.getElementById('login-code-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const code = document.getElementById('login-code-input').value.trim();
+        const btn = document.getElementById('btn-verify-code');
+        btn.disabled = true;
+        btn.textContent = 'Verifying...';
+        try {
+          const res = await api('/api/telegram/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: code, phone_code_hash: phoneCodeHash }),
+          });
+          showToast(res.message || 'Authenticated successfully!');
+          loginModal.classList.add('hidden');
+          loadMe();
+          loadChats();
+        } catch (err) {
+          showToast(`Verification error: ${err.message}`);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Verify & Connect';
+        }
+      });
+
+      // Edit Profile Modal
+      const editModal = document.getElementById('edit-profile-modal');
+      document.getElementById('my-profile-btn').addEventListener('click', () => {
+        if (meProfile) {
+          document.getElementById('edit-fname').value = meProfile.first_name || '';
+          document.getElementById('edit-lname').value = meProfile.last_name || '';
+          document.getElementById('edit-bio').value = meProfile.bio || '';
+        }
+        editModal.classList.remove('hidden');
+      });
+      document.getElementById('close-edit-modal').addEventListener('click', () => editModal.classList.add('hidden'));
+      document.getElementById('cancel-edit-btn').addEventListener('click', () => editModal.classList.add('hidden'));
+
+      document.getElementById('edit-profile-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+          first_name: document.getElementById('edit-fname').value.trim(),
+          last_name: document.getElementById('edit-lname').value.trim(),
+          bio: document.getElementById('edit-bio').value.trim(),
+        };
+        try {
+          const updated = await api('/api/telegram/profile/edit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          meProfile = updated;
+          loadMe();
+          editModal.classList.add('hidden');
+          showToast('Profile updated successfully.');
+        } catch (err) {
+          showToast(`Profile update failed: ${err.message}`);
+        }
+      });
+
+      // File attachment trigger
+      document.getElementById('attach-btn').addEventListener('click', () => {
+        document.getElementById('media-file-input').click();
+      });
+      document.getElementById('media-file-input').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file || !activeChatId) return;
+        showToast(`Uploading ${file.name}...`);
+        const formData = new FormData();
+        formData.append('chat_id', activeChatId);
+        formData.append('file', file);
+        formData.append('caption', file.name);
+
+        try {
+          await api('/api/telegram/send_media', {
+            method: 'POST',
+            body: formData,
+          });
+          showToast('File sent via proxy!');
+          loadMessages(activeChatId);
+        } catch (err) {
+          showToast(`Media upload failed: ${err.message}`);
+        }
+      });
+
+      // Quick Emoji Button
+      document.getElementById('emoji-btn').addEventListener('click', () => {
+        const emojis = ['👍', '🔥', '🛡️', '⚡', '🇵🇰', '💻', '🚀'];
+        const input = document.getElementById('message-input');
+        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+        input.value += (input.value ? ' ' : '') + randomEmoji;
+        input.focus();
+      });
+
+      lucide.createIcons();
+    });
+  </script>
+</body>
+</html>
+

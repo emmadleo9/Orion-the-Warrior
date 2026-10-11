@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.6"
+        android:scaleY="0.6"
+        android:translateX="21.6"
+        android:translateY="21.6">
+        <!-- Stylized Orion Shield / Star icon -->
+        <path
+            android:fillColor="#7c3aed"
+            android:pathData="M54,14 L86,30 L86,64 C86,82 54,94 54,94 C54,94 22,82 22,64 L22,30 Z" />
+        <path
+            android:fillColor="#ffffff"
+            android:pathData="M54,34 L62,50 L80,52 L66,64 L70,82 L54,72 L38,82 L42,64 L28,52 L46,50 Z" />
+    </group>
+</vector>
+

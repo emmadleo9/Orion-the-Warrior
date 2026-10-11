@@ -3,8 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#7c3aed" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Orion the Warrior</title>
+    <link rel="manifest" href="/static/manifest.json" />
     <link rel="icon" type="image/png" href="/static/orion-logo.png" />
+    <link rel="apple-touch-icon" href="/static/orion-logo.png" />
     <link rel="stylesheet" href="/static/styles.css?v=33" />
   </head>
   <body>
@@ -121,9 +127,9 @@
           <section class="hero">
             <div>
               <p class="eyebrow">Local intelligence</p>
-              <h3>Nico de Angelo &amp; Zara</h3>
+              <h3>Nico di Angelo &amp; Leo Valdez</h3>
               <p class="hero-copy">
-                Your private AI partners. Nico handles system control &amp; live operations; Zara delivers witty, lighthearted offline creativity.
+                Your private AI partners. Nico handles system control &amp; live operations; Leo Valdez delivers witty, jolly offline brainstorming &amp; engineering wit.
               </p>
             </div>
           </section>
@@ -193,37 +199,37 @@
             <pre id="ai-response" class="visually-hidden" aria-live="polite"></pre>
           </section>
 
-          <!-- Chat with Zara Panel (Celestial Gold Theme, Jolly & Light) -->
-          <section class="panel chat-panel zara-panel">
+          <!-- Chat with Leo Valdez Panel (Synced with Orion App Colors) -->
+          <section class="panel chat-panel leo-panel zara-panel">
             <div class="chat-heading">
               <div>
-                <p class="eyebrow zara-eyebrow">✨ BACKUP OFFLINE MODEL · CELESTIAL GOLD</p>
-                <h3 class="zara-title">Chat with Zara ✨</h3>
+                <p class="eyebrow leo-eyebrow zara-eyebrow">🔥 BACKUP OFFLINE MODEL · LEO VALDEZ</p>
+                <h3 class="leo-title zara-title">Chat with Leo Valdez 🔥</h3>
               </div>
               <div class="chat-controls">
                 <div>
-                  <select id="zara-model-selector" class="model-select zara-model-select" title="Zara's Active Model">
+                  <select id="leo-model-selector" class="model-select leo-model-select zara-model-select" title="Leo Valdez's Active Model">
                     <option value="">Loading models...</option>
                   </select>
-                  <span class="model-status zara-model-status" id="zara-model-status">Checking…</span>
+                  <span class="model-status leo-model-status zara-model-status" id="leo-model-status">Checking…</span>
                 </div>
                 <div class="chat-action-buttons">
-                  <button id="zara-clear-btn" class="secondary-button zara-secondary-btn" type="button">Clear chat</button>
+                  <button id="leo-clear-btn" class="secondary-button leo-secondary-btn zara-secondary-btn" type="button">Clear chat</button>
                 </div>
               </div>
             </div>
-            <div class="chat-messages zara-messages" id="zara-messages" role="log" aria-live="polite" aria-label="Zara chat messages">
-              <div class="message assistant-message zara-msg">
-                <span class="message-author zara-author">ZARA ✨</span>
-                <div class="message-body"><p>Hey hey! I'm Zara 😊 Nico's cheerful backup. No live web lookups from me (that's Nico's thing!) — but brainstorming, explanations, Orion Q&amp;A, and good vibes? All me! 🎉 What's up?</p></div>
+            <div class="chat-messages leo-messages zara-messages" id="leo-messages" role="log" aria-live="polite" aria-label="Leo Valdez chat messages">
+              <div class="message assistant-message leo-msg zara-msg">
+                <span class="message-author leo-author zara-author">LEO VALDEZ 🔥</span>
+                <div class="message-body"><p>Hey there! I'm Leo Valdez 🔥 — son of Hephaestus and your witty offline backup mechanic! Live web lookups go to my brooding buddy Nico, but machines, brainstorming, Orion system troubleshooting, and fire jokes? That's all me! What are we building today? 🔧</p></div>
               </div>
             </div>
-            <form class="chat-form" id="zara-form">
-              <label class="visually-hidden" for="zara-prompt">Message Zara</label>
-              <textarea id="zara-prompt" rows="2" maxlength="4000" placeholder="Message Zara… (Enter to send, Shift+Enter for newline)" required></textarea>
-              <button id="zara-send-btn" class="primary btn-zara" type="submit">Send ✨</button>
+            <form class="chat-form" id="leo-form">
+              <label class="visually-hidden" for="leo-prompt">Message Leo Valdez</label>
+              <textarea id="leo-prompt" rows="2" maxlength="4000" placeholder="Message Leo Valdez… (Enter to send, Shift+Enter for newline)" required></textarea>
+              <button id="leo-send-btn" class="primary btn-leo btn-zara" type="submit">Send 🔥</button>
             </form>
-            <p class="chat-hint zara-hint">Zara is your jolly offline backup — great for chat, ideas &amp; Orion questions! 🌟</p>
+            <p class="chat-hint leo-hint zara-hint">Leo Valdez is your witty offline mechanic — great for banter, ideas, troubleshooting &amp; Orion questions! 🔥🔧</p>
           </section>
 
           <section class="grid summary-grid">
@@ -454,8 +460,8 @@
                 <div><p class="eyebrow">SOCIAL</p><h3>Instagram</h3></div>
               </div>
               <span id="instagram-connection-state" class="connection-state">NOT CONNECTED</span>
-              <p>Open Instagram to review your feed, messages, and account activity.</p>
-              <button class="secondary-button open-social" type="button" data-platform="instagram">Open Instagram ↗</button>
+              <p>Open built-in Instagram to review your direct inbox and messages.</p>
+              <a class="secondary-button open-social" href="/instagram" style="text-decoration:none; text-align:center; display:flex; align-items:center; justify-content:center;">Open Built-in Instagram</a>
             </article>
           </div>
 
@@ -587,6 +593,13 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=34"></script>
+    <script src="/static/app.js?v=35"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js')
+          .then(() => console.log('[Orion SW] registered'))
+          .catch((err) => console.warn('[Orion SW] registration failed', err));
+      }
+    </script>
   </body>
 </html>

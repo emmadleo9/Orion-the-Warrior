@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="orion_dark">#0a0e14</color>
+    <color name="orion_card">#151a22</color>
+    <color name="orion_card_light">#1c2433</color>
+    <color name="orion_border">#1f293d</color>
+    <color name="orion_purple">#7c3aed</color>
+    <color name="orion_purple_dark">#5b21b6</color>
+    <color name="orion_purple_accent">#8b5cf6</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="text_muted">#94a3b8</color>
+    <color name="status_green">#10b981</color>
+    <color name="status_red">#ef4444</color>
+</resources>
+

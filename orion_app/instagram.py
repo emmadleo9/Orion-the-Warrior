@@ -55,6 +55,16 @@ class InstagramIntegration:
     def configured(self) -> bool:
         return bool(self.app_id and self.app_secret)
 
+    @property
+    def access_token(self) -> str | None:
+        with self._lock:
+            return self._token.access_token if self._token and self._token.expires_at > time.time() else None
+
+    @property
+    def ig_user_id(self) -> str | None:
+        with self._lock:
+            return self._token.user_id if self._token and self._token.expires_at > time.time() else None
+
     def status(self) -> dict:
         with self._lock:
             token = self._token
@@ -182,6 +192,16 @@ class InstagramIntegration:
     def profile(self) -> dict:
         return self._api("me", params={"fields": "user_id,username,account_type,media_count"})
 
+    def get_user_profile(self) -> dict:
+        with self._lock:
+            token = self._token
+            if token is None or token.expires_at <= time.time():
+                return {}
+        try:
+            return self.profile()
+        except Exception:
+            return {}
+
     def media(self, limit: int = 20) -> dict:
         return self._api(
             "me/media",
@@ -224,22 +244,55 @@ class InstagramIntegration:
             params={"platform": "instagram", "fields": "id,updated_time"},
         )
 
+    def get_conversations(self) -> list[dict]:
+        with self._lock:
+            token = self._token
+            if token is None or token.expires_at <= time.time():
+                return []
+        fields = "participants,snippet,updated_time,messages{id,message,from,to,created_time}"
+        user_target = token.user_id or "me"
+
+        # Try graph.facebook.com first as specified for Instagram Messaging Graph API
+        for base in ("https://graph.facebook.com", self.GRAPH_URL):
+            try:
+                res = self._api(
+                    f"{user_target}/conversations",
+                    params={"platform": "instagram", "fields": fields},
+                    base_url=base,
+                )
+                if isinstance(res, dict) and "data" in res and isinstance(res["data"], list):
+                    return res["data"]
+            except Exception:
+                continue
+
+        # Fallback to me/conversations on default Graph URL
+        try:
+            res = self._api("me/conversations", params={"platform": "instagram", "fields": fields})
+            if isinstance(res, dict) and "data" in res and isinstance(res["data"], list):
+                return res["data"]
+        except Exception:
+            pass
+
+        return []
+
     def conversation_messages(self, conversation_id: str) -> dict:
         return self._api(
             self._validate_id(conversation_id),
             params={"fields": "messages{id,created_time,from,to,message}"},
         )
 
-    def send_message(self, recipient_id: str, message: str) -> dict:
-        cleaned = message.strip()
-        if not cleaned or len(cleaned) > 1000:
+    def send_message(self, recipient_id: str, message: str = "", text: str = "") -> dict:
+        content = (text or message).strip()
+        if not content or len(content) > 1000:
             raise InstagramError("Instagram messages must contain 1 to 1000 characters.")
+        token = self._require_token()
+        user_id = token.user_id or "me"
         return self._api(
-            f"{self._require_token().user_id}/messages",
+            f"{user_id}/messages",
             method="POST",
             form={
                 "recipient": json.dumps({"id": self._validate_id(recipient_id)}),
-                "message": json.dumps({"text": cleaned}),
+                "message": json.dumps({"text": content}),
             },
         )
 
@@ -299,6 +352,7 @@ class InstagramIntegration:
         params: dict[str, str] | None = None,
         method: str = "GET",
         form: dict[str, str] | None = None,
+        base_url: str | None = None,
     ) -> dict:
         token = self._require_token()
         request_params = dict(params or {})
@@ -307,7 +361,8 @@ class InstagramIntegration:
         else:
             form = dict(form or {})
             form["access_token"] = token.access_token
-        url = f"{self.GRAPH_URL}/{self.api_version}/{path}"
+        base = base_url or self.GRAPH_URL
+        url = f"{base}/{self.api_version}/{path}"
         if request_params:
             url += "?" + urlencode(request_params)
         return self._request(url, method=method, form=form)
@@ -355,3 +410,6 @@ class InstagramIntegration:
             message = error.get("message") if isinstance(error, dict) else None
             raise InstagramError(message or "Instagram rejected the request.")
         return result
+
+
+InstagramManager = InstagramIntegration

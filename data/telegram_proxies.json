@@ -1,0 +1,71 @@
+[
+  {
+    "id": "proxy-sg-1",
+    "name": "Singapore SOCKS5 High-Speed",
+    "type": "socks5",
+    "host": "142.93.245.164",
+    "port": 1080,
+    "username": "",
+    "password": "",
+    "ping": 9999,
+    "status": "offline",
+    "country": "SG",
+    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "online": false
+  },
+  {
+    "id": "proxy-tor-local",
+    "name": "Local SOCKS5 Tunnel (v2ray/Tor/Shadowsocks)",
+    "type": "socks5",
+    "host": "127.0.0.1",
+    "port": 1080,
+    "username": "",
+    "password": "",
+    "ping": 9999,
+    "status": "offline",
+    "country": "Local",
+    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "online": false
+  },
+  {
+    "id": "proxy-nl-1",
+    "name": "Amsterdam SOCKS5 Fast Node",
+    "type": "socks5",
+    "host": "188.166.248.87",
+    "port": 1080,
+    "username": "",
+    "password": "",
+    "ping": 9999,
+    "status": "offline",
+    "country": "NL",
+    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "online": false
+  },
+  {
+    "id": "proxy-us-1",
+    "name": "US Cloud SOCKS5 Node",
+    "type": "socks5",
+    "host": "159.203.44.157",
+    "port": 1080,
+    "username": "",
+    "password": "",
+    "ping": 9999,
+    "status": "offline",
+    "country": "US",
+    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "online": false
+  },
+  {
+    "id": "proxy-mtproto-1",
+    "name": "Cloudflare MTProto Secure Relay",
+    "type": "mtproto",
+    "server": "149.154.167.50",
+    "port": 443,
+    "secret": "ee11111111111111111111111111111111626c6f672e636c6f7564666c6172652e636f6d",
+    "ping": 388,
+    "status": "online",
+    "country": "Relay",
+    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "online": true
+  }
+]

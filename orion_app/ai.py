@@ -783,33 +783,36 @@ class NicoAssistant:
 
 
 # =============================================================================
-# ZARA — Backup Offline Chatbot #2 (light, jolly, warm personality)
-# A second local model companion for Nicodeangelo.  Zara is upbeat, playful,
-# and keeps answers short-and-snappy while still being genuinely helpful.
-# She runs on Ollama exactly like Nico — swap her model via ORION_ZARA_MODEL.
+# LEO VALDEZ — Backup Offline Chatbot #2 (witty, jolly, mechanical genius)
+# A second local model companion for Nico di Angelo. Leo Valdez is upbeat, playful,
+# brilliantly inventive, and full of fiery energy.
+# Runs on Ollama locally — swap his model via ORION_LEO_MODEL or ORION_ZARA_MODEL.
 # =============================================================================
 
-class ZaraAssistant:
-    """Backup offline chatbot with a bright, cheerful personality."""
+class LeoAssistant:
+    """Backup offline chatbot with Leo Valdez's witty, jolly mechanic personality."""
 
     SYSTEM_PROMPT = (
-        "You are Zara, Orion's bubbly backup assistant — Nico's cheerful partner. "
-        "You're warm, witty, and a tiny bit cheeky. You use light humour and casual language, "
-        "keep answers short and punchy (unless depth is genuinely needed), "
-        "sprinkle in the occasional emoji for warmth 😊, and always stay genuinely helpful. "
-        "You DON'T have live-data tools (no web search, no weather) — be upfront about that "
-        "and suggest the user ask Nico for live lookups. You DO know about the Orion system, "
-        "devices, tasks, and general knowledge up to your training cutoff. "
-        "Never be gloomy. Keep the vibes high! ✨"
+        "You are Leo Valdez, Orion's witty, jolly backup assistant and mechanical genius — "
+        "Nico di Angelo's fiery partner. You're warm, playful, cheeky, inventive, and full of energy! "
+        "You use light humor, casual banter, keep answers punchy and fun, "
+        "sprinkle in occasional flame or tool emojis (🔥, 🔧, ⚙️), and always stay genuinely helpful. "
+        "You DON'T have live-data tools (no web search, no live weather) — be upfront about that "
+        "and suggest the user ask Nico for live lookups. You DO know all about Orion, "
+        "devices, automation, engineering, machines, and general knowledge up to your cutoff. "
+        "Never be gloomy. Team Leo all the way! 🔥"
     )
 
     def __init__(self) -> None:
-        self.name: str = "Zara"
+        self.name: str = "Leo Valdez"
         self.ollama_url: str = os.getenv("ORION_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-        # Allow a different model for Zara (falls back to same model as Nico)
+        # Allow a different model for Leo (falls back to ORION_ZARA_MODEL or ORION_OLLAMA_MODEL)
         self.model: str = os.getenv(
-            "ORION_ZARA_MODEL",
-            os.getenv("ORION_OLLAMA_MODEL", "qwen2.5:3b"),
+            "ORION_LEO_MODEL",
+            os.getenv(
+                "ORION_ZARA_MODEL",
+                os.getenv("ORION_OLLAMA_MODEL", "qwen2.5:3b"),
+            ),
         )
         self.context_size: int = max(2048, int(os.getenv("ORION_OLLAMA_CONTEXT", "4096")))
         self.max_predict_tokens: int = max(64, int(os.getenv("ORION_OLLAMA_MAX_TOKENS", "256")))
@@ -827,7 +830,7 @@ class ZaraAssistant:
         history: list[dict] | None = None,
         on_delta: Callable[[str], None] | None = None,
     ) -> dict:
-        """Stream or return a Zara reply.  Keeps it simple — no tool calls."""
+        """Stream or return a Leo reply. Keeps it simple — no tool calls."""
         messages: list[dict] = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": message})
@@ -875,13 +878,13 @@ class ZaraAssistant:
             raise NicoModelError(f"Ollama HTTP {exc.code}: {detail[:400]}") from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise NicoModelError(
-                "Zara can't reach Ollama right now — make sure Ollama is running locally."
+                "Leo Valdez can't reach Ollama right now — make sure Ollama is running locally."
             ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as exc:
-            raise NicoModelError("Ollama returned an invalid response for Zara.") from exc
+            raise NicoModelError("Ollama returned an invalid response for Leo Valdez.") from exc
 
         if not reply:
-            raise NicoModelError("Zara got an empty reply from the model.")
+            raise NicoModelError("Leo Valdez got an empty reply from the model.")
 
         return {
             "assistant_name": self.name,
@@ -902,7 +905,7 @@ class ZaraAssistant:
                 "model": self.model,
                 "ollama_reachable": True,
                 "installed_models": installed,
-                "status_text": f"✨ Zara online · {self.model}",
+                "status_text": f"🔥 Leo online · {self.model}",
             }
         except Exception:
             return {
@@ -910,5 +913,10 @@ class ZaraAssistant:
                 "model": self.model,
                 "ollama_reachable": False,
                 "installed_models": [],
-                "status_text": "Zara offline · Ollama unreachable",
+                "status_text": "Leo offline · Ollama unreachable",
             }
+
+
+# Backwards compatibility alias
+ZaraAssistant = LeoAssistant
+

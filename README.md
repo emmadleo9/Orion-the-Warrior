@@ -138,7 +138,18 @@ Configure the Meta app's Instagram Business Login callback URL to exactly:
 http://localhost:8000/api/instagram/callback
 ```
 
-Then set the app ID and secret in the PowerShell session used to start Orion:
+Then set the app ID and secret. The easiest way is a `.env` file in the project
+root — copy the template and fill in the two values:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+python main.py
+```
+
+`.env` is git-ignored, and Orion loads it automatically at startup. Variables
+already set in your shell take precedence over the file, so you can also set
+them inline in the session used to start Orion:
 
 ```powershell
 $env:ORION_INSTAGRAM_APP_ID = "<Instagram App ID>"
