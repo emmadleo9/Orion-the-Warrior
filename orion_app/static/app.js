@@ -6,8 +6,6 @@ const taskList = document.getElementById('task-list');
 const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const sendButton = document.getElementById('ask-ai-btn');
-const modelStatus = document.getElementById('model-status');
-const modelSelector = document.getElementById('model-selector');
 const memoryStatus = document.getElementById('memory-status');
 const exportChatBtn = document.getElementById('export-chat-btn');
 const archerForm = document.getElementById('archer-form');
@@ -673,56 +671,6 @@ async function askAi() {
     sendButton.textContent = 'Send message';
     promptBox.focus();
   }
-}
-
-async function loadModelStatus() {
-  try {
-    const status = await fetchJson('/api/assistant/status');
-    modelStatus.textContent = status.available
-      ? status.installed
-        ? `● ${status.model} ready`
-        : `● Ollama online · install ${status.model}`
-      : '● Ollama offline';
-    modelStatus.classList.toggle('online', status.available && status.installed);
-    modelStatus.classList.toggle('offline', !status.available || !status.installed);
-
-    if (modelSelector && status.installed_models) {
-      modelSelector.replaceChildren();
-      if (!status.installed_models.length) {
-        const opt = document.createElement('option');
-        opt.value = status.model;
-        opt.textContent = status.model;
-        modelSelector.append(opt);
-      } else {
-        for (const m of status.installed_models) {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = m;
-          if (m === status.model || m.startsWith(status.model)) opt.selected = true;
-          modelSelector.append(opt);
-        }
-      }
-    }
-  } catch (error) {
-    modelStatus.textContent = `● Status unavailable: ${error.message}`;
-    modelStatus.classList.add('offline');
-  }
-}
-
-if (modelSelector) {
-  modelSelector.addEventListener('change', async () => {
-    try {
-      const chosen = modelSelector.value;
-      if (!chosen) return;
-      await fetchJson('/api/ollama/model', {
-        method: 'POST',
-        body: JSON.stringify({ model: chosen }),
-      });
-      await loadModelStatus();
-    } catch (error) {
-      alert(`Could not switch model: ${error.message}`);
-    }
-  });
 }
 
 /* ==========================================================================
@@ -1697,7 +1645,6 @@ if (archerForm) {
 addListenerSafe('clear-memory-btn', 'click', clearMemory);
 
 // Initialize all modules
-loadModelStatus();
 loadArcherStatus();
 loadConversation().catch((error) => {
   addMessage('assistant', `Could not load local memory: ${error.message}`);
