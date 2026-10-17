@@ -1,11 +1,11 @@
 # Orion the Warrior
 
-Orion the Warrior is a local-first command center and personal automation starter for consolidating communication, device management, and a local AI assistant called Nico de Angelo.
+Orion the Warrior is a local-first command center and personal automation starter for consolidating communication, device management, and a local AI assistant called ORI-9.0-GEN-1.
 
 ## Features
 
 - **Live Host Telemetry**: Real-time CPU, RAM, Disk storage, OS platform, and system uptime monitoring displayed in Mission Control and sidebar.
-- **Private Local AI Assistant ("Nico de Angelo")**: Context-aware chat powered by local Ollama models with streamed responses and rich Markdown rendering.
+- **Private Local AI Assistant ("ORI-9.0-GEN-1")**: Context-aware chat powered by local Ollama models with streamed responses and rich Markdown rendering.
 - **Expanded AI Tools**: Live web search (DuckDuckGo), Open-Meteo weather forecasts, local time, Orion status, host system telemetry, deterministic safe math calculator, and device task dispatching.
 - **Conversation Management & Export**: Local SQLite archive with FTS5 indexing, model selector/switcher, and instant Markdown/JSON conversation export.
 - **Hardware & Device Control Hub**: Dedicated interactive device mesh view with SQLite persistence, device registration, ping heartbeats, and task lifecycle execution.
@@ -46,14 +46,14 @@ requirements.
 The service is configured as a public, unauthenticated web app. Anyone with
 its URL can access the app's API and use configured integrations; do not put
 private conversations or account actions on this deployment. Local SQLite data,
-generated images, Nico's conversation archive, task-run history, and Instagram
+generated images, ORI-9.0-GEN-1's conversation archive, task-run history, and Instagram
 tokens are not durable across Render free-instance restarts. Persistent storage
 or a database migration is required before using the cloud service for data you
 need to retain.
 
 Cloud Orion cannot reach Ollama at `127.0.0.1` on your laptop. Configure
 `ORION_OLLAMA_URL` in Render to point to an Ollama service reachable from the
-cloud, or Nico chat will remain unavailable. Do not expose an unauthenticated
+cloud, or ORI-9.0-GEN-1 chat will remain unavailable. Do not expose an unauthenticated
 Ollama server to the public internet. Offline Archer generation is not included
 on this lightweight deployment; online generation depends on the external
 image service. Instagram authorization tokens are memory-only and are lost
@@ -62,7 +62,7 @@ HTTPS callback URL for the Render service and register the same URI in the Meta
 developer console before connecting Instagram. Add secrets through Render's
 environment settings, never to `render.yaml` or source control.
 
-## Enable Nico chat
+## Enable ORI-9.0-GEN-1 chat
 
 Install [Ollama](https://ollama.com/download), open it, then download the default model:
 
@@ -77,16 +77,16 @@ external AI API key is used. By default, Orion connects to
 `ORION_OLLAMA_URL` or `ORION_OLLAMA_MODEL` before starting Orion. The chat panel
 shows whether Ollama and the selected model are ready.
 
-Nico can use bounded tools for DuckDuckGo web search, Open-Meteo weather,
+ORI-9.0-GEN-1 can use bounded tools for DuckDuckGo web search, Open-Meteo weather,
 computer-local time, and Orion's current device/task lists. Web search queries
 are sent to DuckDuckGo; weather location queries and coordinates are sent to
 Open-Meteo. Orion device and task data stays on this computer. Ask for weather
-by city or location; Nico does not automatically access device location. Search
+by city or location; ORI-9.0-GEN-1 does not automatically access device location. Search
 and weather require an internet connection.
 
 ## Live task activity
 
-Open **Tasks** in the sidebar to view live runs for Nico responses, Archer image
+Open **Tasks** in the sidebar to view live runs for ORI-9.0-GEN-1 responses, Archer image
 generation, Instagram actions, and device/task requests. Orion streams status
 changes and safe progress messages to the browser and keeps the most recent
 100 runs in process memory; task history resets when Orion restarts. Prompts,
@@ -95,7 +95,7 @@ activity log. This monitor reports Orion's built-in operations; it does not run
 arbitrary code submitted by users or display source code.
 
 Chat is archived in `orion_app/data/conversations.sqlite3` by default (or the path
-set by `ORION_MEMORY_PATH`). Nico recalls recent messages plus a small set of
+set by `ORION_MEMORY_PATH`). ORI-9.0-GEN-1 recalls recent messages plus a small set of
 relevant older messages; the complete 999,999-message archive is not sent to the
 model at once because local models have finite context windows. Use **Clear
 memory** to remove this browser conversation. Replies stream as the local model
@@ -106,7 +106,7 @@ generally use less memory and respond faster.
 The archive is local SQLite data and is not encrypted by the app; protect the
 computer account and database file accordingly.
 
-Nico does not automatically install or execute every open-source tool on the
+ORI-9.0-GEN-1 does not automatically install or execute every open-source tool on the
 internet. That ecosystem is not a single compatible or trusted tool set.
 Currently, only the explicitly built-in search, weather, local-time, and
 read-only Orion-status tools are available; additional integrations need a

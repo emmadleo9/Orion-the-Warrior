@@ -660,7 +660,7 @@ async function askAi() {
       }
     }
     if (paintQueued) flushReply();
-    if (!completed) throw new Error('Nico’s response stream ended unexpectedly.');
+    if (!completed) throw new Error('ORI-9.0-GEN-1’s response stream ended unexpectedly.');
     assistantMessage.classList.remove('pending-message');
   } catch (error) {
     bodyEl.innerHTML = `<p class="error-text">Connection issue: ${error.message}</p>`;
