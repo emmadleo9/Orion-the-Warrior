@@ -166,9 +166,9 @@ def test_get_instagram_html_view(test_client):
     assert "text/html" in res.headers["content-type"]
     html = res.text
     assert "https://cdn.tailwindcss.com" in html
-    assert "#0a0e14" in html
-    assert "#151a22" in html
-    assert "#7c3aed" in html
+    assert "#020d08" in html
+    assert "#041a12" in html
+    assert "#00ff9d" in html
     assert "Always stored locally in Orion" in html
     assert "Instagram Direct" in html
 

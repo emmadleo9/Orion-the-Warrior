@@ -90,9 +90,71 @@ body {
   54%      { opacity: 1; }
 }
 
+@keyframes hacker-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  body { animation: none; }
+  .brand-title-hacker { animation: none; }
+  .brand-mark { animation: none; }
+  .sidebar::before { animation: none; }
+  .nav::before { animation: none; }
+  .hero::before, .hero::after { animation: none; }
+  .hero h3::before { animation: none; }
+  button.primary::after, #ask-ai-btn::after { animation: none; }
+  .message-author::before { animation: none; }
+  .hacker-text, .hacker-text * { animation: none !important; }
   body::after { animation: none; }
+  body { animation: none; }
+}
+
+/* ---- Reusable hacker shifting-green text utility ---- */
+/* Apply to any heading/label to give it the glitchy green pattern. */
+.hacker-text {
+  font-family: "Consolas", "Courier New", monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+  text-shadow:
+    0 0 8px rgba(0, 255, 157, 0.55),
+    0 0 22px rgba(0, 255, 157, 0.3);
+  display: inline-block;
+  animation: hacker-text-shift 3s steps(3) infinite;
+}
+
+@keyframes hacker-text-shift {
+  0%, 100% {
+    transform: translate(0, 0) skewX(0deg);
+    color: var(--accent-strong);
+    text-shadow:
+      0 0 8px rgba(0, 255, 157, 0.55),
+      0 0 22px rgba(0, 255, 157, 0.3);
+  }
+  33% {
+    transform: translate(-1px, 1px) skewX(-4deg);
+    color: var(--accent-bright);
+    text-shadow:
+      0 0 12px rgba(0, 255, 157, 0.85),
+      0 0 28px rgba(0, 255, 157, 0.5);
+  }
+  66% {
+    transform: translate(1px, -1px) skewX(3deg);
+    color: var(--green);
+    text-shadow:
+      0 0 10px rgba(157, 255, 184, 0.8),
+      0 0 26px rgba(0, 255, 157, 0.45);
+  }
+}
+
+/* Dashboard section headings get the hacker treatment */
+.topbar h2, .hero h3, .panel h3, .archer-title h3,
+#archer-title, #studio-title, #devices-title, #social-title,
+#tasks-title, #task-runs-title, #instagram-manager-title,
+#telegram-panel-title, #draft-title {
+  font-family: "Consolas", "Courier New", monospace;
+  letter-spacing: 0.05em;
+  text-shadow: 0 0 10px rgba(0, 255, 157, 0.4);
 }
 
 * { box-sizing: border-box; }
@@ -965,6 +1027,8 @@ button.primary::after, #ask-ai-btn::after {
   color: var(--gold);
   text-shadow: 0 0 6px rgba(255, 224, 74, 0.8);
 }
+
+.message-source {
   display: block;
   margin-top: 8px;
   color: var(--muted);
