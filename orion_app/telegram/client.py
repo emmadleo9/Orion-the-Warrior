@@ -22,17 +22,59 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-try:
-    from pyrogram import Client, filters
-    from pyrogram.errors import (
-        FloodWait,
-        PhoneCodeExpired,
-        PhoneCodeInvalid,
-        SessionPasswordNeeded,
-    )
-    _HAS_PYROGRAM = True
-except ImportError:
-    _HAS_PYROGRAM = False
+# Pyrogram is *not* imported at module load: importing it pulls in the entire
+# generated MTProto schema (~22s on a cold start) even when Orion runs in local
+# mode. It is loaded lazily on first live use via ``_ensure_pyrogram()`` so the
+# server boots instantly and only pays the cost when live Telegram is enabled.
+_HAS_PYROGRAM = False
+_PYROGRAM_LOADED = False
+Client = None  # type: ignore[assignment]
+filters = None  # type: ignore[assignment]
+FloodWait = None  # type: ignore[assignment]
+PhoneCodeExpired = None  # type: ignore[assignment]
+PhoneCodeInvalid = None  # type: ignore[assignment]
+SessionPasswordNeeded = None  # type: ignore[assignment]
+
+
+def _ensure_pyrogram() -> bool:
+    """Import Pyrogram on demand; return True when it is usable.
+
+    The heavy ``pyrogram.raw`` schema is only generated/imported the first time
+    this runs, so callers in local/demo mode never pay for it.
+    """
+    global _HAS_PYROGRAM, _PYROGRAM_LOADED
+    global Client, filters, FloodWait, PhoneCodeExpired, PhoneCodeInvalid, SessionPasswordNeeded
+    if _PYROGRAM_LOADED:
+        return _HAS_PYROGRAM
+    _PYROGRAM_LOADED = True
+    try:
+        from pyrogram import Client as _Client
+        from pyrogram import filters as _filters
+        from pyrogram.errors import (
+            FloodWait as _FloodWait,
+            PhoneCodeExpired as _PhoneCodeExpired,
+            PhoneCodeInvalid as _PhoneCodeInvalid,
+            SessionPasswordNeeded as _SessionPasswordNeeded,
+        )
+
+        Client = _Client
+        filters = _filters
+        FloodWait = _FloodWait
+        PhoneCodeExpired = _PhoneCodeExpired
+        PhoneCodeInvalid = _PhoneCodeInvalid
+        SessionPasswordNeeded = _SessionPasswordNeeded
+        _HAS_PYROGRAM = True
+    except ImportError:
+        _HAS_PYROGRAM = False
+    return _HAS_PYROGRAM
+
+
+def _pyrogram_installed() -> bool:
+    """Cheap check for a Pyrogram install without importing its heavy schema."""
+    from importlib.util import find_spec
+
+    return find_spec("pyrogram") is not None
+
 
 from .config import DEFAULT_API_HASH, DEFAULT_API_ID, load_telegram_config
 from .proxy_manager import telegram_proxy_manager
@@ -296,7 +338,7 @@ class OrionTelegramClient:
     @property
     def _live(self) -> bool:
         """True when a live, authorized Pyrogram session is ready for API calls."""
-        return bool(self._client and self._is_authorized and _HAS_PYROGRAM)
+        return bool(self._client and self._is_authorized)
 
     @staticmethod
     def _int(value: Any) -> Optional[int]:
@@ -405,7 +447,7 @@ class OrionTelegramClient:
 
     def _init_pyrogram_client(self, proxy_info: Optional[Dict[str, Any]] = None) -> None:
         """Create or recreate Pyrogram Client configured with the best proxy."""
-        if not _HAS_PYROGRAM:
+        if not _ensure_pyrogram():
             logger.warning("Pyrogram is not available.")
             return
 
@@ -434,8 +476,11 @@ class OrionTelegramClient:
         """Attempt to connect client on startup using best proxy (opt-in only)."""
         # Never block server startup on a live Telegram handshake unless the user
         # explicitly enabled it; on restricted networks this can hang for minutes.
-        if not (_live_telegram_enabled() and _HAS_PYROGRAM):
+        if not _live_telegram_enabled():
             logger.info("Live Telegram disabled (set ORION_TELEGRAM_LIVE=1 to enable). Running in local mode.")
+            return False
+        if not _ensure_pyrogram():
+            logger.warning("Pyrogram is not available; staying in local mode.")
             return False
 
         best = self._get_best_proxy()
@@ -494,7 +539,7 @@ class OrionTelegramClient:
         # immediately and let the UI proceed while working offline.
         has_session = _TELEGRAM_CONFIG.session_path.exists()
 
-        if _HAS_PYROGRAM and has_session and _live_telegram_enabled():
+        if _ensure_pyrogram() and has_session and _live_telegram_enabled():
             try:
                 async def _send():
                     # Build + connect + request code under ONE hard deadline so a
@@ -540,7 +585,7 @@ class OrionTelegramClient:
         code = str(code).strip()
         phone = self._pending_phone or "+923001234567"
 
-        if self._client and _HAS_PYROGRAM and self._client.is_connected:
+        if self._client and self._client.is_connected:
             try:
                 async def _sign_in():
                     try:
@@ -902,7 +947,7 @@ class OrionTelegramClient:
             "connected": bool(self._is_connected and self._client is not None),
             "authorized": self._is_authorized,
             "live_enabled": _live_telegram_enabled(),
-            "pyrogram_available": _HAS_PYROGRAM,
+            "pyrogram_available": _PYROGRAM_LOADED and _HAS_PYROGRAM or _pyrogram_installed(),
             "user": self.get_me() if self._is_authorized else None,
             "current_proxy": proxy_status["current_proxy"],
             "proxy_connected": proxy_status["connected"],
@@ -1268,7 +1313,7 @@ class OrionTelegramClient:
 
     def logout(self) -> Dict[str, Any]:
         """Sign out of Telegram and clear the local session."""
-        if self._client and _HAS_PYROGRAM and self._is_authorized:
+        if self._client and _live_telegram_enabled() and self._is_authorized:
             try:
                 async def _logout():
                     await self._client.log_out()

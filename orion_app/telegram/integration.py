@@ -47,22 +47,41 @@ _PROXY_ENV_KEYS = (
     "ORION_TELEGRAM_PROXY_SECRET",
 )
 
-# Telethon's TcpMTProxyRandomizedIntermediate connection class. Imported lazily
-# so that a missing/older telethon install degrades gracefully instead of
-# breaking module import (and every test that touches this module).
-try:  # pragma: no cover - exercised indirectly through tests
-    from telethon.network.connection.tcpmtproxy import (
-        ConnectionTcpMTProxyRandomizedIntermediate as _MTProxyConnection,
-    )
-except Exception:  # pragma: no cover
-    _MTProxyConnection = None
+# Telethon is imported lazily: ``import telethon`` costs several seconds and is
+# only needed once a real import/history sync is requested. The module-level
+# names below are populated by ``_ensure_telethon()`` on first use, so Orion
+# boots instantly and the integration degrades gracefully when telethon is absent.
+_MTProxyConnection = None
+_TelethonClient = None
+_SessionPasswordNeededError = None
+_TELETHON_LOADED = False
 
-try:  # pragma: no cover
-    from telethon import TelegramClient as _TelethonClient
-    from telethon.errors import SessionPasswordNeededError as _SessionPasswordNeededError
-except Exception:  # pragma: no cover
-    _TelethonClient = None
-    _SessionPasswordNeededError = None
+
+def _ensure_telethon() -> bool:
+    """Import Telethon on demand; return True when it is usable."""
+    global _MTProxyConnection, _TelethonClient, _SessionPasswordNeededError, _TELETHON_LOADED
+    if _TELETHON_LOADED:
+        return _TelethonClient is not None
+    _TELETHON_LOADED = True
+    try:  # pragma: no cover - exercised indirectly through tests
+        from telethon.network.connection.tcpmtproxy import (
+            ConnectionTcpMTProxyRandomizedIntermediate as _Conn,
+        )
+
+        _MTProxyConnection = _Conn
+    except Exception:  # pragma: no cover
+        _MTProxyConnection = None
+
+    try:  # pragma: no cover
+        from telethon import TelegramClient as _Client
+        from telethon.errors import SessionPasswordNeededError as _PasswordError
+
+        _TelethonClient = _Client
+        _SessionPasswordNeededError = _PasswordError
+    except Exception:  # pragma: no cover
+        _TelethonClient = None
+        _SessionPasswordNeededError = None
+    return _TelethonClient is not None
 
 
 class TelegramIntegrationError(RuntimeError):
@@ -171,6 +190,7 @@ class TelegramProxySettings:
     def telethon_options(self) -> Dict[str, Any]:
         """Return the keyword options Telethon needs to route through this proxy."""
         if self.proxy_type in _MT_TYPES:
+            _ensure_telethon()
             return {
                 "connection": _MTProxyConnection,
                 "proxy": (self.host, self.port, self.secret),
@@ -484,7 +504,7 @@ class TelegramIntegration:
         """Return a connected Telethon client, creating it on first use."""
         if self._client is not None:
             return self._client
-        if _TelethonClient is None:  # pragma: no cover - defensive
+        if not _ensure_telethon():  # pragma: no cover - defensive
             raise TelegramIntegrationError("The telethon library is not installed.")
         if not self._configured():
             raise TelegramIntegrationError(
