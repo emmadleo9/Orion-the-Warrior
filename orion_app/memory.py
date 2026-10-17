@@ -111,7 +111,7 @@ class ConversationMemory:
             return json.dumps(messages, indent=2, ensure_ascii=False)
         lines = [f"# Orion Chat Export - Conversation: {conversation_id}", ""]
         for msg in messages:
-            sender = "Nico de Angelo" if msg.get("role") == "assistant" else "User"
+            sender = "ORI-9.0-GEN-1" if msg.get("role") == "assistant" else "User"
             timestamp = msg.get("created_at", "")
             lines.append(f"### {sender} ({timestamp})")
             lines.append(msg.get("content", ""))

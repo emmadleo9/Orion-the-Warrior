@@ -6,6 +6,7 @@ const taskList = document.getElementById('task-list');
 const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const sendButton = document.getElementById('ask-ai-btn');
+const askAiBtn = document.getElementById('ask-ai-btn');
 const memoryStatus = document.getElementById('memory-status');
 const exportChatBtn = document.getElementById('export-chat-btn');
 const archerForm = document.getElementById('archer-form');
@@ -1627,10 +1628,17 @@ if (chatForm) {
   chatForm.addEventListener('submit', (event) => {
     event.preventDefault();
     event.stopImmediatePropagation();
+    return false;
+  });
+}
+if (askAiBtn) {
+  askAiBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
     try {
       askAi();
     } catch (error) {
-      console.error('[ORION] askAi error:', error);
+      console.error('[ORION] askAi click error:', error);
       if (sendButton) { sendButton.disabled = false; sendButton.textContent = 'Send message'; }
       if (promptBox) promptBox.focus();
     }
@@ -1643,7 +1651,7 @@ if (promptBox) {
       event.preventDefault();
       event.stopImmediatePropagation();
       try {
-        if (chatForm) chatForm.requestSubmit();
+        askAi();
       } catch (error) {
         console.error('[ORION] keydown submit error:', error);
         if (sendButton) { sendButton.disabled = false; sendButton.textContent = 'Send message'; }

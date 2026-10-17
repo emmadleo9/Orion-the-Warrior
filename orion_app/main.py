@@ -28,7 +28,7 @@ from .telemetry import get_system_telemetry
 from .telegram import telegram_client, telegram_proxy_manager
 
 BASE_DIR = Path(__file__).resolve().parent
-assistant = NicoAssistant()
+assistant = NicoAssistant("ORI-9.0-GEN-1")
 leo = LeoAssistant()
 zara = leo  # Backwards compatibility alias
 device_manager = DeviceManager()
@@ -449,7 +449,7 @@ def instagram_publish(payload: InstagramPublishRequest) -> dict:
 def assistant_respond(payload: dict) -> dict:
     prompt = str(payload.get("prompt", ""))
     return run_tracked(
-        "Generate Nico response",
+        "Generate ORI-9.0-GEN-1 response",
         "ai",
         lambda: assistant.respond(prompt),
     )
@@ -464,7 +464,7 @@ def assistant_status() -> dict:
 def assistant_chat(payload: ChatRequest) -> StreamingResponse:
     context = memory.context(payload.conversation_id, payload.message)
     memory.add_message(payload.conversation_id, "user", payload.message)
-    run_id = task_monitor.start("Nico assistant response", "ai")
+    run_id = task_monitor.start("ORI-9.0-GEN-1 assistant response", "ai")
     task_monitor.log(run_id, "Preparing local model request.")
     events: queue.Queue[dict | None] = queue.Queue()
 
@@ -502,7 +502,7 @@ def assistant_chat(payload: ChatRequest) -> StreamingResponse:
             memory.add_message(payload.conversation_id, "assistant", result["message"])
             for tool_name in result["tools_used"]:
                 task_monitor.log(run_id, f"Completed built-in tool: {tool_name}.")
-            task_monitor.finish(run_id, "completed", "Nico finished the response.")
+            task_monitor.finish(run_id, "completed", "ORI-9.0-GEN-1 finished the response.")
             events.put(
                 {
                     "type": "done",
@@ -661,7 +661,7 @@ def clear_leo_memory(conversation_id: str) -> dict:
 @app.post("/api/leo/model")
 @app.post("/api/zara/model")
 def set_leo_model(payload: dict) -> dict:
-    """Switch Leo Valdez's Ollama model at runtime (mirrors Nico's /api/ollama/model)."""
+    """Switch Leo Valdez's Ollama model at runtime (mirrors ORI-9.0-GEN-1's /api/ollama/model)."""
     model_name = str(payload.get("model", "")).strip()
     if not model_name:
         raise HTTPException(status_code=400, detail="model is required")

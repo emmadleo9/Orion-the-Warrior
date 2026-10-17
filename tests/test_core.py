@@ -14,10 +14,10 @@ from orion_app.memory import ConversationMemory
 
 
 def test_nico_can_answer_a_user_prompt():
-    assistant = NicoAssistant("Nico de Angelo")
+    assistant = NicoAssistant("ORI-9.0-GEN-1")
     response = assistant.respond("Summarize my day and prepare a next action")
 
-    assert response["assistant_name"] == "Nico de Angelo"
+    assert response["assistant_name"] == "ORI-9.0-GEN-1"
     assert "Summary" in response["message"]
     assert "Next action" in response["message"]
 
@@ -41,7 +41,7 @@ def test_nico_chat_sends_conversation_to_local_model(monkeypatch, tmp_path):
         [{"role": "user", "content": "Remember this detail"}],
     )
 
-    assert result["assistant_name"] == "Nico de Angelo"
+    assert result["assistant_name"] == "ORI-9.0-GEN-1"
     assert result["message"] == "Hello! Ready when you are."
     assert captured["url"] == "http://127.0.0.1:11434/api/chat"
     assert captured["body"]["model"] == "qwen2.5:3b"

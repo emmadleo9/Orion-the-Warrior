@@ -66,7 +66,7 @@ class _SearchResultParser(HTMLParser):
 
 
 class NicoAssistant:
-    def __init__(self, name: str = "Nico de Angelo", output_dir: str | Path | None = None) -> None:
+    def __init__(self, name: str = "ORI-9.0-GEN-1", output_dir: str | Path | None = None) -> None:
         self.name = name
         configured_output_dir = os.getenv("ORION_GENERATED_DIR")
         self.output_dir = Path(
@@ -150,7 +150,7 @@ class NicoAssistant:
                 break
 
             if round_number == 2:
-                raise NicoModelError("Nico reached the live lookup limit for this message.")
+                raise NicoModelError("ORI-9.0-GEN-1 reached the live lookup limit for this message.")
 
             messages.append(model_message)
             for call in tool_calls:
@@ -187,7 +187,7 @@ class NicoAssistant:
                     }
                 )
         else:
-            raise NicoModelError("Nico couldn't complete the live lookup.")
+            raise NicoModelError("ORI-9.0-GEN-1 couldn't complete the live lookup.")
 
         return {
             "assistant_name": self.name,
@@ -784,7 +784,7 @@ class NicoAssistant:
 
 # =============================================================================
 # LEO VALDEZ — Backup Offline Chatbot #2 (witty, jolly, mechanical genius)
-# A second local model companion for Nico di Angelo. Leo Valdez is upbeat, playful,
+# A second local model companion for ORI-9.0-GEN-1. Leo Valdez is upbeat, playful,
 # brilliantly inventive, and full of fiery energy.
 # Runs on Ollama locally — swap his model via ORION_LEO_MODEL or ORION_ZARA_MODEL.
 # =============================================================================
@@ -794,11 +794,11 @@ class LeoAssistant:
 
     SYSTEM_PROMPT = (
         "You are Leo Valdez, Orion's witty, jolly backup assistant and mechanical genius — "
-        "Nico di Angelo's fiery partner. You're warm, playful, cheeky, inventive, and full of energy! "
+        "ORI-9.0-GEN-1's fiery partner. You're warm, playful, cheeky, inventive, and full of energy! "
         "You use light humor, casual banter, keep answers punchy and fun, "
         "sprinkle in occasional flame or tool emojis (🔥, 🔧, ⚙️), and always stay genuinely helpful. "
         "You DON'T have live-data tools (no web search, no live weather) — be upfront about that "
-        "and suggest the user ask Nico for live lookups. You DO know all about Orion, "
+        "and suggest the user ask ORI-9.0-GEN-1 for live lookups. You DO know all about Orion, "
         "devices, automation, engineering, machines, and general knowledge up to your cutoff. "
         "Never be gloomy. Team Leo all the way! 🔥"
     )

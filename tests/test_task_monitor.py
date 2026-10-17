@@ -6,7 +6,7 @@ from orion_app.task_monitor import TaskMonitor
 def test_task_monitor_publishes_run_lifecycle_and_keeps_messages_safe():
     monitor = TaskMonitor()
     with monitor.subscribe() as subscriber:
-        run_id = monitor.start("Nico assistant response", "ai")
+        run_id = monitor.start("ORI-9.0-GEN-1 assistant response", "ai")
         started = subscriber.get_nowait()
         assert started["id"] == run_id
         assert started["status"] == "running"
@@ -15,7 +15,7 @@ def test_task_monitor_publishes_run_lifecycle_and_keeps_messages_safe():
         progress = subscriber.get_nowait()
         assert progress["logs"][-1]["message"] == "Local model response stream started."
 
-        monitor.finish(run_id, "completed", "Nico finished the response.")
+        monitor.finish(run_id, "completed", "ORI-9.0-GEN-1 finished the response.")
         finished = subscriber.get_nowait()
 
     assert finished["status"] == "completed"
