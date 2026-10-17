@@ -945,9 +945,26 @@ button.primary::after, #ask-ai-btn::after {
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.12em;
+  text-shadow: 0 0 8px rgba(0, 255, 157, 0.4);
+  font-family: "Consolas", "Courier New", monospace;
 }
 
-.message-source {
+/* Hacker shifting green glyph on author names */
+.message-author::before {
+  content: "◆ ";
+  color: var(--accent-strong);
+  text-shadow: 0 0 6px rgba(0, 255, 157, 0.8);
+  animation: hacker-blink 1.6s steps(2) infinite;
+}
+
+.user-message .message-author {
+  color: var(--gold);
+}
+
+.user-message .message-author::before {
+  color: var(--gold);
+  text-shadow: 0 0 6px rgba(255, 224, 74, 0.8);
+}
   display: block;
   margin-top: 8px;
   color: var(--muted);
