@@ -1,19 +1,98 @@
 :root {
-  --bg: #03140b;
-  --bg-panel: rgba(7, 26, 18, 0.92);
-  --bg-alt: rgba(13, 38, 28, 0.96);
-  --bg-elevated: rgba(8, 20, 14, 0.9);
-  --line: rgba(117, 255, 176, 0.2);
-  --text: #d9ffe9;
+  --bg: #020d08;
+  --bg-panel: rgba(4, 22, 14, 0.94);
+  --bg-alt: rgba(8, 30, 20, 0.97);
+  --bg-elevated: rgba(6, 18, 12, 0.92);
+  --line: rgba(82, 247, 163, 0.28);
+  --text: #e6fff0;
   --muted: #8ad6a8;
   --accent: #52f7a3;
   --accent-strong: #00ff9d;
+  --accent-bright: #7cffb0;
   --green: #9dffb8;
   --gold: #ffe04a;
   --amber: #d99b22;
-  --gold-glow: rgba(255, 208, 48, 0.3);
+  --gold-glow: rgba(255, 208, 48, 0.35);
   --danger: #ff7b7b;
-  --shadow: rgba(0, 255, 153, 0.25);
+  --shadow: rgba(0, 255, 153, 0.3);
+  --matrix-green: #00ff9d;
+  --matrix-green-dim: rgba(0, 255, 157, 0.18);
+  --matrix-green-faint: rgba(0, 255, 157, 0.06);
+  --crt-curve: 0.004;
+}
+
+/* ---- Hacker Matrix background: falling green characters ---- */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.015),
+      rgba(255, 255, 255, 0.015) 1px,
+      transparent 1px,
+      transparent 4px
+    ),
+    radial-gradient(ellipse at 50% 0%, rgba(0, 255, 157, 0.10), transparent 45%),
+    radial-gradient(circle at top, rgba(32, 99, 72, 0.55), transparent 34%),
+    linear-gradient(180deg, #010a06 0%, var(--bg) 100%);
+  overflow: hidden;
+}
+
+/* Matrix character rain overlay */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Ctext x='0' y='20' fill='%2300ff9d' font-family='monospace' font-size='14' opacity='0.18'%3E0101110111011100101011010110101%3C/text%3E%3Ctext x='0' y='44' fill='%2352f7a3' font-family='monospace' font-size='14' opacity='0.12'%3E1100110101110111001010110101101%3C/text%3E%3Ctext x='0' y='68' fill='%237cffb0' font-family='monospace' font-size='14' opacity='0.10'%3E011101011011100101011010110101%3C/text%3E%3C/svg%3E");
+  background-repeat: repeat;
+  animation: matrixShift 22s linear infinite;
+  mix-blend-mode: screen;
+  opacity: 0.5;
+}
+
+@keyframes matrixShift {
+  0%   { background-position: 0 0; }
+  100% { background-position: 120px -360px; }
+}
+
+/* CRT scanline + flicker overlay */
+.crt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0.18),
+      rgba(0, 0, 0, 0.18) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  mix-blend-mode: multiply;
+  opacity: 0.6;
+}
+
+/* Subtle terminal flicker on body */
+body {
+  animation: flicker 6s infinite steps(60);
+}
+
+@keyframes flicker {
+  0%, 100% { opacity: 1; }
+  53%      { opacity: 0.96; }
+  54%      { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body { animation: none; }
+  body::after { animation: none; }
 }
 
 * { box-sizing: border-box; }
@@ -64,17 +143,37 @@ button:disabled {
   grid-template-columns: 260px 1fr;
   min-height: 100vh;
   position: relative;
-  z-index: 1;
+  z-index: 2;
 }
 
 .sidebar {
-  background: rgba(2, 15, 10, 0.9);
+  background: rgba(2, 14, 9, 0.88);
   border-right: 1px solid var(--line);
   padding: 24px 16px;
-  box-shadow: inset -1px 0 0 rgba(82, 247, 163, 0.14);
+  box-shadow:
+    inset -1px 0 0 rgba(82, 247, 163, 0.14),
+    0 0 30px rgba(0, 255, 157, 0.06);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  backdrop-filter: blur(6px);
+  position: relative;
+}
+
+/* Animated hacker border sweep on sidebar */
+.sidebar::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent-strong), transparent);
+  animation: border-sweep 4s linear infinite;
+  opacity: 0.7;
+}
+
+@keyframes border-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 .brand-box {
@@ -98,16 +197,88 @@ button:disabled {
   margin: 0;
 }
 
-.brand-box h1 {
-  color: var(--gold);
-  text-shadow: 0 0 16px rgba(255, 208, 48, 0.22);
+.brand-title {
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 1.9rem;
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+  text-shadow:
+    0 0 8px rgba(0, 255, 157, 0.55),
+    0 0 22px rgba(0, 255, 157, 0.35);
 }
 
-.brand-box p {
-  color: var(--accent);
-  letter-spacing: 0.14em;
+.brand-sub {
+  color: var(--gold);
+  letter-spacing: 0.3em;
   text-transform: uppercase;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
+  margin-top: 2px;
+  text-shadow: 0 0 10px rgba(255, 224, 74, 0.3);
+}
+
+/* ---- Hacker shifting letters: each glyph glitches/shifts in a green pattern ---- */
+.brand-title-hacker {
+  display: inline-block;
+  position: relative;
+  animation: hacker-letter-shift 2.4s var(--hacker-delay, 0s) infinite steps(2, end);
+  text-shadow:
+    0 0 6px rgba(0, 255, 157, 0.7),
+    0 0 16px rgba(0, 255, 157, 0.4);
+}
+
+.brand-title-hacker:nth-child(1) { --hacker-delay: 0.00s; }
+.brand-title-hacker:nth-child(2) { --hacker-delay: 0.18s; }
+.brand-title-hacker:nth-child(3) { --hacker-delay: 0.36s; }
+.brand-title-hacker:nth-child(4) { --hacker-delay: 0.54s; }
+.brand-title-hacker:nth-child(5) { --hacker-delay: 0.72s; }
+
+@keyframes hacker-letter-shift {
+  0%, 100% {
+    transform: translateY(0) skewX(0deg);
+    color: var(--accent-strong);
+    text-shadow:
+      0 0 6px rgba(0, 255, 157, 0.7),
+      0 0 16px rgba(0, 255, 157, 0.4);
+  }
+  25% {
+    transform: translateY(-2px) skewX(-6deg);
+    color: var(--accent-bright);
+    text-shadow:
+      0 0 10px rgba(0, 255, 157, 0.9),
+      0 0 24px rgba(0, 255, 157, 0.6);
+  }
+  50% {
+    transform: translateY(1px) skewX(4deg);
+    color: var(--green);
+    text-shadow:
+      0 0 8px rgba(157, 255, 184, 0.8),
+      0 0 20px rgba(0, 255, 157, 0.5);
+  }
+  75% {
+    transform: translateY(-1px) skewX(-3deg);
+    color: var(--accent-strong);
+    text-shadow:
+      0 0 12px rgba(0, 255, 157, 0.95),
+      0 0 26px rgba(0, 255, 157, 0.65);
+  }
+}
+
+/* Green matrix glow pulse on brand mark */
+.brand-mark {
+  animation: brand-glow-pulse 3s ease-in-out infinite;
+}
+
+@keyframes brand-glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 16px var(--gold-glow), 0 0 18px rgba(0, 255, 157, 0.12);
+    border-color: rgba(255, 224, 74, 0.65);
+  }
+  50% {
+    box-shadow: 0 0 26px rgba(0, 255, 157, 0.45), 0 0 34px rgba(0, 255, 157, 0.22);
+    border-color: rgba(0, 255, 157, 0.85);
+  }
 }
 
 .nav {
@@ -124,12 +295,33 @@ button:disabled {
   letter-spacing: 0.08em;
   font-size: 0.75rem;
   transition: 0.2s ease;
+  font-family: "Consolas", "Courier New", monospace;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Shifting green underline pattern on nav labels */
+.nav::before {
+  content: "";
+  position: absolute;
+  bottom: 0; left: 50%;
+  width: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent-strong), transparent);
+  transition: width 0.3s ease, left 0.3s ease;
 }
 
 .nav:hover, .nav.active {
-  border-color: var(--line);
+  border-color: var(--accent);
   background: rgba(0, 255, 157, 0.08);
-  box-shadow: inset 0 0 10px rgba(82, 247, 163, 0.12);
+  box-shadow:
+    inset 0 0 10px rgba(82, 247, 163, 0.12),
+    0 0 14px rgba(0, 255, 157, 0.18);
+  color: var(--accent-bright);
+}
+
+.nav:hover::before, .nav.active::before {
+  width: 70%;
+  left: 15%;
 }
 
 .content {
@@ -176,11 +368,52 @@ button:disabled {
     linear-gradient(0deg, rgba(2, 17, 10, 0.45), rgba(2, 17, 10, 0.05)),
     url("/static/orion-logo.png") center 48% / cover,
     linear-gradient(135deg, rgba(0, 255, 157, 0.08), rgba(124, 211, 145, 0.04));
-  border: 1px solid rgba(255, 208, 48, 0.36);
+  border: 1px solid rgba(0, 255, 157, 0.4);
   border-radius: 18px;
   margin-bottom: 24px;
-  box-shadow: 0 0 25px var(--gold-glow), 0 0 24px rgba(0, 255, 157, 0.08);
+  box-shadow:
+    0 0 25px var(--gold-glow),
+    0 0 24px rgba(0, 255, 157, 0.08),
+    inset 0 0 40px rgba(0, 255, 157, 0.05);
   overflow: hidden;
+  position: relative;
+}
+
+/* Animated hacker corner brackets on hero */
+.hero::before, .hero::after {
+  content: "";
+  position: absolute;
+  width: 28px; height: 28px;
+  border: 2px solid var(--accent-strong);
+  opacity: 0.7;
+  animation: corner-bracket 2.5s ease-in-out infinite;
+}
+.hero::before { top: 12px; left: 12px; border-right: none; border-bottom: none; }
+.hero::after  { bottom: 12px; right: 12px; border-left: none; border-top: none; }
+
+@keyframes corner-bracket {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 0.9; }
+}
+
+.hero h3 {
+  color: #fff1a3;
+  text-shadow: 0 0 18px rgba(255, 208, 48, 0.24);
+  font-family: "Consolas", "Courier New", monospace;
+  letter-spacing: 0.08em;
+}
+
+/* Shifting green glitch on hero title */
+.hero h3::before {
+  content: "▶ ";
+  color: var(--accent-strong);
+  text-shadow: 0 0 10px rgba(0, 255, 157, 0.8);
+  animation: hacker-blink 1.4s steps(2) infinite;
+}
+
+@keyframes hacker-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
 }
 
 .hero .eyebrow {
@@ -206,13 +439,38 @@ button.primary, #ask-ai-btn {
   padding: 12px 16px;
   font-weight: 700;
   cursor: pointer;
-  box-shadow: 0 0 16px rgba(0, 255, 157, 0.25);
+  font-family: "Consolas", "Courier New", monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow:
+    0 0 16px rgba(0, 255, 157, 0.25),
+    inset 0 0 10px rgba(255, 255, 255, 0.15);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
+  position: relative;
+  overflow: hidden;
 }
 
 button.primary:hover, #ask-ai-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 0 22px rgba(0, 255, 157, 0.38);
+  box-shadow:
+    0 0 22px rgba(0, 255, 157, 0.38),
+    0 0 34px rgba(0, 255, 157, 0.2),
+    inset 0 0 14px rgba(255, 255, 255, 0.2);
+}
+
+/* Shifting green scan on primary button */
+button.primary::after, #ask-ai-btn::after {
+  content: "";
+  position: absolute;
+  top: 0; left: -100%;
+  width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(0, 255, 157, 0.4), transparent);
+  animation: button-scan 2.5s linear infinite;
+}
+
+@keyframes button-scan {
+  0%   { left: -100%; }
+  100%  { left: 100%; }
 }
 
 .grid {
@@ -223,12 +481,24 @@ button.primary:hover, #ask-ai-btn:hover {
 
 .panel {
   background:
-    linear-gradient(135deg, rgba(255, 208, 48, 0.025), transparent 45%),
+    linear-gradient(135deg, rgba(0, 255, 157, 0.03), transparent 45%),
+    linear-gradient(135deg, rgba(255, 224, 74, 0.015), transparent 55%),
     var(--bg-panel);
-  border: 1px solid rgba(117, 255, 176, 0.17);
+  border: 1px solid var(--line);
   border-radius: 18px;
   padding: 18px;
-  box-shadow: inset 0 0 18px rgba(0, 255, 157, 0.04);
+  box-shadow:
+    inset 0 0 18px rgba(0, 255, 157, 0.04),
+    0 0 20px rgba(0, 0, 0, 0.4);
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.panel:hover {
+  border-color: rgba(0, 255, 157, 0.45);
+  box-shadow:
+    inset 0 0 22px rgba(0, 255, 157, 0.08),
+    0 0 28px rgba(0, 255, 157, 0.12);
 }
 
 .social-intro {
@@ -655,6 +925,13 @@ button.primary:hover, #ask-ai-btn:hover {
   border: 1px solid var(--line);
   border-radius: 12px;
   line-height: 1.6;
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.message:hover {
+  border-color: rgba(0, 255, 157, 0.45);
+  box-shadow: 0 0 18px rgba(0, 255, 157, 0.12);
 }
 
 .message p {
