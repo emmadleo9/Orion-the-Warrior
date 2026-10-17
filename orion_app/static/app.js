@@ -381,11 +381,6 @@ async function askLeo() {
   const pendingDiv = addLeoMessage('assistant', '…', true);
 
   try {
-    const chosenModel = leoModelSel ? leoModelSel.value : '';
-    if (chosenModel) {
-      await fetchJson('/api/leo/status');
-    }
-
     const resp = await fetch('/api/leo/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -445,6 +440,22 @@ if (leoClearBtn) {
     if (leoMessages) {
       leoMessages.innerHTML = '';
       addLeoMessage('assistant', "Memory wiped! 🧹 Fresh start — what are we building today? 🔥🔧");
+    }
+  });
+}
+
+if (leoModelSel) {
+  leoModelSel.addEventListener('change', async () => {
+    try {
+      const chosen = leoModelSel.value;
+      if (!chosen) return;
+      await fetchJson('/api/leo/model', {
+        method: 'POST',
+        body: JSON.stringify({ model: chosen }),
+      });
+      await loadLeoStatus();
+    } catch (error) {
+      alert(`Could not switch Leo Valdez's model: ${error.message}`);
     }
   });
 }

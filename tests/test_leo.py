@@ -54,3 +54,40 @@ def test_index_html_contains_leo_valdez(test_client):
     assert "leo-messages" in html
     assert "Chat with Leo Valdez" in html
 
+
+def test_api_leo_set_model(test_client, monkeypatch):
+    calls = []
+
+    def fake_set_model(model_name):
+        calls.append(model_name)
+        return model_name
+
+    monkeypatch.setattr(main_module.leo, "set_model", fake_set_model)
+    monkeypatch.setattr(
+        main_module.leo,
+        "model_status",
+        lambda: {
+            "assistant_name": "Leo Valdez",
+            "model": "llama3.2:1b",
+            "ollama_reachable": True,
+            "installed_models": ["llama3.2:1b"],
+            "status_text": "🔥 Leo online · llama3.2:1b",
+        },
+    )
+
+    res = test_client.post("/api/leo/model", json={"model": "llama3.2:1b"})
+    assert res.status_code == 200
+    assert calls == ["llama3.2:1b"]
+    assert res.json()["model"] == "llama3.2:1b"
+
+    # Backwards-compatible alias route
+    res_zara = test_client.post("/api/zara/model", json={"model": "qwen2.5:3b"})
+    assert res_zara.status_code == 200
+    assert calls == ["llama3.2:1b", "qwen2.5:3b"]
+
+
+def test_api_leo_set_model_rejects_empty(test_client):
+    res = test_client.post("/api/leo/model", json={"model": ""})
+    assert res.status_code == 400
+    assert "model is required" in res.json()["detail"]
+

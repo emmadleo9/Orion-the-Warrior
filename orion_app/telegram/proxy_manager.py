@@ -144,8 +144,13 @@ class TelegramProxyManager:
         except Exception as e:
             logger.error(f"Failed to save proxies: {e}")
 
-    def test_proxy(self, proxy: Dict[str, Any], timeout: float = 2.5) -> Dict[str, Any]:
-        """Test proxy latency and real reachability towards Telegram datacenters."""
+    def test_proxy(self, proxy: Dict[str, Any], timeout: float = 1.8) -> Dict[str, Any]:
+        """Test proxy latency and real reachability towards Telegram datacenters.
+
+        ``timeout`` bounds the Telegram DC handshake. The fallback socket probe is
+        capped tighter still so an unreachable node fails in ~2s total instead of
+        ~4s; this keeps the whole-pool refresh under a couple of seconds.
+        """
         ptype = str(proxy.get("type", "socks5")).lower()
         host = str(proxy.get("host") or proxy.get("server") or "127.0.0.1").strip()
         try:
@@ -177,7 +182,7 @@ class TelegramProxyManager:
                 # If DC route was filtered or local proxy is offline, test direct connect to proxy socket
                 try:
                     s_direct = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s_direct.settimeout(1.5)
+                    s_direct.settimeout(0.8)
                     s_direct.connect((host, port))
                     elapsed = int((time.time() - start) * 1000)
                     s_direct.close()

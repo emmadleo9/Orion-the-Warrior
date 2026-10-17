@@ -658,6 +658,19 @@ def clear_leo_memory(conversation_id: str) -> dict:
     return {"cleared": True, "conversation_id": conversation_id}
 
 
+@app.post("/api/leo/model")
+@app.post("/api/zara/model")
+def set_leo_model(payload: dict) -> dict:
+    """Switch Leo Valdez's Ollama model at runtime (mirrors Nico's /api/ollama/model)."""
+    model_name = str(payload.get("model", "")).strip()
+    if not model_name:
+        raise HTTPException(status_code=400, detail="model is required")
+    try:
+        active = leo.set_model(model_name)
+        return {"model": active, "status": leo.model_status()}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
 
 @app.post("/api/archer/generate")
 @app.post("/api/assistant/generate-image")
