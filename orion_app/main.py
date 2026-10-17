@@ -25,8 +25,7 @@ from .launcher import LauncherMonitor
 from .memory import MAX_MESSAGES_PER_CONVERSATION, ConversationMemory
 from .task_monitor import TaskMonitor
 from .telemetry import get_system_telemetry
-from .telegram_client import telegram_client
-from .telegram_proxy_manager import telegram_proxy_manager
+from .telegram import telegram_client, telegram_proxy_manager
 
 BASE_DIR = Path(__file__).resolve().parent
 assistant = NicoAssistant()
@@ -165,7 +164,12 @@ def read_instagram_inbox() -> HTMLResponse:
 
 @app.get("/telegram", response_class=HTMLResponse)
 def read_telegram() -> HTMLResponse:
-    """Built-in Telegram client for Orion, styled with Orion warrior dark theme."""
+    """Full-page Telegram client.
+
+    Telegram is part of the Social Hub. This route serves the same Telegram
+    module full-screen for direct/deep links; the Social Hub embeds it in its
+    Telegram tab, and both use the identical client and API.
+    """
     tg_html = BASE_DIR / "static" / "telegram.html"
     if not tg_html.is_file():
         raise HTTPException(status_code=404, detail="Telegram module not found")
@@ -847,126 +851,13 @@ def clear_task_runs() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Telegram Module Endpoints
+# Telegram Module (Social Hub)
 # ---------------------------------------------------------------------------
-from fastapi import File, Form, UploadFile  # noqa: E402 – imported late to keep top clean
+# All Telegram endpoints and logic live inside orion_app/telegram. The router is
+# mounted here so the Social Hub's Telegram tab has a single, self-contained API.
+from .telegram.routes import router as telegram_router  # noqa: E402
 
-
-@app.get("/api/telegram/status")
-def telegram_status() -> dict:
-    """Return Telegram connection and proxy status."""
-    return telegram_client.get_status()
-
-
-@app.post("/api/telegram/login")
-def telegram_login(payload: dict) -> dict:
-    phone = str(payload.get("phone", "")).strip()
-    if not phone:
-        raise HTTPException(status_code=400, detail="phone is required")
-    return telegram_client.login(phone)
-
-
-@app.post("/api/telegram/verify")
-def telegram_verify(payload: dict) -> dict:
-    code = str(payload.get("code", "")).strip()
-    phone_code_hash = str(payload.get("phone_code_hash", "")).strip()
-    if not code:
-        raise HTTPException(status_code=400, detail="code is required")
-    return telegram_client.verify_code(phone_code_hash, code)
-
-
-@app.get("/api/telegram/me")
-def telegram_me() -> dict:
-    return telegram_client.get_me()
-
-
-@app.get("/api/telegram/chats")
-def telegram_chats(limit: int = 100) -> list:
-    return telegram_client.get_chats(limit=limit)
-
-
-@app.get("/api/telegram/messages/{chat_id}")
-def telegram_messages(chat_id: int, limit: int = 50) -> list:
-    return telegram_client.get_messages(chat_id, limit=limit)
-
-
-@app.post("/api/telegram/send")
-def telegram_send(payload: dict) -> dict:
-    chat_id = payload.get("chat_id")
-    text = str(payload.get("text", "")).strip()
-    if not chat_id or not text:
-        raise HTTPException(status_code=400, detail="chat_id and text are required")
-    return telegram_client.send_message(int(chat_id), text)
-
-
-@app.post("/api/telegram/send_media")
-async def telegram_send_media(
-    chat_id: int = Form(...),
-    file: UploadFile = File(...),
-    caption: str = Form(default=""),
-) -> dict:
-    import shutil
-    import tempfile
-
-    suffix = Path(file.filename).suffix if file.filename else ""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
-    try:
-        return telegram_client.send_media(chat_id, tmp_path, caption)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-
-@app.get("/api/telegram/profile/{user_id}")
-def telegram_profile(user_id: str) -> dict:
-    return telegram_client.get_profile(user_id)
-
-
-@app.post("/api/telegram/profile/edit")
-def telegram_edit_profile(payload: dict) -> dict:
-    first_name = str(payload.get("first_name", "")).strip()
-    last_name = str(payload.get("last_name", "")).strip()
-    bio = str(payload.get("bio", "")).strip()
-    if not first_name:
-        raise HTTPException(status_code=400, detail="first_name is required")
-    return telegram_client.edit_profile(first_name, last_name, bio)
-
-
-@app.get("/api/telegram/contacts")
-def telegram_contacts() -> list:
-    return telegram_client.get_contacts()
-
-
-@app.post("/api/telegram/search")
-def telegram_search(payload: dict) -> list:
-    query = str(payload.get("query", "")).strip()
-    return telegram_client.search_chats(query)
-
-
-@app.get("/api/telegram/members/{chat_id}")
-def telegram_members(chat_id: int) -> list:
-    return telegram_client.get_chat_members(chat_id)
-
-
-@app.get("/api/telegram/proxies")
-def telegram_proxies_list() -> list:
-    return telegram_proxy_manager.get_proxies()
-
-
-@app.post("/api/telegram/proxies")
-def telegram_add_proxy(payload: dict) -> dict:
-    return telegram_proxy_manager.add_proxy(payload)
-
-
-@app.post("/api/telegram/proxies/refresh")
-def telegram_refresh_proxies() -> dict:
-    proxies = telegram_proxy_manager.test_all_proxies()
-    best = telegram_proxy_manager.get_best_proxy()
-    return {"refreshed": True, "proxies_count": len(proxies), "best_proxy": best}
+app.include_router(telegram_router)
 
 
 if __name__ == "__main__":

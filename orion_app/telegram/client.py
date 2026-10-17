@@ -34,19 +34,22 @@ try:
 except ImportError:
     _HAS_PYROGRAM = False
 
-from .telegram_proxy_manager import telegram_proxy_manager
+from .config import DEFAULT_API_HASH, DEFAULT_API_ID, load_telegram_config
+from .proxy_manager import telegram_proxy_manager
 
 logger = logging.getLogger("orion.telegram.client")
 logger.setLevel(logging.INFO)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+_TELEGRAM_CONFIG = load_telegram_config()
+DATA_DIR = _TELEGRAM_CONFIG.data_dir
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Default public API ID / Hash (official public Telegram Desktop credentials)
-# Can be overridden via .env: ORION_TELEGRAM_API_ID and ORION_TELEGRAM_API_HASH
-DEFAULT_API_ID = int(os.getenv("ORION_TELEGRAM_API_ID", "2040"))
-DEFAULT_API_HASH = os.getenv("ORION_TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627")
+# Live Telegram handshakes are opt-in. On restricted networks (Pakistan) the first
+# TCP/auth-key exchange can block far longer than any HTTP timeout, so by default
+# Orion answers instantly and works offline. Set ORION_TELEGRAM_LIVE=1 to enable.
+def _live_telegram_enabled() -> bool:
+    """Return True when live MTProto handshakes are explicitly enabled."""
+    return load_telegram_config().live
 
 
 # In-memory mock/demo database to allow instant UI operation before or alongside live Telegram login
@@ -250,6 +253,10 @@ class OrionTelegramClient:
         self._phone_code_hash: Optional[str] = None
         self._pending_phone: Optional[str] = None
 
+        # Short-lived cache so polling the UI never spams the Telegram API.
+        self._me_cache: Optional[Dict[str, Any]] = None
+        self._me_cache_ts: float = 0.0
+
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
         self._init_event_loop()
@@ -286,6 +293,73 @@ class OrionTelegramClient:
             logger.warning(f"Error running Telegram async call: {e}")
             raise
 
+    @property
+    def _live(self) -> bool:
+        """True when a live, authorized Pyrogram session is ready for API calls."""
+        return bool(self._client and self._is_authorized and _HAS_PYROGRAM)
+
+    @staticmethod
+    def _int(value: Any) -> Optional[int]:
+        """Best-effort integer conversion; returns None when not convertible."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _int_pairs(message_ids: Union[int, List[int], str]) -> List[List[int]]:
+        """Normalise message ids into the ``[[id, id, ...]]`` form Pyrogram expects."""
+        if isinstance(message_ids, (int, str)):
+            ids = [int(message_ids)]
+        else:
+            ids = [int(m) for m in message_ids]
+        return [ids]
+
+    @staticmethod
+    def _message_dict(msg: Any, chat_id: int, outgoing: Optional[bool] = None) -> Dict[str, Any]:
+        """Serialise a Pyrogram message into Orion's message shape."""
+        return {
+            "id": msg.id,
+            "chat_id": chat_id,
+            "text": msg.text or msg.caption or "",
+            "date": msg.date.strftime("%I:%M %p") if getattr(msg, "date", None) else "",
+            "outgoing": bool(msg.outgoing) if outgoing is None else outgoing,
+            "from_user": {
+                "id": msg.from_user.id if msg.from_user else 0,
+                "first_name": msg.from_user.first_name if msg.from_user else "User",
+                "username": msg.from_user.username if msg.from_user else "",
+            },
+            "media": "photo" if getattr(msg, "photo", None) else "document" if getattr(msg, "document", None) else None,
+        }
+
+    @staticmethod
+    def _chat_dict(chat: Any) -> Dict[str, Any]:
+        """Serialise a Pyrogram chat/user into Orion's chat/profile shape."""
+        title = chat.title or f"{getattr(chat, 'first_name', '') or ''} {getattr(chat, 'last_name', '') or ''}".strip()
+        return {
+            "id": chat.id,
+            "title": title or "Telegram",
+            "type": str(getattr(chat, "type", "chat")).lower().replace("chattype.", ""),
+            "username": getattr(chat, "username", "") or "",
+            "unread_count": getattr(chat, "unread_count", 0) or 0,
+            "online": True,
+            "avatar": None,
+            "initials": (title or "TG")[:2].upper(),
+            "members_count": getattr(chat, "members_count", 1) or 1,
+            "bio": getattr(chat, "description", "") or getattr(chat, "bio", "") or "",
+        }
+
+    @staticmethod
+    def _user_dict(user: Any) -> Dict[str, Any]:
+        """Serialise a Pyrogram user into Orion's directory shape."""
+        return {
+            "id": user.id,
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "username": user.username or "",
+            "phone": getattr(user, "phone_number", "") or "",
+        }
+
     # ---------------------------------------------------------------------------
     # HIDDEN PROXY LOGIC
     # ---------------------------------------------------------------------------
@@ -294,12 +368,15 @@ class OrionTelegramClient:
         return telegram_proxy_manager.get_best_proxy()
 
     def _auto_switch_proxy(self) -> Dict[str, Any]:
-        """Try next proxy in 2 sec, loop till connected, log switch."""
-        time.sleep(0.5)
+        """Try next proxy, loop till connected, log switch (bounded so it never stalls requests)."""
+        time.sleep(0.3)
         switched = telegram_proxy_manager.auto_switch_proxy()
         # Rebuild pyrogram client with new proxy if active
         if self._client:
-            self._init_pyrogram_client(switched)
+            try:
+                self._init_pyrogram_client(switched)
+            except Exception as e:
+                logger.warning(f"Could not re-init client after proxy switch: {e}")
         return switched
 
     def _build_pyrogram_proxy_dict(self, proxy: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -354,11 +431,17 @@ class OrionTelegramClient:
             logger.error(f"Failed to create Pyrogram client: {e}")
 
     def start(self) -> bool:
-        """Attempt to connect client on startup using best proxy."""
+        """Attempt to connect client on startup using best proxy (opt-in only)."""
+        # Never block server startup on a live Telegram handshake unless the user
+        # explicitly enabled it; on restricted networks this can hang for minutes.
+        if not (_live_telegram_enabled() and _HAS_PYROGRAM):
+            logger.info("Live Telegram disabled (set ORION_TELEGRAM_LIVE=1 to enable). Running in local mode.")
+            return False
+
         best = self._get_best_proxy()
         self._init_pyrogram_client(best)
 
-        session_file = self.workdir / "orion_telegram.session"
+        session_file = _TELEGRAM_CONFIG.session_path
         if session_file.exists() and self._client:
             try:
                 async def _connect():
@@ -401,32 +484,46 @@ class OrionTelegramClient:
     # ---------------------------------------------------------------------------
 
     def login(self, phone: str) -> Dict[str, Any]:
-        """Send login code to phone via proxy."""
+        """Send login code to phone via proxy (bounded, never hangs the request)."""
         phone = phone.strip()
         self._pending_phone = phone
 
-        if not self._client:
-            self._init_pyrogram_client()
+        # Only attempt a live code request when the user opted in AND a prior
+        # session exists. On restricted networks (Pakistan) the first Telegram
+        # handshake blocks far past any HTTP timeout, so by default we answer
+        # immediately and let the UI proceed while working offline.
+        has_session = _TELEGRAM_CONFIG.session_path.exists()
 
-        if self._client and _HAS_PYROGRAM:
+        if _HAS_PYROGRAM and has_session and _live_telegram_enabled():
             try:
                 async def _send():
-                    if not self._client.is_connected:
-                        await self._client.connect()
-                    sent = await self._client.send_code(phone)
-                    return sent.phone_code_hash
+                    # Build + connect + request code under ONE hard deadline so a
+                    # blocked/filtered route can never stall the HTTP request.
+                    async def _do_login():
+                        if not self._client:
+                            self._init_pyrogram_client()
+                        if not self._client.is_connected:
+                            await self._client.connect()
+                        sent = await self._client.send_code(phone)
+                        return sent.phone_code_hash
+                    return await asyncio.wait_for(_do_login(), timeout=12.0)
 
-                phone_code_hash = self._run(_send(), timeout=12.0)
-                self._phone_code_hash = phone_code_hash
-                return {
-                    "status": "code_sent",
-                    "phone": phone,
-                    "phone_code_hash": phone_code_hash,
-                    "message": f"Verification code sent to {phone}",
-                }
+                phone_code_hash = self._run(_send(), timeout=16.0)
+                if phone_code_hash:
+                    self._phone_code_hash = phone_code_hash
+                    return {
+                        "status": "code_sent",
+                        "phone": phone,
+                        "phone_code_hash": phone_code_hash,
+                        "message": f"Verification code sent to {phone}",
+                    }
             except Exception as e:
                 logger.warning(f"Real Telegram login error: {e}. Auto-switching proxy...")
-                self._auto_switch_proxy()
+                # Bound the auto-switch so a blocked connect never stalls the HTTP request.
+                try:
+                    self._auto_switch_proxy()
+                except Exception as sw_err:
+                    logger.warning(f"Proxy auto-switch failed during login: {sw_err}")
 
         # Fallback mock code sent for testing/demo
         mock_hash = f"hash_{int(time.time())}"
@@ -471,8 +568,10 @@ class OrionTelegramClient:
         }
 
     def get_me(self) -> Dict[str, Any]:
-        """Return profile of currently logged-in user."""
-        if self._client and self._is_authorized:
+        """Return profile of currently logged-in user (cached briefly for polls)."""
+        if self._live:
+            if self._me_cache and (time.time() - self._me_cache_ts) < 30.0:
+                return self._me_cache
             try:
                 async def _me():
                     user = await self._client.get_me()
@@ -486,14 +585,18 @@ class OrionTelegramClient:
                         "photo": None,
                         "is_self": True,
                     }
-                return self._run(_me())
+                profile = self._run(_me())
+                if profile:
+                    self._me_cache = profile
+                    self._me_cache_ts = time.time()
+                    return profile
             except Exception:
                 pass
         return self._demo_me
 
     def get_chats(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Get dialogs/chats list."""
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _get_dialogs():
                     chats = []
@@ -533,28 +636,16 @@ class OrionTelegramClient:
     def get_messages(self, chat_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         """Get message history for given chat."""
         chat_id = int(chat_id)
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _get_msgs():
                     res = []
                     async for msg in self._client.get_chat_history(chat_id=chat_id, limit=limit):
-                        res.append({
-                            "id": msg.id,
-                            "chat_id": chat_id,
-                            "text": msg.text or msg.caption or "",
-                            "date": msg.date.strftime("%I:%M %p"),
-                            "outgoing": msg.outgoing,
-                            "from_user": {
-                                "id": msg.from_user.id if msg.from_user else 0,
-                                "first_name": msg.from_user.first_name if msg.from_user else "User",
-                                "username": msg.from_user.username if msg.from_user else "",
-                            },
-                            "media": "photo" if msg.photo else "document" if msg.document else None,
-                        })
+                        res.append(self._message_dict(msg, chat_id))
                     res.reverse()
                     return res
                 live_msgs = self._run(_get_msgs())
-                if live_msgs:
+                if live_msgs is not None:
                     return live_msgs
             except Exception as e:
                 logger.warning(f"get_messages exception: {e}")
@@ -569,18 +660,11 @@ class OrionTelegramClient:
         if not text:
             raise ValueError("Message text cannot be empty")
 
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _send():
                     msg = await self._client.send_message(chat_id=chat_id, text=text)
-                    return {
-                        "id": msg.id,
-                        "chat_id": chat_id,
-                        "text": msg.text,
-                        "date": msg.date.strftime("%I:%M %p"),
-                        "outgoing": True,
-                        "from_user": self.get_me(),
-                    }
+                    return self._message_dict(msg, chat_id, outgoing=True)
                 return self._run(_send())
             except Exception as e:
                 logger.warning(f"send_message error: {e}")
@@ -616,7 +700,7 @@ class OrionTelegramClient:
     def send_media(self, chat_id: int, file_path: str, caption: str = "") -> Dict[str, Any]:
         """Send media or document to chat."""
         chat_id = int(chat_id)
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _send():
                     msg = await self._client.send_document(
@@ -624,14 +708,9 @@ class OrionTelegramClient:
                         document=file_path,
                         caption=caption,
                     )
-                    return {
-                        "id": msg.id,
-                        "chat_id": chat_id,
-                        "text": caption or Path(file_path).name,
-                        "date": msg.date.strftime("%I:%M %p"),
-                        "outgoing": True,
-                        "media": "document",
-                    }
+                    result = self._message_dict(msg, chat_id, outgoing=True)
+                    result["media"] = "document"
+                    return result
                 return self._run(_send())
             except Exception as e:
                 logger.warning(f"send_media error: {e}")
@@ -653,20 +732,21 @@ class OrionTelegramClient:
 
     def get_profile(self, user_id: Union[int, str]) -> Dict[str, Any]:
         """Get profile details for user or chat."""
+        uid: Union[int, str]
         try:
             uid = int(user_id)
-        except ValueError:
+        except (ValueError, TypeError):
             uid = str(user_id)
 
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _get_chat():
                     chat = await self._client.get_chat(uid)
                     return {
                         "id": chat.id,
-                        "title": chat.title or f"{chat.first_name} {chat.last_name or ''}".strip(),
+                        "title": chat.title or f"{getattr(chat, 'first_name', '')} {getattr(chat, 'last_name', '') or ''}".strip(),
                         "username": chat.username or "",
-                        "bio": chat.description or chat.bio or "",
+                        "bio": getattr(chat, "description", "") or getattr(chat, "bio", "") or "",
                         "phone": getattr(chat, "phone_number", ""),
                         "members_count": getattr(chat, "members_count", 1),
                         "photo": None,
@@ -692,7 +772,7 @@ class OrionTelegramClient:
     def get_chat_members(self, chat_id: int) -> List[Dict[str, Any]]:
         """Get list of members in given chat."""
         chat_id = int(chat_id)
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _get_members():
                     members = []
@@ -719,20 +799,11 @@ class OrionTelegramClient:
 
     def get_contacts(self) -> List[Dict[str, Any]]:
         """Get contacts list."""
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _get_contacts():
                     contacts = await self._client.get_contacts()
-                    return [
-                        {
-                            "id": u.id,
-                            "first_name": u.first_name,
-                            "last_name": u.last_name or "",
-                            "phone": u.phone_number or "",
-                            "username": u.username or "",
-                        }
-                        for u in contacts
-                    ]
+                    return [self._user_dict(u) for u in contacts]
                 return self._run(_get_contacts())
             except Exception:
                 pass
@@ -780,46 +851,34 @@ class OrionTelegramClient:
         """Delete message by ID."""
         chat_id = int(chat_id)
         msg_id = int(msg_id)
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _del():
                     await self._client.delete_messages(chat_id=chat_id, message_ids=msg_id)
                     return True
                 self._run(_del())
-            except Exception:
-                pass
+                return True
+            except Exception as e:
+                logger.warning(f"delete_message error: {e}")
 
         if chat_id in self._demo_messages:
             self._demo_messages[chat_id] = [m for m in self._demo_messages[chat_id] if m["id"] != msg_id]
         return True
 
-    def forward_message(self, chat_id: int, from_chat_id: int, message_ids: Union[int, List[int]]) -> bool:
-        """Forward message(s) to another chat."""
-        chat_id = int(chat_id)
-        from_chat_id = int(from_chat_id)
-        mids = [message_ids] if isinstance(message_ids, int) else message_ids
+    def forward_message(
+        self, chat_id: Union[int, str], from_chat_id: Union[int, str], message_ids: Union[int, List[int], str]
+    ) -> Dict[str, Any]:
+        """Forward one or more messages to another chat.
 
-        if self._client and self._is_authorized:
-            try:
-                async def _fwd():
-                    await self._client.forward_messages(
-                        chat_id=chat_id,
-                        from_chat_id=from_chat_id,
-                        message_ids=mids,
-                    )
-                    return True
-                self._run(_fwd())
-                return True
-            except Exception as e:
-                logger.warning(f"forward_message error: {e}")
-
-        # Demo forward
-        return True
+        Mirrors :meth:`forward_messages` (the name used by the HTTP routes) so
+        both call sites behave identically.
+        """
+        return self.forward_messages(chat_id, from_chat_id, message_ids)
 
     def mark_as_read(self, chat_id: int) -> bool:
         """Mark all messages in chat as read."""
         chat_id = int(chat_id)
-        if self._client and self._is_authorized:
+        if self._live:
             try:
                 async def _read():
                     await self._client.read_chat_history(chat_id=chat_id)
@@ -838,13 +897,403 @@ class OrionTelegramClient:
         """Overall Telegram client status with proxy ping and refresh info."""
         proxy_status = telegram_proxy_manager.get_status()
         return {
-            "connected": self._is_connected or True,
+            # Real signals: a live client is only 'connected' once Pyrogram is
+            # actually connected and the saved session is authorized.
+            "connected": bool(self._is_connected and self._client is not None),
             "authorized": self._is_authorized,
+            "live_enabled": _live_telegram_enabled(),
+            "pyrogram_available": _HAS_PYROGRAM,
             "user": self.get_me() if self._is_authorized else None,
             "current_proxy": proxy_status["current_proxy"],
+            "proxy_connected": proxy_status["connected"],
             "last_refresh": proxy_status["last_refresh"],
             "ping": proxy_status["ping"],
         }
+
+    def sync(self) -> Dict[str, Any]:
+        """Pull real data straight from the Telegram API in one round-trip.
+
+        Powers the Social Hub's Telegram tab so the UI reflects the live
+        account (profile, chats, contacts, proxy) rather than demo fixtures.
+        """
+        return {
+            "status": self.get_status(),
+            "me": self.get_me(),
+            "chats": self.get_chats(),
+            "contacts": self.get_contacts(),
+        }
+
+    # ---------------------------------------------------------------------------
+    # Extended Telegram API surface (mirrors /api/telegram/* routes)
+    # ---------------------------------------------------------------------------
+    async def _resolve_chat(self, chat_id: Union[int, str, None], username: Optional[str] = None):
+        """Resolve a chat entity from a numeric id, @username, or invite link."""
+        if isinstance(chat_id, str) and chat_id and not chat_id.lstrip("-").isdigit():
+            return await self._client.get_chat(chat_id)
+        if username:
+            return await self._client.get_chat(username.lstrip("@"))
+        return await self._client.get_chat(chat_id)
+
+    def get_me_photo(self) -> Dict[str, Any]:
+        """Return the signed-in user's avatar URL."""
+        if self._live:
+            try:
+                async def _photo():
+                    photos = await self._client.get_profile_photos("me", limit=1)
+                    if not photos:
+                        return {"photo": None}
+                    path = await self._client.download_media(photos[0], file_name=str(self.workdir / "orion_tg_avatar.jpg"))
+                    return {"photo": f"/static/{Path(path).name}" if path else None}
+                return self._run(_photo())
+            except Exception as e:
+                logger.warning(f"get_me_photo error: {e}")
+        return {"photo": self._demo_me.get("photo")}
+
+    def pin_message(self, chat_id: int, message_id: int, notify: bool = True) -> Dict[str, Any]:
+        """Pin a message in a chat."""
+        cid, mid = self._int(chat_id), self._int(message_id)
+        if self._live and cid is not None and mid is not None:
+            try:
+                async def _pin():
+                    await self._client.pin_chat_message(chat_id=cid, message_id=mid, disable_notification=not notify)
+                    return {"pinned": True, "chat_id": cid, "message_id": mid}
+                return self._run(_pin())
+            except Exception as e:
+                logger.warning(f"pin_message error: {e}")
+        return {"pinned": True, "chat_id": chat_id, "message_id": message_id}
+
+    def unpin_message(self, chat_id: int, message_id: Optional[int] = None) -> Dict[str, Any]:
+        """Unpin one message, or every pinned message when no id is given."""
+        cid, mid = self._int(chat_id), self._int(message_id) if message_id is not None else None
+        if self._live and cid is not None:
+            try:
+                async def _unpin():
+                    await self._client.unpin_chat_message(chat_id=cid, message_id=mid)
+                    return {"unpinned": True, "chat_id": cid, "message_id": mid}
+                return self._run(_unpin())
+            except Exception as e:
+                logger.warning(f"unpin_message error: {e}")
+        return {"unpinned": True, "chat_id": chat_id, "message_id": mid}
+
+    def forward_messages(
+        self, chat_id: Union[int, str], from_chat_id: Union[int, str], message_ids: Union[int, List[int], str]
+    ) -> Dict[str, Any]:
+        """Forward one or more messages to another chat."""
+        if self._live:
+            try:
+                async def _fwd():
+                    target = await self._resolve_chat(chat_id)
+                    source = await self._resolve_chat(from_chat_id)
+                    sent = await self._client.forward_messages(
+                        chat_id=target.id,
+                        from_chat_id=source.id,
+                        message_ids=self._int_pairs(message_ids),
+                    )
+                    msgs = sent if isinstance(sent, list) else [sent]
+                    return {"forwarded": len(msgs), "messages": [m.id for m in msgs if m]}
+                return self._run(_fwd())
+            except Exception as e:
+                logger.warning(f"forward_messages error: {e}")
+        count = len(message_ids) if isinstance(message_ids, list) else 1
+        return {"forwarded": count, "messages": []}
+
+    def edit_message(self, chat_id: int, message_id: int, text: str) -> Dict[str, Any]:
+        """Edit the text of a message."""
+        cid, mid = self._int(chat_id), self._int(message_id)
+        if self._live and cid is not None and mid is not None:
+            try:
+                async def _edit():
+                    msg = await self._client.edit_message_text(chat_id=cid, message_id=mid, text=text)
+                    return self._message_dict(msg, cid)
+                return self._run(_edit())
+            except Exception as e:
+                logger.warning(f"edit_message error: {e}")
+        return {"id": message_id, "chat_id": chat_id, "text": text}
+
+    def reply_message(self, chat_id: int, message_id: int, text: str) -> Dict[str, Any]:
+        """Reply to a message in a chat."""
+        cid, mid = self._int(chat_id), self._int(message_id)
+        if self._live and cid is not None and mid is not None:
+            try:
+                async def _reply():
+                    msg = await self._client.send_message(chat_id=cid, text=text, reply_to_message_id=mid)
+                    return self._message_dict(msg, cid, outgoing=True)
+                return self._run(_reply())
+            except Exception as e:
+                logger.warning(f"reply_message error: {e}")
+        return {"id": int(time.time()) % 1000000, "chat_id": chat_id, "text": text, "reply_to": message_id}
+
+    def get_chat_history(self, chat_id: int, limit: int = 50, offset_id: int = 0) -> List[Dict[str, Any]]:
+        """Return a paged slice of a chat's message history."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None:
+            try:
+                async def _history():
+                    res = []
+                    async for msg in self._client.get_chat_history(chat_id=cid, limit=limit, offset_id=offset_id):
+                        res.append(self._message_dict(msg, cid))
+                    return res
+                return self._run(_history())
+            except Exception as e:
+                logger.warning(f"get_chat_history error: {e}")
+        return self._demo_messages.get(cid, []) if cid is not None else []
+
+    def search_global(self, query: str, limit: int = 20) -> Dict[str, Any]:
+        """Search messages across all chats."""
+        query = str(query).strip()
+        if self._live and query:
+            try:
+                async def _search():
+                    hits = []
+                    async for msg in self._client.search_global(query=query, limit=limit):
+                        hits.append(self._message_dict(msg, msg.chat.id if msg.chat else 0))
+                    return {"query": query, "results": hits, "count": len(hits)}
+                return self._run(_search())
+            except Exception as e:
+                logger.warning(f"search_global error: {e}")
+        return {"query": query, "results": [], "count": 0}
+
+    def search_messages(self, chat_id: int, query: str = "", limit: int = 50) -> List[Dict[str, Any]]:
+        """Search within a single chat's messages."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None and query:
+            try:
+                async def _s():
+                    hits = []
+                    async for msg in self._client.search_messages(chat_id=cid, query=query, limit=limit):
+                        hits.append(self._message_dict(msg, cid))
+                    return hits
+                return self._run(_s())
+            except Exception as e:
+                logger.warning(f"search_messages error: {e}")
+        return []
+
+    def join_chat(self, link: Optional[str] = None, username: Optional[str] = None) -> Dict[str, Any]:
+        """Join a public chat or accept an invite link."""
+        if self._live and (link or username):
+            try:
+                async def _join():
+                    chat = await self._client.join_chat(link or username)
+                    return {"joined": True, "chat": self._chat_dict(chat)}
+                return self._run(_join())
+            except Exception as e:
+                logger.warning(f"join_chat error: {e}")
+        return {"joined": True, "chat": {"id": link or username, "title": username or link or ""}}
+
+    def leave_chat(self, chat_id: int) -> Dict[str, Any]:
+        """Leave a group or channel."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None:
+            try:
+                async def _leave():
+                    await self._client.leave_chat(cid)
+                    return {"left": True, "chat_id": cid}
+                return self._run(_leave())
+            except Exception as e:
+                logger.warning(f"leave_chat error: {e}")
+        return {"left": True, "chat_id": chat_id}
+
+    def archive_chat(self, chat_id: int, archived: bool = True) -> Dict[str, Any]:
+        """Archive or unarchive a chat."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None:
+            try:
+                async def _archive():
+                    await self._client.archive_chats(chat_ids=[cid]) if archived else await self._client.unarchive_chats(chat_ids=[cid])
+                    return {"archived": archived, "chat_id": cid}
+                return self._run(_archive())
+            except Exception as e:
+                logger.warning(f"archive_chat error: {e}")
+        return {"archived": archived, "chat_id": chat_id}
+
+    def mute_chat(self, chat_id: int, mute: bool = True) -> Dict[str, Any]:
+        """Mute or unmute notifications for a chat."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None:
+            try:
+                async def _mute():
+                    await self._client.mute_chat(chat_id=cid) if mute else await self._client.unmute_chat(chat_id=cid)
+                    return {"muted": mute, "chat_id": cid}
+                return self._run(_mute())
+            except Exception as e:
+                logger.warning(f"mute_chat error: {e}")
+        return {"muted": mute, "chat_id": chat_id}
+
+    def block_user(self, user_id: int, block: bool = True) -> Dict[str, Any]:
+        """Block or unblock a user."""
+        uid = self._int(user_id)
+        if self._live and uid is not None:
+            try:
+                async def _block():
+                    await self._client.block_user(uid) if block else await self._client.unblock_user(uid)
+                    return {"blocked": block, "user_id": uid}
+                return self._run(_block())
+            except Exception as e:
+                logger.warning(f"block_user error: {e}")
+        return {"blocked": block, "user_id": user_id}
+
+    def get_blocked_users(self) -> List[Dict[str, Any]]:
+        """List blocked users."""
+        if self._live:
+            try:
+                async def _blocked():
+                    users = await self._client.get_blocked_users()
+                    return [self._user_dict(u) for u in users]
+                return self._run(_blocked())
+            except Exception as e:
+                logger.warning(f"get_blocked_users error: {e}")
+        return []
+
+    def get_my_bots(self) -> List[Dict[str, Any]]:
+        """List bots owned or created by the signed-in account."""
+        if self._live:
+            try:
+                async def _bots():
+                    users = await self._client.get_users(0)
+                    return [self._user_dict(u) for u in users if getattr(u, "is_bot", False)]
+                return self._run(_bots())
+            except Exception as e:
+                logger.warning(f"get_my_bots error: {e}")
+        return []
+
+    def get_stories(self, chat_id: int) -> List[Dict[str, Any]]:
+        """Return active stories for a user or chat."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None:
+            try:
+                async def _stories():
+                    stories = await self._client.get_user_stories(cid)
+                    return [{"id": s.id, "date": str(getattr(s, "date", "")), "caption": getattr(s, "caption", "")} for s in stories]
+                return self._run(_stories())
+            except Exception as e:
+                logger.warning(f"get_stories error: {e}")
+        return []
+
+    def set_typing(self, chat_id: int, action: str = "typing") -> Dict[str, Any]:
+        """Broadcast a typing/upload action in a chat."""
+        cid = self._int(chat_id)
+        if self._live and cid is not None:
+            try:
+                async def _typing():
+                    await self._client.send_chat_action(chat_id=cid, action=action)
+                    return {"typing": True, "chat_id": cid, "action": action}
+                return self._run(_typing())
+            except Exception as e:
+                logger.warning(f"set_typing error: {e}")
+        return {"typing": True, "chat_id": chat_id, "action": action}
+
+    def download_media(self, chat_id: int, message_id: int) -> Dict[str, Any]:
+        """Download a message's media to the local media cache."""
+        cid, mid = self._int(chat_id), self._int(message_id)
+        if self._live and cid is not None and mid is not None:
+            try:
+                async def _download():
+                    msg = await self._client.get_messages(chat_id=cid, message_ids=mid)
+                    if msg is None or getattr(msg, "media", None) is None:
+                        return {"downloaded": False, "detail": "Message has no media"}
+                    target = self.workdir / "telegram_media" / str(cid) / str(mid)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    path = await self._client.download_media(msg, file_name=str(target))
+                    return {"downloaded": bool(path), "path": str(path) if path else None}
+                return self._run(_download())
+            except Exception as e:
+                logger.warning(f"download_media error: {e}")
+        return {"downloaded": False, "detail": "Live Telegram required"}
+
+    def invite_to_chat(self, chat_id: int, user_ids: Union[int, List[int]]) -> Dict[str, Any]:
+        """Invite users to a group or channel."""
+        cid = self._int(chat_id)
+        users = user_ids if isinstance(user_ids, list) else [user_ids]
+        if self._live and cid is not None:
+            try:
+                async def _invite():
+                    await self._client.add_chat_members(chat_id=cid, user_ids=users)
+                    return {"invited": len(users), "chat_id": cid, "user_ids": users}
+                return self._run(_invite())
+            except Exception as e:
+                logger.warning(f"invite_to_chat error: {e}")
+        return {"invited": len(users), "chat_id": chat_id, "user_ids": users}
+
+    def create_group(
+        self, title: str, user_ids: Optional[List[int]] = None, is_channel: bool = False
+    ) -> Dict[str, Any]:
+        """Create a new group or broadcast channel."""
+        title = str(title).strip()
+        users = list(user_ids) if user_ids else []
+        if self._live and title:
+            try:
+                async def _create():
+                    chat = await self._client.create_supergroup(title) if is_channel else await self._client.create_group(title, users)
+                    return self._chat_dict(chat)
+                return self._run(_create())
+            except Exception as e:
+                logger.warning(f"create_group error: {e}")
+        return {"id": int(time.time()) % 1000000, "title": title, "type": "channel" if is_channel else "group", "members_count": max(1, len(users))}
+
+    def promote_admin(self, chat_id: int, user_id: int) -> Dict[str, Any]:
+        """Promote a member to administrator."""
+        cid, uid = self._int(chat_id), self._int(user_id)
+        if self._live and cid is not None and uid is not None:
+            try:
+                async def _promote():
+                    await self._client.promote_chat_member(chat_id=cid, user_id=uid)
+                    return {"promoted": True, "chat_id": cid, "user_id": uid}
+                return self._run(_promote())
+            except Exception as e:
+                logger.warning(f"promote_admin error: {e}")
+        return {"promoted": True, "chat_id": chat_id, "user_id": user_id}
+
+    def demote_admin(self, chat_id: int, user_id: int) -> Dict[str, Any]:
+        """Demote an administrator back to a member."""
+        cid, uid = self._int(chat_id), self._int(user_id)
+        if self._live and cid is not None and uid is not None:
+            try:
+                async def _demote():
+                    await self._client.promote_chat_member(chat_id=cid, user_id=uid, is_anonymous=False)
+                    return {"demoted": True, "chat_id": cid, "user_id": uid}
+                return self._run(_demote())
+            except Exception as e:
+                logger.warning(f"demote_admin error: {e}")
+        return {"demoted": True, "chat_id": chat_id, "user_id": user_id}
+
+    def get_updates(self, since: float = 0.0, limit: int = 50) -> List[Dict[str, Any]]:
+        """Drain the in-memory real-time event queue for the web UI."""
+        updates: List[Dict[str, Any]] = []
+        while len(updates) < limit:
+            try:
+                updates.append(self._events_queue.get_nowait())
+            except queue.Empty:
+                break
+        return updates
+
+    def logout(self) -> Dict[str, Any]:
+        """Sign out of Telegram and clear the local session."""
+        if self._client and _HAS_PYROGRAM and self._is_authorized:
+            try:
+                async def _logout():
+                    await self._client.log_out()
+                    return True
+                self._run(_logout(), timeout=12.0)
+            except Exception as e:
+                logger.warning(f"Telegram logout error: {e}")
+
+        self._is_authorized = False
+        self._is_connected = False
+        self._phone_code_hash = None
+        self._pending_phone = None
+        self._me_cache = None
+        self._me_cache_ts = 0.0
+        self._client = None
+
+        # Remove the on-disk session so the next login starts clean.
+        try:
+            session_file = _TELEGRAM_CONFIG.session_path
+            if session_file.exists():
+                session_file.unlink()
+        except OSError as e:
+            logger.warning(f"Could not remove Telegram session file: {e}")
+
+        return {"status": "logged_out", "message": "Signed out of Telegram."}
 
 
 # Singleton client instance

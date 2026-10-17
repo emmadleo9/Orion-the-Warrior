@@ -463,7 +463,45 @@
               <p>Open built-in Instagram to review your direct inbox and messages.</p>
               <a class="secondary-button open-social" href="/instagram" style="text-decoration:none; text-align:center; display:flex; align-items:center; justify-content:center;">Open Built-in Instagram</a>
             </article>
+
+            <article class="panel social-card" data-platform-card="telegram">
+              <div class="social-card-heading">
+                <span class="social-icon" aria-hidden="true">T</span>
+                <div><p class="eyebrow">MESSAGING</p><h3>Telegram</h3></div>
+              </div>
+              <span id="telegram-connection-state" class="connection-state">READY</span>
+              <p>Full Telegram client with hidden auto-proxy, built into Orion.</p>
+              <button class="secondary-button" type="button" id="open-telegram-tab">Open Telegram in Social Hub</button>
+            </article>
           </div>
+
+          <!-- ==================== TELEGRAM TAB (SOCIAL HUB) ==================== -->
+          <section class="panel telegram-panel" aria-labelledby="telegram-panel-title">
+            <div class="chat-heading instagram-manager-heading">
+              <div>
+                <p class="eyebrow">BUILT-IN CLIENT</p>
+                <h3 id="telegram-panel-title">Telegram</h3>
+              </div>
+              <span class="tg-head-actions">
+                <span id="telegram-ping-pill" class="connection-state" title="Hidden proxy latency">Proxy: Auto --</span>
+                <button id="telegram-expand" class="secondary-button" type="button" title="Open Telegram full screen">Expand ↗</button>
+              </span>
+            </div>
+            <p class="social-notice">
+              Chats, groups, channels, and contacts run inside Orion through a hidden
+              auto-selected proxy with a weekly refresh, so Telegram works on restricted networks.
+            </p>
+            <div class="telegram-frame-wrap">
+              <iframe
+                id="telegram-frame"
+                class="telegram-frame"
+                title="Orion Telegram client"
+                loading="lazy"
+                data-src="/telegram?embed=1"
+                src="about:blank"
+              ></iframe>
+            </div>
+          </section>
 
           <section class="panel instagram-manager" aria-labelledby="instagram-manager-title">
             <div class="chat-heading instagram-manager-heading">

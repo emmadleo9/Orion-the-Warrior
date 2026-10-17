@@ -1110,8 +1110,72 @@ document.querySelectorAll('.nav[data-view]').forEach((button) => {
     });
     if (selectedView === 'devices-view') loadDashboard();
     if (selectedView === 'ai-studio-view') loadGallery();
+    if (selectedView === 'social-view') initTelegramTab();
   });
 });
+
+/* ==========================================================================
+   TELEGRAM (SOCIAL HUB TAB)
+   The Telegram client is embedded in the Social Hub. The iframe is loaded
+   lazily on first visit so it never slows down the initial dashboard load.
+   ========================================================================== */
+let telegramTabLoaded = false;
+let telegramStatusTimer = null;
+
+function telegramFrame() {
+  return document.getElementById('telegram-frame');
+}
+
+/** Point the flashlight at the Social Hub's Telegram panel. */
+function revealTelegramTab() {
+  if (window.location.search !== '?view=social') {
+    // Ensure the Social Hub view is visible before scrolling.
+    document.querySelector('.nav[data-view="social-view"]')?.click();
+  }
+  const panel = document.querySelector('.telegram-panel');
+  panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/** Refresh the proxy ping pill shown in the Social Hub header. */
+async function refreshTelegramPing() {
+  const pill = document.getElementById('telegram-ping-pill');
+  if (!pill) return;
+  try {
+    const status = await fetch('/api/telegram/status').then((r) => r.json());
+    const ping = status?.ping ?? status?.current_proxy?.ping;
+    pill.textContent = ping ? `Proxy: Auto ${ping}ms` : 'Proxy: Auto --';
+    pill.classList.toggle('is-online', Boolean(status?.current_proxy));
+  } catch (_) {
+    pill.textContent = 'Proxy: Auto --';
+  }
+}
+
+/** Load the Telegram iframe on demand and start status polling. */
+function initTelegramTab() {
+  const frame = telegramFrame();
+  if (!frame) return;
+
+  if (!telegramTabLoaded) {
+    frame.src = frame.dataset.src || '/telegram?embed=1';
+    telegramTabLoaded = true;
+  }
+
+  refreshTelegramPing();
+  if (!telegramStatusTimer) {
+    telegramStatusTimer = setInterval(refreshTelegramPing, 15000);
+  }
+}
+
+(function wireTelegramTab() {
+  const openBtn = document.getElementById('open-telegram-tab');
+  if (openBtn) openBtn.addEventListener('click', () => revealTelegramTab());
+
+  const expandBtn = document.getElementById('telegram-expand');
+  if (expandBtn) {
+    expandBtn.addEventListener('click', () => window.open('/telegram', '_blank', 'noopener'));
+  }
+})();
+
 
 /* ==========================================================================
    LIVE TASKS MONITOR

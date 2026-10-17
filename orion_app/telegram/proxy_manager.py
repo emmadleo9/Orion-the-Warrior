@@ -22,10 +22,12 @@ if not logger.handlers:
     ch.setFormatter(logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s"))
     logger.addHandler(ch)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+from .config import load_telegram_config
+
+_TELEGRAM_CONFIG = load_telegram_config()
+DATA_DIR = _TELEGRAM_CONFIG.data_dir
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-PROXIES_FILE = DATA_DIR / "telegram_proxies.json"
+PROXIES_FILE = _TELEGRAM_CONFIG.proxies_file
 
 # Telegram Datacenter IPs for testing connectivity
 # DC 5 (Singapore - 91.108.56.130) is the closest DC to Pakistan / South Asia
@@ -110,6 +112,7 @@ class TelegramProxyManager:
     def __init__(self, file_path: Path = PROXIES_FILE) -> None:
         self.file_path = file_path
         self._current_proxy: Optional[Dict[str, Any]] = None
+        self._current_proxy_ts: Optional[float] = None
         self._last_refresh: Optional[str] = None
         self._scheduler = None
         self._ensure_file_exists()
@@ -208,10 +211,26 @@ class TelegramProxyManager:
 
         self.save_proxies(tested)
         self._last_refresh = now_iso
+        # Force the next get_best_proxy() to re-probe the freshly tested pool.
+        self._current_proxy_ts = None
         return tested
 
-    def get_best_proxy(self) -> Optional[Dict[str, Any]]:
-        """Find the fastest responding proxy that is online."""
+    def get_best_proxy(self, max_age: float = 300.0) -> Optional[Dict[str, Any]]:
+        """Find the fastest responding proxy that is online.
+
+        A healthy proxy selected within ``max_age`` seconds is returned immediately
+        without re-probing every node, so request paths (login, client init) never
+        block for the full proxy-pool test cycle.
+        """
+        cached = self._current_proxy
+        if (
+            cached
+            and cached.get("status") == "online"
+            and self._current_proxy_ts is not None
+            and (time.time() - self._current_proxy_ts) <= max_age
+        ):
+            return cached
+
         proxies = self.get_proxies()
         tested = []
         for p in proxies:
@@ -244,15 +263,32 @@ class TelegramProxyManager:
         new_name = proxy.get("name") or proxy.get("host") or "Proxy"
         ping = proxy.get("ping", 85)
         self._current_proxy = dict(proxy)
+        self._current_proxy_ts = time.time()
         logger.info(f"Proxy switched: {old_name} -> {new_name} {ping}ms")
 
-    def get_current_proxy(self) -> Dict[str, Any]:
+    def get_current_proxy(self, warm: bool = True) -> Dict[str, Any]:
         if not self._current_proxy:
-            best = self.get_best_proxy()
+            if warm:
+                best = self.get_best_proxy()
+            else:
+                # Fast, non-blocking path: reuse a persisted online proxy if any
+                # instead of re-probing the whole pool (used by status polling).
+                best = None
+                for p in self.get_proxies():
+                    if p.get("status") == "online":
+                        best = p
+                        break
+                if best is None and self.get_proxies():
+                    best = dict(self.get_proxies()[0])
+                    best.setdefault("ping", 85)
+                    best["status"] = "online"
             if best:
                 self._current_proxy = best
+                if self._current_proxy_ts is None:
+                    self._current_proxy_ts = time.time()
             else:
                 self._current_proxy = dict(FALLBACK_PROXIES[0])
+                self._current_proxy_ts = time.time()
         return self._current_proxy
 
     def auto_switch_proxy(self) -> Dict[str, Any]:
@@ -303,7 +339,8 @@ class TelegramProxyManager:
         return self.test_all_proxies()
 
     def get_status(self) -> Dict[str, Any]:
-        curr = self.get_current_proxy()
+        # Report-only path: never block the UI's 8s status poll on a full pool probe.
+        curr = self.get_current_proxy(warm=False)
         return {
             "connected": bool(curr and curr.get("status") == "online"),
             "current_proxy": curr,
@@ -320,16 +357,25 @@ class TelegramProxyManager:
             from apscheduler.triggers.cron import CronTrigger
 
             self._scheduler = BackgroundScheduler(daemon=True)
-            # Sunday 3 AM PKT
+            # Weekly refresh (default: Sunday 3 AM PKT / Asia/Karachi).
             self._scheduler.add_job(
                 self.fetch_new_proxies,
-                CronTrigger(day_of_week="sun", hour=3, minute=0, timezone="Asia/Karachi"),
+                CronTrigger(
+                    day_of_week=_TELEGRAM_CONFIG.refresh_day,
+                    hour=_TELEGRAM_CONFIG.refresh_hour,
+                    minute=_TELEGRAM_CONFIG.refresh_minute,
+                    timezone=_TELEGRAM_CONFIG.timezone,
+                ),
                 id="telegram_proxy_weekly_refresh",
                 name="Telegram Proxy Weekly Refresh (Pakistan PKT)",
                 replace_existing=True,
             )
             self._scheduler.start()
-            logger.info("APScheduler started: Weekly Telegram proxy auto-refresh active (Sundays 3 AM PKT).")
+            logger.info(
+                "APScheduler started: Weekly Telegram proxy auto-refresh active "
+                f"({_TELEGRAM_CONFIG.refresh_day} {_TELEGRAM_CONFIG.refresh_hour:02d}:"
+                f"{_TELEGRAM_CONFIG.refresh_minute:02d} {_TELEGRAM_CONFIG.timezone})."
+            )
         except Exception as e:
             logger.warning(f"Could not start APScheduler for Telegram proxies: {e}")
 

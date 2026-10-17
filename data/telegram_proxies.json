@@ -10,7 +10,7 @@
     "ping": 9999,
     "status": "offline",
     "country": "SG",
-    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "last_checked": "2026-10-11T08:47:16.808819+00:00",
     "online": false
   },
   {
@@ -24,7 +24,7 @@
     "ping": 9999,
     "status": "offline",
     "country": "Local",
-    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "last_checked": "2026-10-11T08:47:16.808819+00:00",
     "online": false
   },
   {
@@ -38,7 +38,7 @@
     "ping": 9999,
     "status": "offline",
     "country": "NL",
-    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "last_checked": "2026-10-11T08:47:16.808819+00:00",
     "online": false
   },
   {
@@ -52,7 +52,7 @@
     "ping": 9999,
     "status": "offline",
     "country": "US",
-    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "last_checked": "2026-10-11T08:47:16.808819+00:00",
     "online": false
   },
   {
@@ -62,10 +62,10 @@
     "server": "149.154.167.50",
     "port": 443,
     "secret": "ee11111111111111111111111111111111626c6f672e636c6f7564666c6172652e636f6d",
-    "ping": 388,
+    "ping": 159,
     "status": "online",
     "country": "Relay",
-    "last_checked": "2026-10-10T22:00:00.017691+00:00",
+    "last_checked": "2026-10-11T08:47:16.808819+00:00",
     "online": true
   }
 ]
