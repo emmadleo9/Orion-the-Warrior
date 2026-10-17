@@ -10,30 +10,39 @@ load_config()
 
 from orion_app.main import app
 
-def get_lan_ips() -> list[str]:
-    """Best-effort list of this machine's LAN IPv4 addresses (for the phone URL)."""
-    ips: list[str] = []
+def is_tailscale_ip(ip: str) -> bool:
+    """Check if an IPv4 address belongs to the Tailscale CGNAT range (100.64.0.0/10)."""
     try:
-        # Opening a UDP socket to a public address reveals the outbound interface
-        # without sending any packets.
+        parts = [int(p) for p in ip.split(".")]
+        return len(parts) == 4 and parts[0] == 100 and 64 <= parts[1] <= 127
+    except Exception:
+        return False
+
+
+def get_all_ips() -> tuple[list[str], list[str]]:
+    """Return (tailscale_ips, lan_ips) for this machine."""
+    discovered: list[str] = []
+    try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(0.5)
             s.connect(("8.8.8.8", 80))
             primary = s.getsockname()[0]
         if primary and not primary.startswith("127."):
-            ips.append(primary)
+            discovered.append(primary)
     except OSError:
         pass
 
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ip = info[4][0]
-            if ip not in ips and not ip.startswith("127."):
-                ips.append(ip)
+            if ip not in discovered and not ip.startswith("127."):
+                discovered.append(ip)
     except OSError:
         pass
 
-    return ips or ["localhost"]
+    tailscale_ips = [ip for ip in discovered if is_tailscale_ip(ip)]
+    lan_ips = [ip for ip in discovered if not is_tailscale_ip(ip) and not ip.startswith("192.168.56.")]
+    return tailscale_ips, (lan_ips or ["localhost"])
 
 
 def is_port_in_use(port: int, host: str = "0.0.0.0") -> bool:
@@ -78,11 +87,18 @@ if __name__ == "__main__":
             pass
         sys.exit(0)
 
+    tailscale_ips, lan_ips = get_all_ips()
+
     print(f"{'='*60}")
     print(f" Orion The Warrior starting at:")
-    print(f"     Local: http://localhost:{port}")
-    for ip in get_lan_ips():
-        print(f"     Network: http://{ip}:{port}  <- USE THIS ON PHONE")
+    print(f"     Local PC:   http://localhost:{port}")
+    if tailscale_ips:
+        for tip in tailscale_ips:
+            print(f"     Tailscale:  http://{tip}:{port}  <- USE THIS ON PHONE (WORLDWIDE)")
+    else:
+        print(f"     Tailscale:  Not detected. Connect Tailscale to access worldwide.")
+    for lip in lan_ips:
+        print(f"     Local Wi-Fi: http://{lip}:{port}")
     print(f"{'='*60}\n")
     
     uvicorn.run(app, host=host, port=port)

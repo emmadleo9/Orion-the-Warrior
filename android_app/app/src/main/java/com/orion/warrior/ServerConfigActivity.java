@@ -26,7 +26,7 @@ public class ServerConfigActivity extends AppCompatActivity {
 
     public static final String PREFS_NAME = "OrionPrefs";
     public static final String KEY_SERVER_URL = "server_url";
-    public static final String DEFAULT_URL = "http://192.168.18.144:8000";
+    public static final String DEFAULT_URL = "http://100.116.4.49:8000";
 
     private EditText etServerUrl;
     private TextView tvStatus;

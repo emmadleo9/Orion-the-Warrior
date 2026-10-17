@@ -21,7 +21,8 @@ if not exist "%ORION_PYTHON%" (
 
 echo Starting Orion from:
 echo "%~dp0"
-echo Open http://192.168.18.144:8000 after the server reports startup.
+echo Open http://100.116.4.49:8000 on your phone via Tailscale (anywhere in the world)
+echo Or http://localhost:8000 on this PC.
 echo Press Ctrl+C in this window to stop Orion.
 echo.
 "%ORION_PYTHON%" "%~dp0main.py"
