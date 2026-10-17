@@ -589,11 +589,10 @@ async function askAi() {
     return;
   }
   sendButton.disabled = true;
-  sendButton.textContent = 'Nico is thinking...';
   addMessage('user', prompt);
   promptBox.value = '';
-  const pendingMessage = addMessage('assistant', 'Consulting local models & telemetry...', true);
-  const bodyEl = pendingMessage.querySelector('.message-body');
+  const assistantMessage = addMessage('assistant', '', true);
+  const bodyEl = assistantMessage.querySelector('.message-body');
   try {
     const response = await fetch('/api/assistant/chat', {
       method: 'POST',
@@ -639,11 +638,10 @@ async function askAi() {
             const liveData = document.createElement('span');
             liveData.className = 'message-source';
             liveData.textContent = `LIVE TOOLS · ${event.tools_used.join(' · ')}`;
-            pendingMessage.append(liveData);
+            assistantMessage.append(liveData);
           }
           aiResponse.textContent = event.message;
 
-          // Add copy button once done
           const footer = document.createElement('div');
           footer.className = 'msg-footer';
           const copyBtn = document.createElement('button');
@@ -656,13 +654,13 @@ async function askAi() {
             setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
           });
           footer.append(copyBtn);
-          pendingMessage.append(footer);
+          assistantMessage.append(footer);
         }
       }
     }
     if (paintQueued) flushReply();
     if (!completed) throw new Error('Nico’s response stream ended unexpectedly.');
-    pendingMessage.classList.remove('pending-message');
+    assistantMessage.classList.remove('pending-message');
   } catch (error) {
     bodyEl.innerHTML = `<p class="error-text">Connection issue: ${error.message}</p>`;
     aiResponse.textContent = error.message;
@@ -1628,14 +1626,29 @@ addListenerSafe('instagram-message-form', 'submit', async (event) => {
 if (chatForm) {
   chatForm.addEventListener('submit', (event) => {
     event.preventDefault();
-    askAi();
+    event.stopImmediatePropagation();
+    try {
+      askAi();
+    } catch (error) {
+      console.error('[ORION] askAi error:', error);
+      if (sendButton) { sendButton.disabled = false; sendButton.textContent = 'Send message'; }
+      if (promptBox) promptBox.focus();
+    }
+    return false;
   });
 }
 if (promptBox) {
   promptBox.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      if (chatForm) chatForm.requestSubmit();
+      event.stopImmediatePropagation();
+      try {
+        if (chatForm) chatForm.requestSubmit();
+      } catch (error) {
+        console.error('[ORION] keydown submit error:', error);
+        if (sendButton) { sendButton.disabled = false; sendButton.textContent = 'Send message'; }
+        promptBox.focus();
+      }
     }
   });
 }
