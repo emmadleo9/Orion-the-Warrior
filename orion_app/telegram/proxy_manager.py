@@ -11,6 +11,7 @@ import logging
 import os
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -196,18 +197,34 @@ class TelegramProxyManager:
                 return {"online": False, "ping": 9999, "error": str(err)}
 
     def test_all_proxies(self) -> List[Dict[str, Any]]:
-        """Test all proxies, update latency & status, and save results."""
+        """Test all proxies in parallel, update latency & status, and save results.
+
+        Each node is probed concurrently so the total wall-clock time is bounded by
+        the slowest single node (~4s) instead of the sum of the whole pool. Without
+        this the ``/proxies/refresh`` endpoint blocks for ~20s on a 5-node pool.
+        """
         proxies = self.get_proxies()
         now_iso = datetime.now(timezone.utc).isoformat()
-        tested = []
-        for p in proxies:
-            res = self.test_proxy(p)
+        if not proxies:
+            self._last_refresh = now_iso
+            self._current_proxy_ts = None
+            return []
+
+        def _probe(p: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                res = self.test_proxy(p)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"Proxy test failed for {p.get('name', 'node')}: {e}")
+                res = {"online": False, "ping": 9999}
             p_copy = dict(p)
             p_copy["online"] = res["online"]
             p_copy["ping"] = res["ping"]
             p_copy["status"] = "online" if res["online"] else "offline"
             p_copy["last_checked"] = now_iso
-            tested.append(p_copy)
+            return p_copy
+
+        with ThreadPoolExecutor(max_workers=min(len(proxies), 8)) as pool:
+            tested = list(pool.map(_probe, proxies))
 
         self.save_proxies(tested)
         self._last_refresh = now_iso
@@ -231,15 +248,11 @@ class TelegramProxyManager:
         ):
             return cached
 
+        # Probe the pool in parallel: the serial loop used to block request paths
+        # for ~4s per node (~20s on a 5-node pool). ``test_all_proxies`` bounds the
+        # wall-clock time to the slowest single node and persists the results.
+        tested = self.test_all_proxies()
         proxies = self.get_proxies()
-        tested = []
-        for p in proxies:
-            res = self.test_proxy(p)
-            p_copy = dict(p)
-            p_copy["online"] = res["online"]
-            p_copy["ping"] = res["ping"]
-            p_copy["status"] = "online" if res["online"] else "offline"
-            tested.append(p_copy)
 
         # Filter only online proxies and sort by ping
         online_list = [p for p in tested if p["online"]]

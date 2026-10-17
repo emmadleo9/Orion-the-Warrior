@@ -182,7 +182,13 @@ def telegram_add_proxy(payload: Dict[str, Any]) -> Dict[str, Any]:
 def telegram_refresh_proxies() -> Dict[str, Any]:
     """Re-test the whole proxy pool and pick the best node."""
     proxies = telegram_proxy_manager.test_all_proxies()
-    best = telegram_proxy_manager.get_best_proxy()
+    # ``test_all_proxies`` already probed and persisted every node and reset the
+    # cache timestamp; selecting the best from those results avoids a second
+    # full probe cycle (the serial path used to block this endpoint for ~25s).
+    online = [p for p in proxies if p.get("online")]
+    best = min(online, key=lambda p: p.get("ping", 9999)) if online else (proxies[0] if proxies else None)
+    if best is not None:
+        telegram_proxy_manager.set_current_proxy(best)
     return {"refreshed": True, "proxies_count": len(proxies), "best_proxy": best}
 
 
