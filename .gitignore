@@ -25,3 +25,6 @@ generated/
 __pycache__/
 logs/
 .pytest_cache/
+.gradle/
+**/build/
+**/.gradle/
