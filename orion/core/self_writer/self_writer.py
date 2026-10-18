@@ -194,21 +194,19 @@ class SelfWriter:
     # ------------------------------------------------------------------ #
     def _pick_target(self, admin_command: str) -> str:
         """Ask the model which file to write, or default to a sensible path."""
+        prompt = (
+            "Orion is a Python/FastAPI app. Source lives under orion_app/\n"
+            "and static assets under orion_app/static/.\n\n"
+            "Admin command: {command}\n\n"
+            "Codebase snapshot:\n{snapshot}\n\n"
+            "Pick ONE target file path (relative to project root) to write "
+            "for this command. Return ONLY the path, e.g. "
+            "orion_app/static/self_writer.html or orion_app/main.py.\n"
+            "If creating something new, pick a clear new path."
+        ).format(command=admin_command, snapshot=self._snapshot_text or "")
         messages = [
             ChatMessage("system", SYSTEM_PROMPT),
-            ChatMessage(
-                "user",
-                (
-                    "Orion is a Python/FastAPI app. Source lives under orion_app/\n"
-                    "and static assets under orion_app/static/.\n\n"
-                    "Admin command: {command}\n\n"
-                    "Codebase snapshot:\n{snapshot}\n\n"
-                    "Pick ONE target file path (relative to project root) to write "
-                    "for this command. Return ONLY the path, e.g. "
-                    "orion_app/static/self_writer.html or orion_app/main.py.\n"
-                    "If creating something new, pick a clear new path.",
-                ).format(command=admin_command, snapshot=self._snapshot_text or ""),
-            ),
+            ChatMessage("user", prompt),
         ]
         target = self.model.chat(messages, temperature=0.0).strip().strip("`").strip()
         if not target or "/" not in target:
@@ -216,23 +214,21 @@ class SelfWriter:
         return target
 
     def _generate_code(self, admin_command: str, target_rel_path: str) -> str:
+        prompt = (
+            "Admin command: {command}\n\n"
+            "Target file (relative to project root): {target}\n\n"
+            "Codebase snapshot:\n{snapshot}\n\n"
+            "Write the COMPLETE file contents for {target} that fulfills the "
+            "admin command. Return ONLY the file contents — no markdown fences, "
+            "no explanations, no lead-in text."
+        ).format(
+            command=admin_command,
+            target=target_rel_path,
+            snapshot=self._snapshot_text or "",
+        )
         messages = [
             ChatMessage("system", SYSTEM_PROMPT),
-            ChatMessage(
-                "user",
-                (
-                    "Admin command: {command}\n\n"
-                    "Target file (relative to project root): {target}\n\n"
-                    "Codebase snapshot:\n{snapshot}\n\n"
-                    "Write the COMPLETE file contents for {target} that fulfills the "
-                    "admin command. Return ONLY the file contents — no markdown fences, "
-                    "no explanations, no lead-in text.",
-                ).format(
-                    command=admin_command,
-                    target=target_rel_path,
-                    snapshot=self._snapshot_text or "",
-                ),
-            ),
+            ChatMessage("user", prompt),
         ]
         return self.model.chat(messages, temperature=0.2)
 

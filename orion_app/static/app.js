@@ -1691,3 +1691,223 @@ if (instagramCallback.get('view') === 'social') {
   }
   window.history.replaceState({}, document.title, '/');
 }
+
+/* ==========================================================================
+   SELF WRITER — Admin-gated self-rewriting engine
+   ========================================================================== */
+const selfWriterCommand = document.getElementById('self-writer-command');
+const selfWriterTarget = document.getElementById('self-writer-target');
+const selfWriterForm = document.getElementById('self-writer-form');
+const selfWriterGoBtn = document.getElementById('self-writer-go-btn');
+const selfWriterStatus = document.getElementById('self-writer-status');
+const selfWriterLog = document.getElementById('self-writer-log');
+const selfWriterModelStatus = document.getElementById('self-writer-model-status');
+const selfWriterDiffSection = document.getElementById('self-writer-diff-section');
+const selfWriterDiffSummary = document.getElementById('self-writer-diff-summary');
+const selfWriterDiff = document.getElementById('self-writer-diff');
+const selfWriterApproveBtn = document.getElementById('self-writer-approve-btn');
+const selfWriterRejectBtn = document.getElementById('self-writer-reject-btn');
+const selfWriterCopyBtn = document.getElementById('self-writer-copy-btn');
+const selfWriterApplyStatus = document.getElementById('self-writer-apply-status');
+const selfWriterBackupsList = document.getElementById('self-writer-backups-list');
+const selfWriterRefreshBackups = document.getElementById('self-writer-refresh-backups');
+
+let pendingDiff = null;
+
+function swLog(text, cssClass = '') {
+  if (!selfWriterLog) return;
+  const when = new Date();
+  const timeStr = when.toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  line.className = `term-line${cssClass ? ' ' + cssClass : ''}`;
+  const timeEl = document.createElement('span');
+  timeEl.className = 'term-time';
+  timeEl.textContent = timeStr;
+  const textEl = document.createElement('span');
+  textEl.className = 'term-text';
+  textEl.textContent = text;
+  line.append(timeEl, textEl);
+  selfWriterLog.append(line);
+  selfWriterLog.scrollTop = selfWriterLog.scrollHeight;
+}
+
+async function loadSelfWriterStatus() {
+  if (!selfWriterModelStatus) return;
+  try {
+    const data = await fetchJson('/api/self-write/status');
+    const ollama = data.model.ollama || {};
+    const openrouter = data.model.openrouter || {};
+    if (ollama.reachable) {
+      selfWriterModelStatus.textContent = `MODEL · Ollama ${ollama.model} (local, free)`;
+      selfWriterModelStatus.classList.add('online');
+    } else if (openrouter.reachable) {
+      selfWriterModelStatus.textContent = `MODEL · OpenRouter ${openrouter.model} (free tier)`;
+      selfWriterModelStatus.classList.add('online');
+    } else {
+      selfWriterModelStatus.textContent = `MODEL · unavailable`;
+      selfWriterModelStatus.classList.add('offline');
+    }
+  } catch (error) {
+    selfWriterModelStatus.textContent = `MODEL · status check failed`;
+    selfWriterModelStatus.classList.add('offline');
+  }
+}
+
+async function loadBackups() {
+  if (!selfWriterBackupsList) return;
+  try {
+    const items = await fetchJson('/api/self-write/backups');
+    selfWriterBackupsList.replaceChildren();
+    if (!items.length) {
+      selfWriterBackupsList.innerHTML = '<p class="chat-hint">No backups yet.</p>';
+      return;
+    }
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'gallery-card';
+      const dateStr = new Date(item.created_at).toLocaleString();
+      row.innerHTML = `
+        <div>
+          <strong>${escapeHtml(item.name)}</strong><br>
+          <span class="chat-hint">${dateStr} · ${Math.round(item.size / 1024)} KB</span>
+        </div>
+        <div class="gallery-card-actions">
+          <button class="secondary-button btn-danger" type="button" data-name="${escapeHtml(item.name)}">Delete</button>
+        </div>
+      `;
+      row.querySelector('button').addEventListener('click', () => deleteBackup(item.name));
+      selfWriterBackupsList.append(row);
+    }
+  } catch (error) {
+    selfWriterBackupsList.innerHTML = `<p class="chat-hint">Could not load backups: ${error.message}</p>`;
+  }
+}
+
+async function deleteBackup(name) {
+  if (!confirm(`Delete backup ${name}?`)) return;
+  try {
+    await fetchJson(`/api/self-write/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    swLog(`Backup deleted: ${name}`);
+    loadBackups();
+  } catch (error) {
+    swLog(`Could not delete backup: ${error.message}`, 'log-error');
+  }
+}
+
+if (selfWriterRefreshBackups) {
+  selfWriterRefreshBackups.addEventListener('click', loadBackups);
+}
+
+if (selfWriterForm) {
+  selfWriterForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const command = selfWriterCommand.value.trim();
+    const target = selfWriterTarget.value.trim() || undefined;
+    if (!command) {
+      selfWriterCommand.focus();
+      return;
+    }
+    selfWriterGoBtn.disabled = true;
+    selfWriterGoBtn.textContent = 'Orion is writing code...';
+    selfWriterStatus.textContent = '';
+    selfWriterDiffSection.hidden = true;
+    pendingDiff = null;
+    swLog(`Command received: ${command}`);
+    swLog('Orion is writing code...', 'log-info');
+    try {
+      const result = await fetchJson('/api/self-write/write', {
+        method: 'POST',
+        body: JSON.stringify({ command, target }),
+      });
+      if (!result.success) {
+        swLog(`Write failed: ${result.message}`, 'log-error');
+        selfWriterStatus.textContent = `Failed: ${result.message}`;
+        selfWriterModelStatus.textContent = `MODEL · ${result.model_used || 'unknown'}`;
+        return;
+      }
+      swLog('Testing...', 'log-info');
+      pendingDiff = result.diff;
+      selfWriterDiff.textContent = pendingDiff.unified_diff || '(no changes)';
+      selfWriterDiffSummary.textContent = pendingDiff.summary;
+      selfWriterModelStatus.textContent = `MODEL · ${result.model_used || 'unknown'}`;
+      selfWriterStatus.textContent = result.message;
+      swLog('Sandbox validation passed.', 'log-ok');
+      swLog('Ready for your review.', 'log-ok');
+      selfWriterDiffSection.hidden = false;
+    } catch (error) {
+      swLog(`Write error: ${error.message}`, 'log-error');
+      selfWriterStatus.textContent = `Error: ${error.message}`;
+    } finally {
+      selfWriterGoBtn.disabled = false;
+      selfWriterGoBtn.textContent = 'Make Orion Write It';
+    }
+  });
+}
+
+if (selfWriterApproveBtn) {
+  selfWriterApproveBtn.addEventListener('click', async () => {
+    if (!pendingDiff) return;
+    selfWriterApproveBtn.disabled = true;
+    selfWriterApproveBtn.textContent = 'Applying...';
+    swLog('Admin approved. Applying...', 'log-info');
+    try {
+      const result = await fetchJson('/api/self-write/apply', {
+        method: 'POST',
+        body: JSON.stringify({
+          file_path: pendingDiff.file_path,
+          old_code: pendingDiff.old_code || '',
+          new_code: pendingDiff.new_code,
+        }),
+      });
+      if (result.success) {
+        swLog(`Applied: ${result.message}`, 'log-ok');
+        selfWriterApplyStatus.textContent = `✓ ${result.message}`;
+        selfWriterDiffSection.hidden = true;
+        pendingDiff = null;
+        loadBackups();
+      } else {
+        swLog(`Apply failed: ${result.message}`, 'log-error');
+        selfWriterApplyStatus.textContent = `✗ ${result.message}`;
+      }
+    } catch (error) {
+      swLog(`Apply error: ${error.message}`, 'log-error');
+      selfWriterApplyStatus.textContent = `Error: ${error.message}`;
+    } finally {
+      selfWriterApproveBtn.disabled = false;
+      selfWriterApproveBtn.textContent = 'Approve & Apply';
+    }
+  });
+}
+
+if (selfWriterRejectBtn) {
+  selfWriterRejectBtn.addEventListener('click', () => {
+    pendingDiff = null;
+    selfWriterDiffSection.hidden = true;
+    selfWriterApplyStatus.textContent = 'Rejected — no changes applied.';
+    swLog('Admin rejected. No changes applied.');
+  });
+}
+
+if (selfWriterCopyBtn) {
+  selfWriterCopyBtn.addEventListener('click', () => {
+    if (!pendingDiff) return;
+    navigator.clipboard.writeText(pendingDiff.new_code);
+    selfWriterCopyBtn.textContent = 'Copied!';
+    setTimeout(() => { selfWriterCopyBtn.textContent = 'Copy code'; }, 2000);
+    swLog('Code copied to clipboard.');
+  });
+}
+
+if (selfWriterStatus) selfWriterStatus.textContent = '';
+loadSelfWriterStatus();
+loadBackups();
+
+// Wire the Self Writer nav button into the existing view switcher
+document.querySelectorAll('.nav[data-view]').forEach((button) => {
+  if (button.dataset.view === 'self-writer-view') {
+    button.addEventListener('click', () => {
+      loadSelfWriterStatus();
+      loadBackups();
+    });
+  }
+});

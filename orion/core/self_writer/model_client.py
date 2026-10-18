@@ -54,7 +54,12 @@ class ModelClient:
         )
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
         self.context_size = max(4096, int(os.getenv("ORION_SELFWRITER_CONTEXT", "16384")))
-        self.max_predict_tokens = max(1024, int(os.getenv("ORION_SELFWRITER_MAX_TOKENS", "4096")))
+        self.max_predict_tokens = max(512, int(os.getenv("ORION_SELFWRITER_MAX_TOKENS", "2048")))
+
+        # Resolve the best installed Ollama code-writing model at construction
+        # time so Orion works out of the box (e.g. qwen2.5-coder:7b when 32b
+        # is too large for the host). Falls back to the configured model name.
+        self.ollama_model = self._resolve_ollama_model(self.ollama_model)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -105,6 +110,43 @@ class ModelClient:
     # ------------------------------------------------------------------ #
     # Ollama provider
     # ------------------------------------------------------------------ #
+    def _resolve_ollama_model(self, preferred: str) -> str:
+        """Pick the best installed Ollama code-writing model.
+
+        Returns ``preferred`` if it is installed, otherwise any installed
+        model whose name starts with ``qwen2.5-coder`` (preferring 32b, then
+        14b, then 7b, then 3b), otherwise ``preferred`` unchanged so Ollama
+        can attempt to pull it on first use.
+        """
+        try:
+            req = Request(f"{self.ollama_url}/api/tags", method="GET")
+            with urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return preferred
+
+        installed = [
+            m.get("name", "")
+            for m in data.get("models", [])
+            if isinstance(m, dict)
+        ]
+
+        def _installed(name: str) -> bool:
+            return name in installed
+
+        if _installed(preferred):
+            return preferred
+
+        # Preference order for code-writing models.
+        for size in ("32b", "14b", "7b", "3b"):
+            candidate = f"qwen2.5-coder:{size}"
+            if _installed(candidate):
+                return candidate
+        # Fallback: any qwen2.5-coder variant.
+        for name in installed:
+            if name.startswith("qwen2.5-coder:"):
+                return name
+        return preferred
     def _provider_ok(self, provider: str) -> bool:
         if provider == "ollama":
             try:

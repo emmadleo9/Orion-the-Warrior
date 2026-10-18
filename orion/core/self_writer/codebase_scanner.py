@@ -48,7 +48,7 @@ SOURCE_EXTENSIONS = {
     ".md",
 }
 
-MAX_FILE_BYTES = 200_000  # skip enormous files
+MAX_FILE_BYTES = 80_000  # skip enormous files
 
 
 @dataclass
@@ -146,7 +146,7 @@ def scan_codebase(root: str | Path, include_content: bool = True) -> CodebaseSna
                     content = f"[FILE TOO LARGE ({size} bytes) — truncated]"
                     # Still try to read the head for context.
                     try:
-                        content += "\n" + full_path.read_text(encoding="utf-8", errors="replace")[:20_000]
+                        content += "\n" + full_path.read_text(encoding="utf-8", errors="replace")[:3_000]
                     except OSError:
                         pass
                 else:
@@ -170,7 +170,7 @@ def scan_codebase(root: str | Path, include_content: bool = True) -> CodebaseSna
     return snapshot
 
 
-def render_snapshot_for_llm(snapshot: CodebaseSnapshot, max_files: int = 60) -> str:
+def render_snapshot_for_llm(snapshot: CodebaseSnapshot, max_files: int = 20) -> str:
     """Render the snapshot as a text block the LLM can read in its context."""
     lines: list[str] = []
     lines.append("=== ORION CODEBASE STRUCTURE ===")
