@@ -1911,3 +1911,74 @@ document.querySelectorAll('.nav[data-view]').forEach((button) => {
     });
   }
 });
+
+/* ==========================================================================
+   BINARY MATRIX RAIN — works on desktop and mobile phones
+   ========================================================================== */
+(function initMatrixRain() {
+  const canvas = document.querySelector('.matrix-rain');
+  if (!canvas) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    canvas.style.display = 'none';
+    return;
+  }
+
+  const ctx = canvas.getContext('2d');
+  let width, height, columns, fontSize, drops;
+
+  const chars = '01';
+  const green = '#00ff9d';
+  const dim = '#52f7a3';
+
+  function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    fontSize = Math.max(10, Math.min(14, Math.floor(width / 28)));
+    columns = Math.ceil(width / fontSize);
+    drops = new Array(columns).fill(0).map(() => Math.random() * height);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+
+  function draw() {
+    // Semi-transparent black trailing
+    ctx.fillStyle = 'rgba(2, 13, 8, 0.12)';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = green;
+    ctx.font = fontSize + 'px monospace';
+
+    for (let i = 0; i < drops.length; i++) {
+      const char = chars[Math.floor(Math.random() * chars.length)];
+      const x = i * fontSize;
+      const y = drops[i];
+
+      // occasional bright char
+      ctx.fillStyle = Math.random() > 0.975 ? dim : green;
+      ctx.fillText(char, x, y);
+
+      if (y > height && Math.random() > 0.985) {
+        drops[i] = 0;
+      }
+      drops[i] += fontSize;
+    }
+  }
+
+  let animId;
+  function loop() {
+    draw();
+    animId = requestAnimationFrame(loop);
+  }
+
+  // Pause when tab hidden to save mobile battery
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      cancelAnimationFrame(animId);
+    } else {
+      loop();
+    }
+  });
+
+  loop();
+})();
