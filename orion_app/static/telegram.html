@@ -220,7 +220,7 @@
     <!-- ----------------------------------------------------------------------- -->
     <!-- MIDDLE PANEL (45%): Active Chat Header, Messages, Input Area -->
     <!-- ----------------------------------------------------------------------- -->
-    <main id="middle-panel" class="flex-1 flex-col bg-orionBg/95 relative overflow-hidden w-full md:max-w-full">
+    <main id="middle-panel" class="hidden md:flex flex-1 flex-col bg-orionBg/95 relative overflow-hidden w-full">
 
       <!-- Active Chat Header -->
       <header id="chat-header" class="h-16 shrink-0 border-b border-orionBorder bg-orionCard/80 backdrop-blur-md px-4 flex items-center justify-between z-10">
@@ -757,9 +757,11 @@
         updateRightProfile(chat);
       }
 
-      // Show middle panel on mobile
-      document.getElementById('left-panel').classList.add('hidden', 'md:flex');
+      // Show middle panel on mobile, hide left panel
       document.getElementById('middle-panel').classList.remove('hidden');
+      if (window.innerWidth < 1024) {
+        document.getElementById('left-panel').classList.add('-translate-x-full');
+      }
 
       // Load Messages
       await loadMessages(chatId);
@@ -947,10 +949,11 @@
         }
       });
 
-      // Mobile back button
+      // Mobile back button: return to chat list
       document.getElementById('mobile-back-btn').addEventListener('click', () => {
-        document.getElementById('left-panel').classList.remove('hidden');
-        document.getElementById('middle-panel').classList.add('hidden');
+        leftPanel.classList.remove('-translate-x-full');
+        mobileLeftToggle.setAttribute('aria-expanded', 'true');
+        rightPanel.classList.add('-translate-x-full');
       });
 
       // Mobile left panel toggle (chat list)
@@ -978,11 +981,6 @@
         }
       });
       document.getElementById('close-profile-btn').addEventListener('click', () => {
-        rightPanel.classList.add('-translate-x-full');
-      });
-
-      // Close right panel on mobile back
-      document.getElementById('mobile-back-btn').addEventListener('click', () => {
         rightPanel.classList.add('-translate-x-full');
       });
 
