@@ -2,7 +2,10 @@
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#020d08" />
   <title>Orion - Instagram Direct Inbox</title>
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -116,6 +119,11 @@
   .ig-anim { animation: igFade .5s ease both; }
   button:hover,.btn:hover { transform: scale(1.05); transition: transform .2s; }
   input:focus { box-shadow: 0 0 0 3px rgba(0,255,157,.2); }
+  @media (hover: none) and (pointer: coarse) {
+    button:hover, .btn:hover { transform: none; filter: none; box-shadow: none; }
+    button, .btn, a.button { min-height: 44px; min-width: 44px; }
+    textarea { min-height: 48px; }
+  }
 </style>
 </head>
 <body class="bg-[#020d08] text-emerald-50 min-h-screen flex flex-col font-sans selection:bg-green-500 selection:text-black">
