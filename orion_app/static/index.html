@@ -12,10 +12,15 @@
     <link rel="icon" type="image/png" href="/static/orion-logo.png" />
     <link rel="apple-touch-icon" href="/static/orion-logo.png" />
     <link rel="stylesheet" href="/static/styles.css?v=36" />
+    <script src="https://unpkg.com/lucide@latest"></script>
   </head>
   <body>
     <div class="crt-overlay" aria-hidden="true"></div>
     <canvas class="matrix-rain" aria-hidden="true"></canvas>
+    <button class="mobile-menu-toggle" type="button" id="mobile-menu-toggle" aria-label="Open navigation menu" aria-expanded="false">
+      <i data-lucide="menu" class="w-5 h-5"></i>
+    </button>
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
     <div class="shell">
       <aside class="sidebar">
         <div class="brand-box">
@@ -720,6 +725,7 @@
 
     <script src="/static/app.js?v=37"></script>
     <script>
+      lucide.createIcons();
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js')
           .then(() => console.log('[Orion SW] registered'))
