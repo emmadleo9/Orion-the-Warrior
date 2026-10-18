@@ -11,10 +11,11 @@
     <link rel="manifest" href="/static/manifest.json" />
     <link rel="icon" type="image/png" href="/static/orion-logo.png" />
     <link rel="apple-touch-icon" href="/static/orion-logo.png" />
-    <link rel="stylesheet" href="/static/styles.css?v=34" />
+    <link rel="stylesheet" href="/static/styles.css?v=35" />
   </head>
   <body>
     <div class="crt-overlay" aria-hidden="true"></div>
+    <canvas class="matrix-rain" aria-hidden="true"></canvas>
     <div class="shell">
       <aside class="sidebar">
         <div class="brand-box">
@@ -717,7 +718,7 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=35"></script>
+    <script src="/static/app.js?v=36"></script>
     <script>
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js')
