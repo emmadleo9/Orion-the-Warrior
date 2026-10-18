@@ -1,8 +1,11 @@
 <!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#02140d" />
   <title>Orion > Telegram — Cyber Command Client</title>
   <link rel="icon" type="image/png" href="/static/orion-logo.png" />
 
@@ -64,56 +67,15 @@
       content: "";
       position: fixed;
       inset: 0;
-      background:
-        repeating-linear-gradient(
-          to bottom,
-          rgba(255, 255, 255, 0.015),
-          rgba(255, 255, 255, 0.015) 1px,
-          transparent 1px,
-          transparent 4px
-        ),
-        radial-gradient(ellipse at 50% 0%, rgba(0, 255, 157, 0.10), transparent 45%),
-        radial-gradient(circle at top, rgba(32, 99, 72, 0.55), transparent 34%),
-        linear-gradient(180deg, #010a06 0%, #02140d 100%);
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.015),
+        rgba(255, 255, 255, 0.015) 1px,
+        transparent 1px,
+        transparent 4px
+      );
       pointer-events: none;
       z-index: 50;
-    }
-
-    /* Matrix character rain overlay */
-    body::after {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      z-index: 51;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Ctext x='0' y='20' fill='%2300ff9d' font-family='monospace' font-size='14' opacity='0.12'%3E0101110111011100101011010110101%3C/text%3E%3Ctext x='0' y='44' fill='%2352f7a3' font-family='monospace' font-size='14' opacity='0.08'%3E1100110101110111001010110101101%3C/text%3E%3C/svg%3E");
-      background-repeat: repeat;
-      animation: matrixShift 22s linear infinite;
-      mix-blend-mode: screen;
-      opacity: 0.5;
-    }
-
-    @keyframes matrixShift {
-      0%   { background-position: 0 0; }
-      100% { background-position: 120px -360px; }
-    }
-
-    /* CRT scanline overlay */
-    .crt-overlay {
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      z-index: 52;
-      background:
-        repeating-linear-gradient(
-          to bottom,
-          rgba(0, 0, 0, 0.18),
-          rgba(0, 0, 0, 0.18) 1px,
-          transparent 1px,
-          transparent 3px
-        );
-      mix-blend-mode: multiply;
-      opacity: 0.6;
     }
 
     /* Custom Scrollbars */
@@ -146,17 +108,17 @@
       background: rgba(2, 15, 10, 0.85);
       backdrop-filter: blur(8px);
     }
-    @keyframes igFade { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
-  .ig-anim { animation: igFade .5s ease both; }
-  button:hover,.btn:hover { transform: scale(1.05); transition: transform .2s; }
-  input:focus { box-shadow: 0 0 0 3px rgba(0,255,157,.2); }
-</style>
+  </style>
 </head>
-<body class="min-h-screen flex flex-col font-sans selection:bg-emerald-500 selection:text-black overflow-hidden select-none">
-    <div class="crt-overlay" aria-hidden="true"></div>
+  <body class="min-h-screen flex flex-col font-sans selection:bg-emerald-500 selection:text-black overflow-hidden select-none relative">
 
-  <!-- ========================================================================= -->
-  <!-- TOP NAVIGATION HEADER -->
+    <!-- Mobile toggle for left panel -->
+    <button id="mobile-left-toggle" class="fixed top-4 left-4 z-50 p-2 rounded-lg bg-orionCardElevated border border-orionBorder text-orionMuted hover:text-orionAccent hover:border-orionAccent transition-colors md:hidden" aria-label="Open chat list" aria-expanded="false">
+      <i data-lucide="list" class="w-5 h-5"></i>
+    </button>
+
+    <!-- ========================================================================= -->
+    <!-- TOP NAVIGATION HEADER -->
   <!-- ========================================================================= -->
   <header class="h-14 shrink-0 border-b border-orionBorder bg-orionCard/90 backdrop-blur-md px-4 sm:px-6 flex items-center justify-between z-30">
     <div class="flex items-center space-x-3 sm:space-x-4">
@@ -206,7 +168,7 @@
     <!-- ----------------------------------------------------------------------- -->
     <!-- LEFT PANEL (35%): Search, Categories, Chat List -->
     <!-- ----------------------------------------------------------------------- -->
-    <aside id="left-panel" class="w-full md:w-[35%] lg:w-[32%] xl:w-[30%] shrink-0 border-r border-orionBorder bg-orionCard/80 flex flex-col z-20 transition-all duration-300">
+    <aside id="left-panel" class="w-full md:w-[35%] lg:w-[32%] xl:w-[30%] shrink-0 border-r border-orionBorder bg-orionCard/80 flex flex-col z-20 transition-all duration-300 absolute inset-y-0 left-0 transform -translate-x-full md:relative md:translate-x-0">
 
       <!-- Search & Self Profile Bar -->
       <div class="p-3 border-b border-orionBorder flex items-center gap-2">
@@ -258,7 +220,7 @@
     <!-- ----------------------------------------------------------------------- -->
     <!-- MIDDLE PANEL (45%): Active Chat Header, Messages, Input Area -->
     <!-- ----------------------------------------------------------------------- -->
-    <main id="middle-panel" class="hidden md:flex flex-1 flex-col bg-orionBg/95 relative overflow-hidden">
+    <main id="middle-panel" class="flex-1 flex-col bg-orionBg/95 relative overflow-hidden w-full md:max-w-full">
 
       <!-- Active Chat Header -->
       <header id="chat-header" class="h-16 shrink-0 border-b border-orionBorder bg-orionCard/80 backdrop-blur-md px-4 flex items-center justify-between z-10">
@@ -369,7 +331,7 @@
     <!-- ----------------------------------------------------------------------- -->
     <!-- RIGHT PANEL (20% Toggle): Chat Profile, Members, Media -->
     <!-- ----------------------------------------------------------------------- -->
-    <aside id="right-panel" class="hidden lg:flex w-[25%] xl:w-[22%] shrink-0 border-l border-orionBorder bg-orionCard/90 flex-col z-20 overflow-y-auto">
+    <aside id="right-panel" class="hidden lg:flex w-[25%] xl:w-[22%] shrink-0 border-l border-orionBorder bg-orionCard/90 flex-col z-20 overflow-y-auto absolute inset-y-0 right-0 transform -translate-x-full lg:relative lg:translate-x-0">
       <!-- Right Header -->
       <div class="h-16 px-4 border-b border-orionBorder flex items-center justify-between shrink-0">
         <h3 class="text-xs font-bold uppercase tracking-wider font-mono text-orionAccent">Chat Details</h3>
@@ -991,14 +953,48 @@
         document.getElementById('middle-panel').classList.add('hidden');
       });
 
-      // Toggle Right Profile Panel
+      // Mobile left panel toggle (chat list)
+      const leftPanel = document.getElementById('left-panel');
+      const mobileLeftToggle = document.getElementById('mobile-left-toggle');
+      mobileLeftToggle.addEventListener('click', () => {
+        const isOpen = !leftPanel.classList.contains('-translate-x-full');
+        if (isOpen) {
+          leftPanel.classList.add('-translate-x-full');
+          mobileLeftToggle.setAttribute('aria-expanded', 'false');
+        } else {
+          leftPanel.classList.remove('-translate-x-full');
+          mobileLeftToggle.setAttribute('aria-expanded', 'true');
+        }
+      });
+
+      // Toggle Right Profile Panel (mobile: slide in from right)
       const rightPanel = document.getElementById('right-panel');
       document.getElementById('toggle-profile-btn').addEventListener('click', () => {
-        rightPanel.classList.toggle('hidden');
+        const isOpen = !rightPanel.classList.contains('-translate-x-full');
+        if (isOpen) {
+          rightPanel.classList.add('-translate-x-full');
+        } else {
+          rightPanel.classList.remove('-translate-x-full');
+        }
       });
       document.getElementById('close-profile-btn').addEventListener('click', () => {
-        rightPanel.classList.add('hidden');
+        rightPanel.classList.add('-translate-x-full');
       });
+
+      // Close right panel on mobile back
+      document.getElementById('mobile-back-btn').addEventListener('click', () => {
+        rightPanel.classList.add('-translate-x-full');
+      });
+
+      // Close left panel when selecting a chat on mobile
+      const originalSelectChat = selectChat;
+      window.selectChat = (chatId) => {
+        originalSelectChat(chatId);
+        if (window.innerWidth < 1024) {
+          leftPanel.classList.add('-translate-x-full');
+          mobileLeftToggle.setAttribute('aria-expanded', 'false');
+        }
+      };
 
       // 3-Dots Menu Dropdown
       const chatMenuBtn = document.getElementById('chat-menu-btn');

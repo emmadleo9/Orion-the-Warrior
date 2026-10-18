@@ -1989,3 +1989,39 @@ document.querySelectorAll('.nav[data-view]').forEach((button) => {
 
   loop();
 })();
+
+/* ==========================================================================
+   MOBILE MENU TOGGLE (sidebar open/close on small screens)
+   ========================================================================== */
+(function() {
+  const toggle = document.getElementById('mobile-menu-toggle');
+  const overlay = document.getElementById('sidebar-overlay');
+  const sidebar = document.querySelector('.sidebar');
+  if (!toggle || !overlay || !sidebar) return;
+
+  function openMenu() {
+    sidebar.classList.add('open');
+    overlay.classList.add('open');
+    toggle.setAttribute('aria-expanded', 'true');
+  }
+  function closeMenu() {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('open');
+    toggle.setAttribute('aria-expanded', 'false');
+  }
+  toggle.addEventListener('click', () => {
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    expanded ? closeMenu() : openMenu();
+  });
+  overlay.addEventListener('click', closeMenu);
+
+  // Close menu when a nav link is clicked (mobile)
+  document.querySelectorAll('.nav').forEach((nav) => {
+    nav.addEventListener('click', closeMenu);
+  });
+
+  // Close on resize back to desktop
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 860) closeMenu();
+  });
+})();
