@@ -1250,13 +1250,27 @@ li strong {
   .shell { grid-template-columns: 1fr; }
   .grid { grid-template-columns: 1fr; }
   .hero { flex-direction: column; align-items: flex-start; }
+  .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    min-height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: 14px 16px;
+    box-shadow: 0 2px 12px rgba(0, 255, 157, 0.06);
+  }
+  .sidebar-diagnostics { margin-top: 14px; padding-top: 12px; }
+  .content { padding: 16px; }
+  .telemetry-strip { grid-template-columns: 1fr; }
+  .matrix-rain { font-size: 12px; opacity: 0.35; }
 }
 
 @media (max-width: 540px) {
-  .content { padding: 16px; }
+  .content { padding: 12px; }
   .hero {
-    min-height: 190px;
-    padding: 22px;
+    min-height: 170px;
+    padding: 18px;
     background-position: center, center, 58% center, center;
   }
   .chat-heading { align-items: flex-start; flex-direction: column; }
@@ -1270,6 +1284,25 @@ li strong {
   .social-card .open-social { width: 100%; }
   .task-metrics { grid-template-columns: 1fr; }
   .draft-actions { align-items: stretch; flex-direction: column; }
+  .nav { font-size: 0.7rem; padding: 10px 12px; }
+  .brand-title { font-size: 1.5rem; }
+  .matrix-rain { font-size: 11px; opacity: 0.3; }
+}
+
+@media (max-width: 400px) {
+  .sidebar { padding: 12px 14px; }
+  .content { padding: 10px; }
+  .telemetry-item { padding: 10px 12px; }
+  .message { max-width: 100%; }
+  .matrix-rain { font-size: 10px; opacity: 0.25; }
+}
+
+/* Device-aware adjustments: reduce motion & heavy effects on low-end mobile */
+@media (hover: none) and (pointer: coarse) {
+  .panel:hover, .card:hover { transform: none; box-shadow: none; }
+  button:hover, .btn:hover { transform: none; filter: none; box-shadow: none; }
+  .matrix-rain { opacity: 0.25; }
+  .crt-overlay { opacity: 0.35; }
 }
 
 
