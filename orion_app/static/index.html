@@ -11,7 +11,7 @@
     <link rel="manifest" href="/static/manifest.json" />
     <link rel="icon" type="image/png" href="/static/orion-logo.png" />
     <link rel="apple-touch-icon" href="/static/orion-logo.png" />
-    <link rel="stylesheet" href="/static/styles.css?v=33" />
+    <link rel="stylesheet" href="/static/styles.css?v=34" />
   </head>
   <body>
     <div class="crt-overlay" aria-hidden="true"></div>
@@ -31,6 +31,7 @@
           <button class="nav" type="button" data-view="ai-studio-view">AI Studio</button>
           <button class="nav" type="button" data-view="social-view">Social Hub</button>
           <button class="nav" type="button" data-view="tasks-view">Tasks</button>
+          <button class="nav" type="button" data-view="self-writer-view">Self Writer</button>
         </nav>
 
         <!-- Diagnostics: host telemetry, then the live execution console -->
@@ -617,6 +618,94 @@
           </section>
         </section>
       </main>
+
+      <!-- ==================== SELF WRITER VIEW ==================== -->
+      <section id="self-writer-view" class="self-writer-view app-view" hidden aria-labelledby="self-writer-title">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">SELF-REWRITING ENGINE · ADMIN GATED</p>
+            <h2 id="self-writer-title">Orion Self-Writer</h2>
+          </div>
+          <span id="self-writer-model-status" class="model-status" role="status">Checking model…</span>
+        </header>
+        <p class="social-intro">
+          Tell Orion what to build or change. Orion reads its own codebase,
+          writes the code, tests it in a sandbox, and shows you the diff before
+          anything is applied. 100% local — no paid API key required.
+        </p>
+
+        <div class="grid grid-2col section-gap">
+          <!-- Command panel -->
+          <article class="panel">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">ADMIN COMMAND</p>
+                <h3>Tell Orion what to build</h3>
+              </div>
+            </div>
+            <form id="self-writer-form" class="simple-form">
+              <label for="self-writer-command">Command</label>
+              <textarea id="self-writer-command" rows="4" maxlength="4000"
+                placeholder="e.g. add a dark mode toggle, create a login page, add a music player component"
+                required></label>
+              <label for="self-writer-target">Target file (optional)</label>
+              <input id="self-writer-target" type="text" maxlength="200"
+                placeholder="orion_app/static/self_writer.html" />
+              <div class="chat-hint">Leave blank to let Orion pick the best target file.</div>
+              <button id="self-writer-go-btn" class="primary" type="submit">Make Orion Write It</button>
+              <span id="self-writer-status" class="chat-hint" role="status"></span>
+            </form>
+          </article>
+
+          <!-- Live log panel -->
+          <article class="panel terminal-card">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">LIVE LOG</p>
+                <h3>Orion is working…</h3>
+              </div>
+            </div>
+            <div class="terminal-body" id="self-writer-log" role="log" aria-live="polite">
+              <div class="term-line system-msg">
+                <span class="term-time">[READY]</span>
+                <span class="term-text">Self-writer standing by.</span>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <!-- Diff review panel -->
+        <section class="panel section-gap" id="self-writer-diff-section" hidden>
+          <div class="chat-heading">
+            <div>
+              <p class="eyebrow">REVIEW DIFF</p>
+              <h3>Proposed changes</h3>
+            </div>
+            <span id="self-writer-diff-summary" class="chat-hint" role="status"></span>
+          </div>
+          <pre id="self-writer-diff" class="diff-preview"></pre>
+          <div class="archer-controls" style="margin-top:1rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+            <button id="self-writer-approve-btn" class="primary" type="button">Approve &amp; Apply</button>
+            <button id="self-writer-reject-btn" class="secondary-button" type="button">Reject</button>
+            <button id="self-writer-copy-btn" class="secondary-button" type="button">Copy code</button>
+          </div>
+          <span id="self-writer-apply-status" class="chat-hint" role="status"></span>
+        </section>
+
+        <!-- Backups -->
+        <section class="panel section-gap" id="self-writer-backups-section">
+          <div class="chat-heading">
+            <div>
+              <p class="eyebrow">BACKUPS</p>
+              <h3>Rollback safety</h3>
+            </div>
+            <button id="self-writer-refresh-backups" class="secondary-button" type="button">Refresh</button>
+          </div>
+          <div id="self-writer-backups-list" class="gallery-grid">
+            <p class="chat-hint">No backups yet.</p>
+          </div>
+        </section>
+      </section>
     </div>
 
     <!-- Image Lightbox Modal -->

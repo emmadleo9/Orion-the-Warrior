@@ -112,7 +112,11 @@
       position: relative;
       z-index: 2;
     }
-  </style>
+    @keyframes igFade { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+  .ig-anim { animation: igFade .5s ease both; }
+  button:hover,.btn:hover { transform: scale(1.05); transition: transform .2s; }
+  input:focus { box-shadow: 0 0 0 3px rgba(0,255,157,.2); }
+</style>
 </head>
 <body class="bg-[#020d08] text-emerald-50 min-h-screen flex flex-col font-sans selection:bg-green-500 selection:text-black">
     <div class="crt-overlay" aria-hidden="true"></div>
@@ -852,4 +856,5 @@
   </script>
 </body>
 </html>
+
 

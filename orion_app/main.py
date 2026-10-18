@@ -873,6 +873,14 @@ from .telegram.routes import router as telegram_router  # noqa: E402
 app.include_router(telegram_router)
 
 
+# ---------------------------------------------------------------------------
+# Self-Writer module (admin-gated code rewriting)
+# ---------------------------------------------------------------------------
+from orion.core.self_writer.routes import router as self_writer_router  # noqa: E402
+
+app.include_router(self_writer_router)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("orion_app.main:app", host="0.0.0.0", port=8000, reload=False)
