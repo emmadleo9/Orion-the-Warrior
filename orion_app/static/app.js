@@ -155,32 +155,39 @@ async function loadMetrics() {
     const ramFix = Math.min(100, Math.max(0, isNaN(ram) ? 0 : ram));
     const diskFix = Math.min(100, Math.max(0, isNaN(disk) ? 0 : disk));
 
-    // Update all possible dashboard selectors - robust
+    // Update all possible dashboard selectors - robust (works on mobile too)
     function setTextByLabel(labelUpper, value) {
-      const all = document.querySelectorAll('div, span, p');
+      const formatted = Math.round(value) + '%';
+      const all = document.querySelectorAll('div, span, p, strong');
       for (const el of all) {
-        if (el.textContent.toUpperCase().trim() === labelUpper) {
+        const text = el.textContent.toUpperCase().trim();
+        if (text === labelUpper || text.includes(labelUpper)) {
           // find sibling with % or --%
           let sib = el.nextElementSibling;
           let attempts = 0;
-          while (sib && attempts < 5) {
+          while (sib && attempts < 8) {
             if (sib.textContent.includes('%') || sib.textContent.includes('--')) {
-              sib.textContent = Math.round(value) + '%';
+              sib.textContent = formatted;
               return true;
             }
             sib = sib.nextElementSibling;
             attempts++;
           }
           // check parent card
-          const card = el.closest('div');
+          const card = el.closest('div, section');
           if (card) {
-            const pct = Array.from(card.querySelectorAll('div')).find(
+            const pct = Array.from(card.querySelectorAll('div, span, strong, p')).find(
               (d) => d.textContent.trim() === '--%' || (d.textContent.includes('%') && d !== el)
             );
             if (pct) {
-              pct.textContent = Math.round(value) + '%';
+              pct.textContent = formatted;
               return true;
             }
+          }
+          // fallback: set the element itself if it looks like a value
+          if (el.textContent.includes('%') || el.textContent.includes('--')) {
+            el.textContent = formatted;
+            return true;
           }
         }
       }
