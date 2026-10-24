@@ -32,6 +32,10 @@
             <i data-lucide="device" class="w-4 h-4"></i>
             <span>Devices</span>
           </button>
+          <button class="nav" type="button" data-view="device-connection-view" aria-label="Device Connection">
+            <i data-lucide="smartphone" class="w-4 h-4"></i>
+            <span>Device Connection</span>
+          </button>
           <button class="nav" type="button" data-view="ai-studio-view" aria-label="AI Studio">
             <i data-lucide="image" class="w-4 h-4"></i>
             <span>AI Studio</span>
@@ -307,6 +311,185 @@
             <div id="interactive-task-table" class="task-pipeline">
               <p class="hint">Loading tasks...</p>
             </div>
+          </section>
+        </section>
+
+        <!-- Device Connection -->
+        <section id="device-connection-view" class="app-view" hidden aria-labelledby="device-connection-title">
+          <header class="topbar">
+            <div>
+              <p class="eyebrow">Remote Device Access</p>
+              <h2 id="device-connection-title">Device Connection</h2>
+            </div>
+            <span class="status-pill">Wired · Wireless</span>
+          </header>
+          <p class="intro-text">Connect to your phone or tablet over USB (wired) or Wi-Fi/TCP (wireless) and read everything: system info, battery, storage, files, screen, and run commands.</p>
+
+          <div class="grid grid-2col section-gap">
+            <article class="panel">
+              <div class="chat-heading">
+                <div>
+                  <p class="eyebrow">New Connection</p>
+                  <h3>Connect a Device</h3>
+                </div>
+              </div>
+              <form id="device-connection-form" class="simple-form">
+                <label for="dc-conn-name">Device Name</label>
+                <input id="dc-conn-name" type="text" placeholder="e.g. My Phone" required maxlength="64" />
+                <label for="dc-conn-kind">Device Type</label>
+                <select id="dc-conn-kind">
+                  <option value="phone">Phone</option>
+                  <option value="tablet">Tablet</option>
+                  <option value="desktop">Desktop</option>
+                  <option value="iot">IoT</option>
+                  <option value="server">Server</option>
+                </select>
+                <label for="dc-conn-method">Connection Method</label>
+                <select id="dc-conn-method">
+                  <option value="wifi">Wi-Fi / Wi-Fi Direct (TCP/IP)</option>
+                  <option value="usb">USB (USB-A / USB-C / Micro-USB)</option>
+                  <option value="bluetooth">Bluetooth / Bluetooth LE</option>
+                  <option value="ble">Bluetooth Low Energy (BLE)</option>
+                  <option value="serial">Serial / UART / RS-232 (console)</option>
+                  <option value="ethernet">Ethernet / LAN (RJ45 cable)</option>
+                  <option value="nfc">NFC (tap-to-connect)</option>
+                  <option value="cellular">5G / 4G LTE / 3G Cellular</option>
+                  <option value="zigbee">Zigbee (IoT)</option>
+                  <option value="zwave">Z-Wave (IoT)</option>
+                  <option value="lora">LoRaWAN (long-range IoT)</option>
+                  <option value="satellite">Satellite (satphone / GPS text)</option>
+                  <option value="thunderbolt">Thunderbolt</option>
+                  <option value="firewire">FireWire / IEEE 1394</option>
+                  <option value="hdmi">HDMI / DisplayPort (video/control)</option>
+                  <option value="sd_card">SD Card / Storage cable</option>
+                  <option value="pin">PIN / Docking connector</option>
+                  <option value="ir">Infrared (IrDA)</option>
+                  <option value="airdrop">AirDrop / Nearby Share</option>
+                  <option value="ant">ANT+ (fitness sensors)</option>
+                </select>
+                <label for="dc-conn-address">Address / Identifier</label>
+                <input id="dc-conn-address" type="text" placeholder="host:port or serial or MAC" required maxlength="256" />
+                <div class="dc-hint" id="dc-method-hint">Wi-Fi: use <code>ip:port</code> (e.g. 192.168.1.42:5555).</div>
+                <button class="btn-primary" type="submit">Register Connection</button>
+                <span id="dc-reg-status" class="hint"></span>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="chat-heading">
+                <div>
+                  <p class="eyebrow">Connected Devices</p>
+                  <h3>Active Connections</h3>
+                </div>
+                <button id="dc-refresh-btn" class="btn-ghost" type="button">Refresh</button>
+              </div>
+              <div id="dc-connections-list" class="devices-grid">
+                <p class="hint">No connections yet. Add one above.</p>
+              </div>
+            </article>
+          </div>
+
+          <section class="panel section-gap" id="dc-device-detail" hidden>
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">Device Data</p>
+                <h3 id="dc-detail-title">Device</h3>
+              </div>
+              <div class="dc-actions">
+                <button id="dc-refresh-info-btn" class="btn-ghost" type="button">Refresh Info</button>
+                <button id="dc-disconnect-btn" class="btn-danger" type="button">Disconnect</button>
+              </div>
+            </div>
+            <div class="dc-info-grid">
+              <div class="dc-info-card">
+                <p class="dc-info-label">Status</p>
+                <strong class="dc-info-value" id="dc-info-status">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">Type</p>
+                <strong class="dc-info-value" id="dc-info-type">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">Address</p>
+                <strong class="dc-info-value" id="dc-info-address">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">Model</p>
+                <strong class="dc-info-value" id="dc-info-model">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">OS</p>
+                <strong class="dc-info-value" id="dc-info-os">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">Battery</p>
+                <strong class="dc-info-value" id="dc-info-battery">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">Storage</p>
+                <strong class="dc-info-value" id="dc-info-storage">--</strong>
+              </div>
+              <div class="dc-info-card">
+                <p class="dc-info-label">Network</p>
+                <strong class="dc-info-value" id="dc-info-network">--</strong>
+              </div>
+            </div>
+
+            <div class="grid grid-2col section-gap">
+              <article class="panel">
+                <div class="chat-heading">
+                  <div>
+                    <p class="eyebrow">Screen</p>
+                    <h3>Live Snapshot</h3>
+                  </div>
+                  <button id="dc-screen-btn" class="btn-ghost" type="button">Capture Screen</button>
+                </div>
+                <div class="dc-screen-wrap">
+                  <img id="dc-screen-img" class="dc-screen-img" alt="Device screen snapshot" />
+                  <p id="dc-screen-caption" class="dc-screen-caption chat-hint">No screen captured yet.</p>
+                </div>
+              </article>
+
+              <article class="panel">
+                <div class="chat-heading">
+                  <div>
+                    <p class="eyebrow">Control</p>
+                    <h3>Send Command</h3>
+                  </div>
+                </div>
+                <form id="dc-command-form" class="simple-form">
+                  <label for="dc-command">Shell Command</label>
+                  <input id="dc-command" type="text" placeholder="e.g. pm list packages" maxlength="1000" />
+                  <button class="btn-primary" type="submit">Send Command</button>
+                  <span id="dc-command-status" class="hint"></span>
+                </form>
+                <div id="dc-command-output" class="dc-command-output"></div>
+              </article>
+            </div>
+
+            <article class="panel section-gap">
+              <div class="chat-heading">
+                <div>
+                  <p class="eyebrow">Files</p>
+                  <h3>Device Files</h3>
+                </div>
+              </div>
+              <div id="dc-files-list" class="dc-files-list">
+                <p class="hint">Read device info to load files.</p>
+              </div>
+            </article>
+
+            <article class="panel section-gap">
+              <div class="chat-heading">
+                <div>
+                  <p class="eyebrow">Installed Apps</p>
+                  <h3>Apps</h3>
+                </div>
+              </div>
+              <div id="dc-apps-list" class="dc-apps-list">
+                <p class="hint">Read device info to load apps.</p>
+              </div>
+            </article>
           </section>
         </section>
 
