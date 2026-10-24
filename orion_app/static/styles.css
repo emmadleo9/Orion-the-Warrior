@@ -2567,3 +2567,130 @@ a:hover { color: var(--accent-bright); text-shadow: 0 0 10px var(--matrix-green-
 
 /* Prevent horizontal overflow on any device */
 html, body { overflow-x: hidden; max-width: 100vw; }
+
+/* ==========================================================================
+   DEVICE CONNECTION UI — Remote device access styles
+   ========================================================================== */
+
+.dc-hint {
+  color: var(--muted);
+  font-size: 0.68rem;
+  margin: 6px 0 0;
+  font-family: "Consolas", monospace;
+}
+
+.dc-hint code {
+  color: var(--accent-bright);
+  background: rgba(0, 255, 157, 0.08);
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 255, 157, 0.15);
+}
+
+.dc-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dc-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.dc-info-card {
+  background: rgba(3, 15, 9, 0.6);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dc-info-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.dc-info-value {
+  font-size: 0.85rem;
+  color: var(--text);
+  font-family: "Consolas", monospace;
+  word-break: break-all;
+}
+
+.dc-screen-wrap {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #020b06;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.dc-screen-img {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 20px rgba(0, 255, 157, 0.15);
+}
+
+.dc-screen-img[hidden] { display: none; }
+
+.dc-screen-caption {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: "Consolas", monospace;
+}
+
+.dc-command-output {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #020b06;
+  border: 1px solid var(--line);
+  font-family: "Consolas", monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+  min-height: 40px;
+  word-break: break-all;
+}
+
+.dc-files-list,
+.dc-apps-list {
+  margin-top: 12px;
+}
+
+.dc-files-list ul,
+.dc-apps-list ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.dc-files-list li,
+.dc-apps-list li {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: "Consolas", monospace;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(82, 247, 163, 0.08);
+}
+
+.dc-files-list li:last-child,
+.dc-apps-list li:last-child { border-bottom: none; }
+
+@media (max-width: 640px) {
+  .dc-info-grid { grid-template-columns: 1fr; }
+  .dc-actions { flex-direction: column; align-items: stretch; gap: 8px; }
+  .dc-actions button { width: 100%; }
+}

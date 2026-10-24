@@ -26,12 +26,14 @@ from .memory import MAX_MESSAGES_PER_CONVERSATION, ConversationMemory
 from .task_monitor import TaskMonitor
 from .telemetry import get_system_telemetry
 from .telegram import telegram_client, telegram_proxy_manager
+from .device_connection import DeviceConnectionManager
 
 BASE_DIR = Path(__file__).resolve().parent
 assistant = NicoAssistant("ORI-9.0-GEN-1")
 leo = LeoAssistant()
 zara = leo  # Backwards compatibility alias
 device_manager = DeviceManager()
+device_connection_manager = DeviceConnectionManager()
 task_monitor = TaskMonitor()
 memory = ConversationMemory(
     os.getenv("ORION_MEMORY_PATH", str(BASE_DIR / "data" / "conversations.sqlite3"))
@@ -816,6 +818,120 @@ def delete_task(task_id: str) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="task not found")
     return {"deleted": True, "task_id": task_id}
+
+
+# ── Device Connections (wired / wireless remote device access) ────────────────
+
+class DeviceConnectionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    kind: str = Field(default="phone", max_length=32)
+    connection_method: str = Field(default="wifi", max_length=32)
+    address: str = Field(min_length=1, max_length=256)
+
+
+@app.get("/api/device-connections/methods")
+def list_connection_methods() -> dict:
+    return device_connection_manager.list_methods()
+
+
+@app.get("/api/device-connections")
+def list_device_connections() -> list[dict]:
+    return device_connection_manager.list_connections()
+
+
+@app.post("/api/device-connections")
+def create_device_connection(payload: DeviceConnectionRequest) -> dict:
+    return run_tracked(
+        "Register device connection",
+        "device",
+        lambda: device_connection_manager.register_connection(
+            payload.name, payload.kind, payload.connection_method, payload.address
+        ),
+    )
+
+
+@app.get("/api/device-connections/{connection_id}")
+def get_device_connection(connection_id: str) -> dict:
+    connection = device_connection_manager.get_connection(connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="device connection not found")
+    return connection
+
+
+@app.delete("/api/device-connections/{connection_id}")
+def delete_device_connection(connection_id: str) -> dict:
+    deleted = device_connection_manager.delete_connection(connection_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="device connection not found")
+    return {"deleted": True, "connection_id": connection_id}
+
+
+@app.post("/api/device-connections/{connection_id}/connect")
+def connect_device_connection(connection_id: str) -> dict:
+    try:
+        return run_tracked(
+            "Connect to device",
+            "device",
+            lambda: device_connection_manager.connect(connection_id),
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/device-connections/{connection_id}/disconnect")
+def disconnect_device_connection(connection_id: str) -> dict:
+    try:
+        return run_tracked(
+            "Disconnect from device",
+            "device",
+            lambda: device_connection_manager.disconnect(connection_id),
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/device-connections/{connection_id}/info")
+def read_device_connection_info(connection_id: str) -> dict:
+    try:
+        return run_tracked(
+            "Read device info",
+            "device",
+            lambda: device_connection_manager.read_device_info(connection_id),
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/device-connections/{connection_id}/screen")
+def device_connection_screen(connection_id: str) -> dict:
+    try:
+        return run_tracked(
+            "Capture device screen",
+            "device",
+            lambda: device_connection_manager.take_screen_snapshot(connection_id),
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+class DeviceCommandRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=1000)
+
+
+@app.post("/api/device-connections/{connection_id}/command")
+def send_device_command(connection_id: str, payload: DeviceCommandRequest) -> dict:
+    try:
+        return run_tracked(
+            "Send device command",
+            "device",
+            lambda: device_connection_manager.send_command(connection_id, payload.command),
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.get("/api/assistant/memory/{conversation_id}/export")

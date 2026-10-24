@@ -895,6 +895,310 @@ if (taskQueueFilters) {
 }
 
 /* ==========================================================================
+   DEVICE CONNECTION — wired / wireless remote device access
+   ========================================================================== */
+// Elements
+const deviceConnectionForm = document.getElementById('device-connection-form');
+const dcConnName = document.getElementById('dc-conn-name');
+const dcConnKind = document.getElementById('dc-conn-kind');
+const dcConnType = document.getElementById('dc-conn-type');
+const dcConnAddress = document.getElementById('dc-conn-address');
+const dcRegStatus = document.getElementById('dc-reg-status');
+const dcRefreshBtn = document.getElementById('dc-refresh-btn');
+const dcConnectionsList = document.getElementById('dc-connections-list');
+const dcDeviceDetail = document.getElementById('dc-device-detail');
+const dcDetailTitle = document.getElementById('dc-detail-title');
+const dcRefreshInfoBtn = document.getElementById('dc-refresh-info-btn');
+const dcDisconnectBtn = document.getElementById('dc-disconnect-btn');
+const dcInfoStatus = document.getElementById('dc-info-status');
+const dcInfoType = document.getElementById('dc-info-type');
+const dcInfoAddress = document.getElementById('dc-info-address');
+const dcInfoModel = document.getElementById('dc-info-model');
+const dcInfoOs = document.getElementById('dc-info-os');
+const dcInfoBattery = document.getElementById('dc-info-battery');
+const dcInfoStorage = document.getElementById('dc-info-storage');
+const dcInfoNetwork = document.getElementById('dc-info-network');
+const dcScreenBtn = document.getElementById('dc-screen-btn');
+const dcScreenImg = document.getElementById('dc-screen-img');
+const dcScreenCaption = document.getElementById('dc-screen-caption');
+const dcCommandForm = document.getElementById('dc-command-form');
+const dcCommand = document.getElementById('dc-command');
+const dcCommandStatus = document.getElementById('dc-command-status');
+const dcCommandOutput = document.getElementById('dc-command-output');
+const dcFilesList = document.getElementById('dc-files-list');
+const dcAppsList = document.getElementById('dc-apps-list');
+
+let activeConnectionId = null;
+let currentConnections = [];
+
+function renderConnections(connections) {
+  currentConnections = connections;
+  if (dcConnectionsList) {
+    dcConnectionsList.replaceChildren();
+    if (!connections.length) {
+      dcConnectionsList.innerHTML = '<p class="chat-hint">No connections registered yet.</p>';
+      return;
+    }
+    for (const c of connections) {
+      const card = document.createElement('div');
+      card.className = 'device-card';
+      const isActive = activeConnectionId === c.id;
+      card.innerHTML = `
+        <div class="device-card-header">
+          <strong>${escapeHtml(c.name)}</strong>
+          <span class="device-kind-badge">${escapeHtml(c.kind)}</span>
+        </div>
+        <div>
+          <span class="device-status-badge ${c.status}">${c.status.toUpperCase()}</span>
+          <small class="chat-hint" style="display:block; margin-top:4px;">ID: ${c.id} · ${c.connection_type}</small>
+          <small class="chat-hint">${escapeHtml(c.address)}</small>
+        </div>
+        <div class="device-card-actions">
+          ${c.status === 'connected'
+            ? `<button class="secondary-button dc-open-btn" type="button" data-id="${c.id}">Open</button>`
+            : `<button class="secondary-button dc-connect-btn" type="button" data-id="${c.id}">Connect</button>`}
+          <button class="secondary-button btn-danger dc-del-btn" type="button" data-id="${c.id}">Delete</button>
+        </div>
+      `;
+      const connectBtn = card.querySelector('.dc-connect-btn');
+      const openBtn = card.querySelector('.dc-open-btn');
+      const delBtn = card.querySelector('.dc-del-btn');
+      if (connectBtn) connectBtn.addEventListener('click', () => connectConnection(c.id));
+      if (openBtn) openBtn.addEventListener('click', () => openConnectionDetail(c.id));
+      if (delBtn) delBtn.addEventListener('click', () => deleteConnection(c.id));
+      dcConnectionsList.append(card);
+    }
+  }
+}
+
+async function loadConnections() {
+  try {
+    const connections = await fetchJson('/api/device-connections');
+    renderConnections(connections);
+  } catch (error) {
+    if (dcConnectionsList) dcConnectionsList.innerHTML = `<p class="chat-hint">Could not load connections: ${error.message}</p>`;
+  }
+}
+
+async function registerConnection(name, kind, connectionType, address) {
+  return await fetchJson('/api/device-connections', {
+    method: 'POST',
+    body: JSON.stringify({ name, kind, connection_type: connectionType, address }),
+  });
+}
+
+async function connectConnection(connectionId) {
+  try {
+    await fetchJson(`/api/device-connections/${connectionId}/connect`, { method: 'POST' });
+    await loadConnections();
+    openConnectionDetail(connectionId);
+  } catch (error) {
+    alert(`Could not connect: ${error.message}`);
+  }
+}
+
+async function disconnectConnection(connectionId) {
+  try {
+    await fetchJson(`/api/device-connections/${connectionId}/disconnect`, { method: 'POST' });
+    await loadConnections();
+    if (activeConnectionId === connectionId) {
+      closeConnectionDetail();
+    }
+  } catch (error) {
+    alert(`Could not disconnect: ${error.message}`);
+  }
+}
+
+async function deleteConnection(connectionId) {
+  if (!confirm('Remove this device connection?')) return;
+  try {
+    await fetchJson(`/api/device-connections/${connectionId}`, { method: 'DELETE' });
+    await loadConnections();
+    if (activeConnectionId === connectionId) closeConnectionDetail();
+  } catch (error) {
+    alert(`Could not delete connection: ${error.message}`);
+  }
+}
+
+function openConnectionDetail(connectionId) {
+  const connection = currentConnections.find(c => c.id === connectionId);
+  if (!connection) return;
+  activeConnectionId = connectionId;
+  if (dcDeviceDetail) dcDeviceDetail.hidden = false;
+  if (dcDetailTitle) dcDetailTitle.textContent = connection.name;
+  document.querySelector('.nav[data-view="device-connection-view"]')?.click();
+  loadDeviceInfo(connectionId);
+}
+
+function closeConnectionDetail() {
+  activeConnectionId = null;
+  if (dcDeviceDetail) dcDeviceDetail.hidden = true;
+}
+
+async function loadDeviceInfo(connectionId) {
+  try {
+    const info = await fetchJson(`/api/device-connections/${connectionId}/info`);
+    renderDeviceInfo(info);
+  } catch (error) {
+    alert(`Could not read device info: ${error.message}`);
+  }
+}
+
+function renderDeviceInfo(info) {
+  if (!info) return;
+  if (dcInfoStatus) dcInfoStatus.textContent = info.status || 'unknown';
+  if (dcInfoType) dcInfoType.textContent = `${info.connection_type || 'unknown'} · ${info.kind || 'unknown'}`;
+  if (dcInfoAddress) dcInfoAddress.textContent = info.address || '--';
+  if (dcInfoModel) dcInfoModel.textContent = info.model || '--';
+  if (dcInfoOs) dcInfoOs.textContent = `${info.os || '--'} (API ${info.api_level || '--'})`;
+  if (dcInfoBattery) {
+    const b = info.battery || {};
+    dcInfoBattery.textContent = `${b.level ?? '--'}% ${b.charging ? '(charging)' : ''} · ${b.health || '--'}`;
+  }
+  if (dcInfoStorage) {
+    const s = info.storage || {};
+    dcInfoStorage.textContent = `${s.used_gb ?? '--'} GB / ${s.total_gb ?? '--'} GB (${s.free_gb ?? '--'} GB free)`;
+  }
+  if (dcInfoNetwork) {
+    const n = info.network || {};
+    dcInfoNetwork.textContent = `${n.type || '--'} · ${n.ip || '--'}${n.ssid ? ` · ${n.ssid}` : ''}`;
+  }
+
+  // Screen snapshot
+  if (dcScreenImg) {
+    dcScreenImg.hidden = true;
+    dcScreenImg.removeAttribute('src');
+  }
+  if (dcScreenCaption) dcScreenCaption.textContent = 'Click "Capture Screen" to take a snapshot.';
+
+  // Files
+  if (dcFilesList) {
+    dcFilesList.replaceChildren();
+    const files = info.files || [];
+    if (!files.length) {
+      dcFilesList.innerHTML = '<p class="chat-hint">No files found.</p>';
+    } else {
+      const ul = document.createElement('ul');
+      for (const f of files) {
+        const li = document.createElement('li');
+        li.textContent = `${f.name} · ${Math.round((f.size_bytes || 0) / 1024)} KB`;
+        ul.appendChild(li);
+      }
+      dcFilesList.appendChild(ul);
+    }
+  }
+
+  // Apps
+  if (dcAppsList) {
+    dcAppsList.replaceChildren();
+    const apps = info.apps || [];
+    if (!apps.length) {
+      dcAppsList.innerHTML = '<p class="chat-hint">No apps found.</p>';
+    } else {
+      const ul = document.createElement('ul');
+      for (const app of apps) {
+        const li = document.createElement('li');
+        li.textContent = app;
+        ul.appendChild(li);
+      }
+      dcAppsList.appendChild(ul);
+    }
+  }
+}
+
+async function captureScreen(connectionId) {
+  try {
+    const snap = await fetchJson(`/api/device-connections/${connectionId}/screen`);
+    if (dcScreenImg) {
+      dcScreenImg.src = snap.data_uri;
+      dcScreenImg.hidden = false;
+    }
+    if (dcScreenCaption) {
+      dcScreenCaption.textContent = `Captured ${snap.captured_at} · ${snap.width}x${snap.height}`;
+    }
+  } catch (error) {
+    alert(`Could not capture screen: ${error.message}`);
+  }
+}
+
+async function sendDeviceCommand(connectionId, command) {
+  try {
+    const result = await fetchJson(`/api/device-connections/${connectionId}/command`, {
+      method: 'POST',
+      body: JSON.stringify({ command }),
+    });
+    if (dcCommandOutput) {
+      dcCommandOutput.textContent = result.output || '(no output)';
+      dcCommandOutput.style.color = 'var(--muted)';
+    }
+    if (dcCommandStatus) dcCommandStatus.textContent = `Command ${result.status || 'dispatched'}.`;
+  } catch (error) {
+    if (dcCommandOutput) {
+      dcCommandOutput.textContent = `Error: ${error.message}`;
+      dcCommandOutput.style.color = 'var(--danger)';
+    }
+    if (dcCommandStatus) dcCommandStatus.textContent = 'Command failed.';
+  }
+}
+
+if (deviceConnectionForm) {
+  deviceConnectionForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = dcConnName.value.trim();
+    const kind = dcConnKind.value;
+    const connectionType = dcConnType.value;
+    const address = dcConnAddress.value.trim();
+    if (!name || !address) return;
+    dcRegStatus.textContent = 'Registering connection...';
+    try {
+      await registerConnection(name, kind, connectionType, address);
+      dcConnName.value = '';
+      dcConnAddress.value = '';
+      dcRegStatus.textContent = 'Connection registered successfully!';
+      setTimeout(() => { dcRegStatus.textContent = ''; }, 3000);
+      await loadConnections();
+    } catch (err) {
+      dcRegStatus.textContent = `Error: ${err.message}`;
+    }
+  });
+}
+
+if (dcRefreshBtn) {
+  dcRefreshBtn.addEventListener('click', loadConnections);
+}
+
+if (dcRefreshInfoBtn) {
+  dcRefreshInfoBtn.addEventListener('click', () => {
+    if (activeConnectionId) loadDeviceInfo(activeConnectionId);
+  });
+}
+
+if (dcDisconnectBtn) {
+  dcDisconnectBtn.addEventListener('click', async () => {
+    if (activeConnectionId) {
+      await disconnectConnection(activeConnectionId);
+    }
+  });
+}
+
+if (dcScreenBtn) {
+  dcScreenBtn.addEventListener('click', () => {
+    if (activeConnectionId) captureScreen(activeConnectionId);
+  });
+}
+
+if (dcCommandForm) {
+  dcCommandForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const command = dcCommand.value.trim();
+    if (!command || !activeConnectionId) return;
+    dcCommandStatus.textContent = 'Sending command...';
+    await sendDeviceCommand(activeConnectionId, command);
+    dcCommand.value = '';
+  });
+}
+
+/* ==========================================================================
    ARCHER IMAGE GENERATION & AI STUDIO
    ========================================================================== */
 async function generateArcherImage(event) {
@@ -1074,6 +1378,7 @@ document.querySelectorAll('.nav[data-view]').forEach((button) => {
       navButton.classList.toggle('active', navButton === button);
     });
     if (selectedView === 'devices-view') loadDashboard();
+    if (selectedView === 'device-connection-view') loadConnections();
     if (selectedView === 'ai-studio-view') loadGallery();
     if (selectedView === 'social-view') initTelegramTab();
   });
