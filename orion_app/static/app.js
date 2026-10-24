@@ -901,8 +901,9 @@ if (taskQueueFilters) {
 const deviceConnectionForm = document.getElementById('device-connection-form');
 const dcConnName = document.getElementById('dc-conn-name');
 const dcConnKind = document.getElementById('dc-conn-kind');
-const dcConnType = document.getElementById('dc-conn-type');
+const dcConnMethod = document.getElementById('dc-conn-method');
 const dcConnAddress = document.getElementById('dc-conn-address');
+const dcMethodHint = document.getElementById('dc-method-hint');
 const dcRegStatus = document.getElementById('dc-reg-status');
 const dcRefreshBtn = document.getElementById('dc-refresh-btn');
 const dcConnectionsList = document.getElementById('dc-connections-list');
