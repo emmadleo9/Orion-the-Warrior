@@ -944,6 +944,9 @@ function renderConnections(connections) {
       const card = document.createElement('div');
       card.className = 'device-card';
       const isActive = activeConnectionId === c.id;
+      const methodLabel = c.connection_method
+        ? c.connection_method.charAt(0).toUpperCase() + c.connection_method.slice(1)
+        : c.connection_type || 'unknown';
       card.innerHTML = `
         <div class="device-card-header">
           <strong>${escapeHtml(c.name)}</strong>
@@ -951,7 +954,7 @@ function renderConnections(connections) {
         </div>
         <div>
           <span class="device-status-badge ${c.status}">${c.status.toUpperCase()}</span>
-          <small class="chat-hint" style="display:block; margin-top:4px;">ID: ${c.id} · ${c.connection_type}</small>
+          <small class="chat-hint" style="display:block; margin-top:4px;">ID: ${c.id} · ${methodLabel}</small>
           <small class="chat-hint">${escapeHtml(c.address)}</small>
         </div>
         <div class="device-card-actions">
@@ -981,10 +984,65 @@ async function loadConnections() {
   }
 }
 
-async function registerConnection(name, kind, connectionType, address) {
+async function loadConnectionMethods() {
+  try {
+    const data = await fetchJson('/api/device-connections/methods');
+    if (!dcConnMethod) return;
+    dcConnMethod.replaceChildren();
+    const groups = [
+      { title: 'Wireless', items: data.wireless || [] },
+      { title: 'Wired', items: data.wired || [] },
+    ];
+    for (const group of groups) {
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = group.title;
+      for (const item of group.items) {
+        const opt = document.createElement('option');
+        opt.value = item.id;
+        opt.textContent = item.label;
+        optgroup.append(opt);
+      }
+      dcConnMethod.append(optgroup);
+    }
+    dcConnMethod.value = 'wifi';
+    updateMethodHint('wifi');
+  } catch (error) {
+    console.error('[ORION] could not load connection methods:', error);
+  }
+}
+
+const METHOD_HINTS = {
+  wifi: 'Wi-Fi: use host:port (e.g. 192.168.1.42:5555).',
+  bluetooth: 'Bluetooth: use MAC address (e.g. 00:11:22:33:44:55).',
+  ble: 'BLE: use MAC address (e.g. AA:BB:CC:DD:EE:FF).',
+  serial: 'Serial: use COM port or path (e.g. COM3 or /dev/ttyUSB0).',
+  ethernet: 'Ethernet: use host:port (e.g. 192.168.1.42:5555).',
+  nfc: 'NFC: tap device near reader.',
+  cellular: 'Cellular: use phone number or IP.',
+  zigbee: 'Zigbee: use node address (e.g. 0x1234).',
+  zwave: 'Z-Wave: use NodeID:port.',
+  lora: 'LoRaWAN: use DevEUI:port.',
+  satellite: 'Satellite: use SatID:port.',
+  thunderbolt: 'Thunderbolt: use device name.',
+  firewire: 'FireWire: use Node GUID.',
+  hdmi: 'HDMI: use Display ID.',
+  sd_card: 'SD Card: use volume label.',
+  pin: 'PIN/Dock: use docking port ID.',
+  ir: 'Infrared: point IrDA at device.',
+  airdrop: 'AirDrop: use Apple ID / email.',
+  ant: 'ANT+: use sensor ID.',
+  usb: 'USB: use serial number (e.g. ABC123DEF).',
+};
+
+function updateMethodHint(method) {
+  if (!dcMethodHint) return;
+  dcMethodHint.innerHTML = METHOD_HINTS[method] || 'Enter the device address or identifier.';
+}
+
+async function registerConnection(name, kind, connectionMethod, address) {
   return await fetchJson('/api/device-connections', {
     method: 'POST',
-    body: JSON.stringify({ name, kind, connection_type: connectionType, address }),
+    body: JSON.stringify({ name, kind, connection_method: connectionMethod, address }),
   });
 }
 
@@ -1048,7 +1106,7 @@ async function loadDeviceInfo(connectionId) {
 function renderDeviceInfo(info) {
   if (!info) return;
   if (dcInfoStatus) dcInfoStatus.textContent = info.status || 'unknown';
-  if (dcInfoType) dcInfoType.textContent = `${info.connection_type || 'unknown'} · ${info.kind || 'unknown'}`;
+  if (dcInfoType) dcInfoType.textContent = `${info.method_label || info.connection_type || 'unknown'} · ${info.kind || 'unknown'}`;
   if (dcInfoAddress) dcInfoAddress.textContent = info.address || '--';
   if (dcInfoModel) dcInfoModel.textContent = info.model || '--';
   if (dcInfoOs) dcInfoOs.textContent = `${info.os || '--'} (API ${info.api_level || '--'})`;
@@ -1147,12 +1205,12 @@ if (deviceConnectionForm) {
     e.preventDefault();
     const name = dcConnName.value.trim();
     const kind = dcConnKind.value;
-    const connectionType = dcConnType.value;
+    const connectionMethod = dcConnMethod.value;
     const address = dcConnAddress.value.trim();
     if (!name || !address) return;
     dcRegStatus.textContent = 'Registering connection...';
     try {
-      await registerConnection(name, kind, connectionType, address);
+      await registerConnection(name, kind, connectionMethod, address);
       dcConnName.value = '';
       dcConnAddress.value = '';
       dcRegStatus.textContent = 'Connection registered successfully!';
@@ -1161,6 +1219,12 @@ if (deviceConnectionForm) {
     } catch (err) {
       dcRegStatus.textContent = `Error: ${err.message}`;
     }
+  });
+}
+
+if (dcConnMethod) {
+  dcConnMethod.addEventListener('change', (e) => {
+    updateMethodHint(dcConnMethod.value);
   });
 }
 
@@ -1989,6 +2053,7 @@ loadDashboard().catch((error) => {
 loadTaskRuns();
 connectTaskStream();
 loadGallery();
+loadConnectionMethods();
 try {
   loadSocialDraft(socialPlatform.value);
 } catch (error) {}

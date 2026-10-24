@@ -138,7 +138,7 @@ class DeviceConnectionManager:
                     name TEXT NOT NULL,
                     kind TEXT NOT NULL,
                     connection_type TEXT NOT NULL,
-                    connection_method TEXT NOT NULL,
+                    connection_method TEXT NOT NULL DEFAULT 'wifi',
                     address TEXT NOT NULL,
                     status TEXT NOT NULL,
                     last_seen TEXT,
@@ -148,6 +148,16 @@ class DeviceConnectionManager:
                 )
                 """
             )
+            # Migrate older schema that only had connection_type
+            try:
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(device_connections)").fetchall()]
+                if "connection_method" not in cols:
+                    conn.execute("ALTER TABLE device_connections ADD COLUMN connection_method TEXT NOT NULL DEFAULT 'wifi'")
+                    # Backfill connection_type from connection_method
+                    conn.execute("UPDATE device_connections SET connection_type = connection_method WHERE connection_type IS NULL OR connection_type = ''")
+                    conn.commit()
+            except Exception:
+                pass
             conn.commit()
 
     def _load_from_db(self) -> None:
@@ -169,7 +179,7 @@ class DeviceConnectionManager:
                     "name": row["name"],
                     "kind": row["kind"],
                     "connection_type": row["connection_type"],
-                    "connection_method": row["connection_method"],
+                    "connection_method": row["connection_method"] or row["connection_type"] or "wifi",
                     "address": row["address"],
                     "status": row["status"],
                     "last_seen": row["last_seen"],
