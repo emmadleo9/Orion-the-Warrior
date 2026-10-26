@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 from PIL import Image, UnidentifiedImageError
 
 
-class NicoModelError(RuntimeError):
+class OrionModelError(RuntimeError):
     pass
 
 
@@ -65,7 +65,7 @@ class _SearchResultParser(HTMLParser):
             self._current[self._capture] += data
 
 
-class NicoAssistant:
+class OrionAssistant:
     def __init__(self, name: str = "ORI-9.0-GEN-1", output_dir: str | Path | None = None) -> None:
         self.name = name
         configured_output_dir = os.getenv("ORION_GENERATED_DIR")
@@ -140,17 +140,17 @@ class NicoAssistant:
             result = self._ollama_chat(messages, tools, on_delta=on_delta)
             model_message = result.get("message") if isinstance(result, dict) else None
             if not isinstance(model_message, dict):
-                raise NicoModelError("Ollama returned an invalid response.")
+        raise OrionModelError("Ollama returned an invalid response.")
 
             tool_calls = model_message.get("tool_calls") or []
             if not tool_calls:
                 reply = model_message.get("content")
                 if not isinstance(reply, str) or not reply.strip():
-                    raise NicoModelError("Ollama returned an empty reply.")
+                    raise OrionModelError("Ollama returned an empty reply.")
                 break
 
             if round_number == 2:
-                raise NicoModelError("ORI-9.0-GEN-1 reached the live lookup limit for this message.")
+                raise OrionModelError("ORI-9.0-GEN-1 reached the live lookup limit for this message.")
 
             messages.append(model_message)
             for call in tool_calls:
@@ -187,7 +187,7 @@ class NicoAssistant:
                     }
                 )
         else:
-            raise NicoModelError("ORI-9.0-GEN-1 couldn't complete the live lookup.")
+            raise OrionModelError("ORI-9.0-GEN-1 couldn't complete the live lookup.")
 
         return {
             "assistant_name": self.name,
@@ -247,20 +247,20 @@ class NicoAssistant:
                                 "tool_calls": result.get("tool_calls", []),
                             }
                     if not result.get("message"):
-                        raise NicoModelError("Ollama ended the stream without a final response.")
+                        raise OrionModelError("Ollama ended the stream without a final response.")
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise NicoModelError(
+            raise OrionModelError(
                 f"Ollama returned HTTP {error.code}: {detail[:500]}"
             ) from error
         except (URLError, TimeoutError, OSError) as error:
-            raise NicoModelError(
+            raise OrionModelError(
                 "Cannot reach Ollama. Start Ollama and make sure it is listening locally."
             ) from error
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise NicoModelError("Ollama returned an invalid response.") from error
+            raise OrionModelError("Ollama returned an invalid response.") from error
         except (KeyError, TypeError) as error:
-            raise NicoModelError("Ollama returned an invalid streamed response.") from error
+            raise OrionModelError("Ollama returned an invalid streamed response.") from error
         return result
 
     @staticmethod
@@ -575,7 +575,7 @@ class NicoAssistant:
             return {"available": False, "model": self.model, "installed": False, "installed_models": []}
 
         if not isinstance(result, dict):
-            raise NicoModelError("Ollama returned an invalid model list.")
+            raise OrionModelError("Ollama returned an invalid model list.")
 
         installed = [
             model.get("name", "")
@@ -918,5 +918,5 @@ class LeoAssistant:
 
 
 # Backwards compatibility alias
-ZaraAssistant = LeoAssistant
+OrionModelError = OrionModelError
 
