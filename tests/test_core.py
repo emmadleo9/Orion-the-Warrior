@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 
 import orion_app.ai as ai_module
-from orion_app.ai import NicoAssistant
+from orion_app.ai import OrionAssistant
 from orion_app.devices import DeviceManager
 from orion_app.memory import ConversationMemory
 

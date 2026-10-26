@@ -18,7 +18,7 @@ from .config import load_config
 
 load_config()
 
-from .ai import ArcherGenerationError, LiveDataError, NicoAssistant, NicoModelError, LeoAssistant, ZaraAssistant
+from .ai import ArcherGenerationError, LiveDataError, OrionAssistant, OrionModelError, LeoAssistant
 from .devices import DeviceManager
 from .instagram import InstagramError, InstagramIntegration, InstagramManager
 from .launcher import LauncherMonitor
@@ -29,7 +29,7 @@ from .telegram import telegram_client, telegram_proxy_manager
 from .device_connection import DeviceConnectionManager
 
 BASE_DIR = Path(__file__).resolve().parent
-assistant = NicoAssistant("ORI-9.0-GEN-1")
+assistant = OrionAssistant("ORI-9.0-GEN-1")
 leo = LeoAssistant()
 zara = leo  # Backwards compatibility alias
 device_manager = DeviceManager()
@@ -494,7 +494,7 @@ def assistant_chat(payload: ChatRequest) -> StreamingResponse:
                 on_delta=on_delta,
                 on_queue_task=lambda dev_id, tsk: device_manager.enqueue_task(dev_id, tsk),
             )
-        except NicoModelError as error:
+        except OrionModelError as error:
             task_monitor.finish(run_id, "failed", "The local model could not complete the request.")
             events.put({"type": "error", "message": str(error)})
         except Exception:
@@ -613,7 +613,7 @@ def leo_chat(payload: LeoChatRequest) -> StreamingResponse:
 
         try:
             result = leo.chat(payload.message, history=history, on_delta=on_delta)
-        except NicoModelError as error:
+        except OrionModelError as error:
             task_monitor.finish(run_id, "failed", "Leo Valdez could not complete the request.")
             events.put({"type": "error", "message": str(error)})
         except Exception:
@@ -672,7 +672,6 @@ def set_leo_model(payload: dict) -> dict:
         return {"model": active, "status": leo.model_status()}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
-
 
 @app.post("/api/archer/generate")
 @app.post("/api/assistant/generate-image")
