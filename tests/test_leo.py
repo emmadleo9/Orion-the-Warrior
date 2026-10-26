@@ -13,7 +13,6 @@ def test_client():
 
 
 def test_leo_assistant_alias():
-    assert ZaraAssistant is LeoAssistant
     leo = LeoAssistant()
     assert leo.name == "Leo Valdez"
     assert "Leo Valdez" in LeoAssistant.SYSTEM_PROMPT

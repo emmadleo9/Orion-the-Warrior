@@ -140,7 +140,7 @@ class OrionAssistant:
             result = self._ollama_chat(messages, tools, on_delta=on_delta)
             model_message = result.get("message") if isinstance(result, dict) else None
             if not isinstance(model_message, dict):
-        raise OrionModelError("Ollama returned an invalid response.")
+                raise OrionModelError("Ollama returned an invalid response.")
 
             tool_calls = model_message.get("tool_calls") or []
             if not tool_calls:
@@ -420,7 +420,7 @@ class OrionAssistant:
             query = str(arguments.get("query", "")).strip()
             if not query or len(query) > 250:
                 raise LiveDataError("Search query must be between 1 and 250 characters.")
-            return NicoAssistant._search_web(query)
+            return OrionAssistant._search_web(query)
         if name == "get_local_time":
             now = datetime.now().astimezone()
             return {"local_time": now.isoformat(), "timezone": str(now.tzinfo)}
@@ -428,7 +428,7 @@ class OrionAssistant:
             location = str(arguments.get("location", "")).strip()
             if not location or len(location) > 120:
                 raise LiveDataError("Please provide a location of 1 to 120 characters.")
-            return NicoAssistant._get_weather(location)
+            return OrionAssistant._get_weather(location)
         if name == "get_orion_status":
             return {
                 "devices": devices,
@@ -441,7 +441,7 @@ class OrionAssistant:
             expression = str(arguments.get("expression", "")).strip()
             if not expression or len(expression) > 200:
                 raise LiveDataError("Please provide a valid math expression up to 200 characters.")
-            return {"expression": expression, "result": NicoAssistant._evaluate_math(expression)}
+            return {"expression": expression, "result": OrionAssistant._evaluate_math(expression)}
         if name == "queue_device_task":
             device_id = str(arguments.get("device_id", "")).strip()
             task_desc = str(arguments.get("task", "")).strip()
@@ -499,7 +499,7 @@ class OrionAssistant:
         geocode_url = "https://geocoding-api.open-meteo.com/v1/search?" + urlencode(
             {"name": location, "count": 1, "language": "en", "format": "json"}
         )
-        places = NicoAssistant._fetch_json(geocode_url).get("results", [])
+        places = OrionAssistant._fetch_json(geocode_url).get("results", [])
         if not places:
             raise LiveDataError(f"No matching location was found for '{location}'.")
 
@@ -512,7 +512,7 @@ class OrionAssistant:
                 "timezone": "auto",
             }
         )
-        conditions = NicoAssistant._fetch_json(
+        conditions = OrionAssistant._fetch_json(
             f"https://api.open-meteo.com/v1/forecast?{query}"
         )
         current = conditions.get("current")
@@ -875,16 +875,16 @@ class LeoAssistant:
                     reply = "".join(chunks).strip()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise NicoModelError(f"Ollama HTTP {exc.code}: {detail[:400]}") from exc
+            raise OrionModelError(f"Ollama HTTP {exc.code}: {detail[:400]}") from exc
         except (URLError, TimeoutError, OSError) as exc:
-            raise NicoModelError(
+            raise OrionModelError(
                 "Leo Valdez can't reach Ollama right now — make sure Ollama is running locally."
             ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as exc:
-            raise NicoModelError("Ollama returned an invalid response for Leo Valdez.") from exc
+            raise OrionModelError("Ollama returned an invalid response for Leo Valdez.") from exc
 
         if not reply:
-            raise NicoModelError("Leo Valdez got an empty reply from the model.")
+            raise OrionModelError("Leo Valdez got an empty reply from the model.")
 
         return {
             "assistant_name": self.name,
