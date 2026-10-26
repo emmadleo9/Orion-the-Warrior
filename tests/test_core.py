@@ -13,8 +13,8 @@ from orion_app.devices import DeviceManager
 from orion_app.memory import ConversationMemory
 
 
-def test_nico_can_answer_a_user_prompt():
-    assistant = NicoAssistant("ORI-9.0-GEN-1")
+def test_orion_can_answer_a_user_prompt():
+    assistant = OrionAssistant("ORI-9.0-GEN-1")
     response = assistant.respond("Summarize my day and prepare a next action")
 
     assert response["assistant_name"] == "ORI-9.0-GEN-1"
@@ -22,7 +22,7 @@ def test_nico_can_answer_a_user_prompt():
     assert "Next action" in response["message"]
 
 
-def test_nico_chat_sends_conversation_to_local_model(monkeypatch, tmp_path):
+def test_orion_chat_sends_conversation_to_local_model(monkeypatch, tmp_path):
     response_body = BytesIO(
         json.dumps({"message": {"content": "Hello! Ready when you are."}}).encode()
     )
@@ -35,7 +35,7 @@ def test_nico_chat_sends_conversation_to_local_model(monkeypatch, tmp_path):
         return response_body
 
     monkeypatch.setattr(ai_module, "urlopen", fake_urlopen)
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
     result = assistant.chat(
         "What did I ask you?",
         [{"role": "user", "content": "Remember this detail"}],
@@ -50,18 +50,18 @@ def test_nico_chat_sends_conversation_to_local_model(monkeypatch, tmp_path):
     assert captured["timeout"] == 120
 
 
-def test_nico_chat_reports_unavailable_local_model(monkeypatch, tmp_path):
+def test_orion_chat_reports_unavailable_local_model(monkeypatch, tmp_path):
     def fail_urlopen(_request, timeout):
         raise URLError("connection refused")
 
     monkeypatch.setattr(ai_module, "urlopen", fail_urlopen)
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
 
-    with pytest.raises(ai_module.NicoModelError, match="Cannot reach Ollama"):
+    with pytest.raises(ai_module.OrionModelError, match="Cannot reach Ollama"):
         assistant.chat("Hello")
 
 
-def test_ollama_stream_emits_incremental_text_and_fast_options(monkeypatch, tmp_path):
+def test_orion_stream_emits_incremental_text_and_fast_options(monkeypatch, tmp_path):
     chunks = [
         {"message": {"content": "Quick "}, "done": False},
         {"message": {"content": "reply."}, "done": False},
@@ -78,7 +78,7 @@ def test_ollama_stream_emits_incremental_text_and_fast_options(monkeypatch, tmp_
         return response
 
     monkeypatch.setattr(ai_module, "urlopen", fake_urlopen)
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
     deltas = []
     result = assistant._ollama_chat([], [], on_delta=deltas.append)
 
@@ -91,7 +91,7 @@ def test_ollama_stream_emits_incremental_text_and_fast_options(monkeypatch, tmp_
     assert captured["timeout"] == 120
 
 
-def test_nico_chat_uses_tools_for_live_data(monkeypatch, tmp_path):
+def test_orion_chat_uses_tools_for_live_data(monkeypatch, tmp_path):
     responses = iter(
         [
             {
@@ -111,7 +111,7 @@ def test_nico_chat_uses_tools_for_live_data(monkeypatch, tmp_path):
         ]
     )
     requests = []
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
 
     def fake_ollama_chat(messages, tools, on_delta=None):
         requests.append((messages.copy(), tools))
@@ -149,7 +149,7 @@ def test_live_web_search_extracts_title_url_and_snippet(monkeypatch):
             return html.encode()
 
     monkeypatch.setattr(ai_module, "urlopen", lambda *_args, **_kwargs: FakeResponse())
-    result = NicoAssistant._search_web("current report")
+    result = OrionAssistant._search_web("current report")
 
     assert result["query"] == "current report"
     assert result["results"] == [
@@ -180,9 +180,9 @@ def test_live_weather_includes_human_readable_conditions(monkeypatch):
             },
         ]
     )
-    monkeypatch.setattr(NicoAssistant, "_fetch_json", lambda _url: next(results))
+    monkeypatch.setattr(OrionAssistant, "_fetch_json", lambda _url: next(results))
 
-    weather = NicoAssistant._get_weather("London")
+    weather = OrionAssistant._get_weather("London")
 
     assert weather["weather_description"] == "Overcast"
     assert weather["source"] == "Open-Meteo"
@@ -258,7 +258,7 @@ def test_archer_offline_generation_uses_local_diffusion_pipeline(monkeypatch, tm
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
 
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
     result = assistant.generate_archer_image("a luminous forest", width=256, height=256, mode="offline")
 
     assert result["mode"] == "offline"
@@ -273,7 +273,7 @@ def test_archer_offline_generation_uses_local_diffusion_pipeline(monkeypatch, tm
 
 
 def test_archer_auto_uses_offline_model_when_online_provider_fails(monkeypatch, tmp_path):
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
     monkeypatch.setattr(
         assistant,
         "_generate_online_archer_image",
@@ -321,7 +321,7 @@ def test_archer_online_generation_saves_a_valid_png_and_escapes_prompt(monkeypat
         return FakeResponse()
 
     monkeypatch.setattr(ai_module, "urlopen", fake_urlopen)
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
 
     result = assistant.generate_archer_image(
         "bow & arrow / moon", width=256, height=256, mode="online"
@@ -344,7 +344,7 @@ def test_archer_online_generation_saves_a_valid_png_and_escapes_prompt(monkeypat
     ],
 )
 def test_archer_rejects_invalid_generation_requests(prompt, width, mode, message, tmp_path):
-    assistant = NicoAssistant(output_dir=str(tmp_path))
+    assistant = OrionAssistant(output_dir=str(tmp_path))
 
     with pytest.raises(ai_module.ArcherGenerationError, match=message):
         assistant.generate_archer_image(prompt, width=width, height=512, mode=mode)

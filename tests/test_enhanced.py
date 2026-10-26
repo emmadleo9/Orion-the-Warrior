@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from orion_app.ai import NicoAssistant, LiveDataError
+from orion_app.ai import OrionAssistant, LiveDataError
 from orion_app.devices import DeviceManager
 from orion_app.main import app, device_manager, assistant
 from orion_app.memory import ConversationMemory

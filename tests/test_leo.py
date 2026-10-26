@@ -3,7 +3,7 @@
 from fastapi.testclient import TestClient
 import pytest
 
-from orion_app.ai import LeoAssistant, ZaraAssistant
+from orion_app.ai import LeoAssistant
 from orion_app import main as main_module
 
 
