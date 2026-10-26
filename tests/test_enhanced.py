@@ -64,24 +64,24 @@ def test_device_manager_sqlite_persistence_and_lifecycle(tmp_path):
     assert drone["id"] not in dm2.devices
 
 
-def test_nico_calculator_and_telemetry_tools(tmp_path):
-    nico = NicoAssistant(output_dir=tmp_path)
+def test_orion_calculator_and_telemetry_tools(tmp_path):
+    orion = OrionAssistant(output_dir=tmp_path)
 
     # Test calculator tool
-    calc_res = nico._run_tool("calculator", {"expression": "25 * 4 + 10"}, [], [])
+    calc_res = orion._run_tool("calculator", {"expression": "25 * 4 + 10"}, [], [])
     assert calc_res["result"] == 110
 
-    sqrt_res = nico._run_tool("calculator", {"expression": "sqrt(144)"}, [], [])
+    sqrt_res = orion._run_tool("calculator", {"expression": "sqrt(144)"}, [], [])
     assert sqrt_res["result"] == 12
 
     # Test telemetry tool
-    telem_res = nico._run_tool("get_system_telemetry", {}, [], [])
+    telem_res = orion._run_tool("get_system_telemetry", {}, [], [])
     assert "cpu" in telem_res
     assert "memory" in telem_res
 
     # Test queue device task tool with callback
     queued_calls = []
-    task_res = nico._run_tool(
+    task_res = orion._run_tool(
         "queue_device_task",
         {"device_id": "dev-1", "task": "Run diagnostics"},
         [],
@@ -110,24 +110,24 @@ def test_conversation_memory_export(tmp_path):
 
 
 def test_archer_gallery_and_model_switching(tmp_path):
-    nico = NicoAssistant(output_dir=tmp_path)
+    orion = OrionAssistant(output_dir=tmp_path)
 
     # Create dummy image in output_dir
     dummy_img = tmp_path / "archer_12345.png"
     dummy_img.write_bytes(b"dummy image bytes")
 
-    gallery = nico.list_gallery()
+    gallery = orion.list_gallery()
     assert len(gallery) == 1
     assert gallery[0]["filename"] == "archer_12345.png"
     assert gallery[0]["url"] == "/api/archer/images/archer_12345.png"
 
     # Model switching
-    nico.set_model("llama3.2:1b")
-    assert nico.model == "llama3.2:1b"
+    orion.set_model("llama3.2:1b")
+    assert orion.model == "llama3.2:1b"
 
     # Delete image
-    assert nico.delete_gallery_image("archer_12345.png") is True
-    assert len(nico.list_gallery()) == 0
+    assert orion.delete_gallery_image("archer_12345.png") is True
+    assert len(orion.list_gallery()) == 0
 
 
 def test_enhanced_api_endpoints():
