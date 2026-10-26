@@ -514,7 +514,7 @@ function addMessage(role, text, pending = false) {
 
   const author = document.createElement('span');
   author.className = 'message-author';
-  author.textContent = role === 'user' ? 'YOU' : 'NICO';
+  author.textContent = role === 'user' ? 'YOU' : 'ORI-9.0-GEN-1';
 
   const content = document.createElement('div');
   content.className = 'message-body';
