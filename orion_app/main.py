@@ -563,7 +563,13 @@ def clear_conversation_memory(conversation_id: str) -> dict:
 
 @app.get("/api/archer/status")
 def archer_status() -> dict:
-    return assistant.archer_status()
+    import concurrent.futures
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(assistant.archer_status)
+            return fut.result(timeout=5)
+    except Exception:
+        return {"name": "Archer", "model": getattr(assistant, "archer_model", "Archer"), "status": "not_loaded", "online_available": True, "offline_ready": False, "model_cached": False}
 
 
 # ── Leo Valdez — backup offline chatbot ──────────────────────────────────────────
