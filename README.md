@@ -28,6 +28,28 @@ Then open:
 
 - http://localhost:8000
 
+### WhatsApp transport (vendor/open-wa, read-only)
+
+Orion wraps `vendor/open-wa` without modifying it. Start OpenWA separately, then run Orion:
+
+```powershell
+# Terminal 1: OpenWA service (if docker compose present in vendor/open-wa)
+cd vendor/open-wa
+docker compose up
+
+# Terminal 2: Orion backend (binds 0.0.0.0:8000)
+$env:OPENWA_API_URL="http://127.0.0.1:3000"
+python main.py
+```
+
+Or run both at once:
+
+```powershell
+python scripts/run_all.py
+```
+
+The adapter lives in `orion_app/whatsapp_adapter.py` (`send_whatsapp_message`, `on_whatsapp_message_received`) with an OpenWA HTTP client in `orion_app/openwa_client.py` and a `/api/whatsapp/send` endpoint. If OpenWA is unreachable, the adapter degrades to a mock so the UI never hangs.
+
 If you want the fastest manual startup on Windows, run the launcher from the repo root:
 
 ```powershell

@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable, Literal, TypeVar
 
+from .whatsapp_adapter import send_whatsapp_message
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -580,6 +582,16 @@ def leo_status() -> dict:
     return leo.model_status()
 
 
+class WhatsAppSendRequest(BaseModel):
+    to: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=4000)
+
+
+@app.post("/api/whatsapp/send")
+def whatsapp_send(payload: WhatsAppSendRequest) -> dict:
+    return send_whatsapp_message(payload.to, payload.text)
+
+
 class LeoChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=64, pattern="^[A-Za-z0-9_-]+$")
     message: str = Field(min_length=1, max_length=4000)
@@ -750,6 +762,11 @@ def create_task(payload: dict) -> dict:
         "device",
         lambda: device_manager.enqueue_task(device_id, task),
     )
+
+
+@app.get("/api/system")
+def api_system() -> dict:
+    return get_system_telemetry()
 
 
 @app.get("/api/system/metrics")
@@ -990,7 +1007,6 @@ def clear_task_runs() -> dict:
 # All Telegram endpoints and logic live inside orion_app/telegram. The router is
 # mounted here so the Social Hub's Telegram tab has a single, self-contained API.
 from .telegram.routes import router as telegram_router  # noqa: E402
-
 app.include_router(telegram_router)
 
 

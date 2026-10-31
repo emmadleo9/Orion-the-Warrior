@@ -1,4 +1,3 @@
-from orion_app.telemetry import get_system_telemetry
 import os
 import socket
 import sys
@@ -101,9 +100,5 @@ if __name__ == "__main__":
     for lip in lan_ips:
         print(f"     Local Wi-Fi: http://{lip}:{port}")
     print(f"{'='*60}\n")
-
-    @app.get("/api/system")
-def api_system():
-    return get_system_telemetry()
 
     uvicorn.run(app, host=host, port=port)
