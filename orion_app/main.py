@@ -1042,3 +1042,7 @@ def api_system():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("orion_app.main:app", host="0.0.0.0", port=8000, reload=False)
+@app.get("/api/system")
+def system_alias():
+    # Alias for diagnostics so frontend gets live numbers
+    return get_system_diagnostics() if 'get_system_diagnostics' in globals() else diagnostics()
