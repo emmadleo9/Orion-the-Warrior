@@ -2179,3 +2179,57 @@ if (instagramCallback.get('view') === 'social') {
     if (window.innerWidth > 860) closeMenu();
   });
 })();
+
+
+/* ==========================================================================
+   ROBUST SYSTEM FETCHER — tries multiple endpoints and JSON shapes
+   ========================================================================== */
+async function fetchSystem() {
+  let data = null;
+  for (let url of ['/api/system', '/api/stats', '/api/diagnostics', '/api/metrics']) {
+    try {
+      let r = await fetch(url);
+      if (r.ok) { data = await r.json(); break; }
+    } catch (e) { /* try next */ }
+  }
+  if (!data) return;
+
+  const cpu = Number(
+    data.cpu_percent ?? data.cpu ?? data.cpu_load ??
+    (data.cpu_stats && data.cpu_stats.usage_percent) ??
+    data.cpu_usage ?? 0
+  );
+  const mem = Number(
+    data.memory_percent ?? data.memory ?? data.ram_percent ?? data.mem_load ??
+    (data.memory && data.memory.usage_percent) ??
+    data.memory_usage ?? 0
+  );
+  const disk = Number(
+    data.disk_percent ?? data.disk ??
+    (data.disk && data.disk.usage_percent) ??
+    0
+  );
+  const uptime = data.uptime ?? '--';
+  const host = data.host ?? data.hostname ?? 'ORION-LOCAL';
+
+  const set = (id, val) => {
+    let el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+  set('cpu-load', cpu.toFixed(1) + '%');
+  set('cpu', cpu.toFixed(1) + '%');
+  set('cpu_percent', cpu + '%');
+  set('memory-load', mem.toFixed(1) + '%');
+  set('memory', mem.toFixed(1) + '%');
+  set('ram', mem + '%');
+  set('disk-load', disk.toFixed(1) + '%');
+  set('disk', disk.toFixed(1) + '%');
+  set('uptime', uptime);
+  set('host', host);
+
+  document.querySelectorAll('[data-cpu]').forEach((e) => { e.textContent = cpu + '%'; });
+}
+
+setInterval(fetchSystem, 2000);
+window.addEventListener('load', fetchSystem);
+fetchSystem();

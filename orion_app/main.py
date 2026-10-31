@@ -818,23 +818,8 @@ def _system_payload() -> dict:
     }
 
 
-@app.get("/api/system")
-def api_system() -> dict:
-    return _system_payload()
-
-
 @app.get("/api/system/metrics")
 def system_metrics() -> dict:
-    return _system_payload()
-
-
-@app.get("/api/stats")
-def api_stats() -> dict:
-    return _system_payload()
-
-
-@app.get("/api/metrics")
-def api_metrics() -> dict:
     return _system_payload()
 
 
@@ -1083,15 +1068,33 @@ app.include_router(telegram_router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("orion_app.main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("orion_app.main:app", host="127.0.0.1", port=8000, reload=False)
+
+
+def get_system() -> dict:
+    import psutil, time
+    cpu = psutil.cpu_percent(interval=0.2)
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    boot = psutil.boot_time()
+    uptime_sec = int(time.time() - boot)
+    h = uptime_sec // 3600
+    m = (uptime_sec % 3600) // 60
+    return {
+        "cpu_percent": cpu, "memory_percent": mem.percent, "disk_percent": disk.percent,
+        "cpu": cpu, "memory": mem.percent, "disk": disk.percent, "ram_percent": mem.percent,
+        "cpu_load": cpu, "mem_load": mem.percent,
+        "uptime": f"{h}h {m}m", "host": platform.node(), "status": "online",
+        "cpu_usage": cpu, "memory_usage": mem.percent,
+        "cpu_stats": {"usage_percent": cpu},
+        "memory": {"usage_percent": mem.percent},
+        "disk": {"usage_percent": disk.percent}
+    }
 
 
 @app.get("/api/system")
 @app.get("/api/stats")
-def api_system():
-    import psutil, platform, time
-    cpu = psutil.cpu_percent(interval=0.2)
-    mem = psutil.virtual_memory().percent
-    disk = psutil.disk_usage('/').percent
-    uptime = int(time.time() - psutil.boot_time())
-    return {"cpu_percent": cpu, "memory_percent": mem, "disk_percent": disk, "cpu": cpu, "memory": mem, "disk": disk, "uptime": f"{uptime//3600}h {(uptime%3600)//60}m", "host": platform.node(), "status": "online"}
+@app.get("/api/metrics")
+@app.get("/api/status")
+def api_system() -> dict:
+    return get_system()
