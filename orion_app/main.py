@@ -26,7 +26,7 @@ from .instagram import InstagramError, InstagramIntegration, InstagramManager
 from .launcher import LauncherMonitor
 from .memory import MAX_MESSAGES_PER_CONVERSATION, ConversationMemory
 from .task_monitor import TaskMonitor
-from .telemetry import get_system_telemetry
+from orion_app.telemetry import get_system_telemetry
 from .telegram import telegram_client, telegram_proxy_manager
 from .device_connection import DeviceConnectionManager
 
