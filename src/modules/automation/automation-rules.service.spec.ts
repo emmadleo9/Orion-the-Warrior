@@ -1,0 +1,500 @@
+// Rule CRUD must be scoped to the URL :sessionId (an OPERATOR key for one session must not read,
+// edit or delete another session's rules), and the inbound evaluator carries the loop-safety
+// contract: never reply to fromMe, one reply per message (first match), one reply per chat per
+// cooldown window, and no failure may escape into the receive path. These run against a real
+// in-memory DB so scoping and ordering are exercised end-to-end, not asserted on a mock's WHERE.
+import { DataSource } from 'typeorm';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { AutomationRulesService } from './automation-rules.service';
+import { AutomationRule } from './entities/automation-rule.entity';
+import { Session, SessionStatus } from '../session/entities/session.entity';
+import type { MessageService } from '../message/message.service';
+import type { WebhookFilters } from '../webhook/filters/filter-types';
+import type { ModuleRef } from '@nestjs/core';
+import type { ConfigService } from '@nestjs/config';
+
+describe('AutomationRulesService', () => {
+  let ds: DataSource;
+  let service: AutomationRulesService;
+  let sends: Array<{ sessionId: string; chatId: string; text: string }>;
+  let sendImpl: (sessionId: string, dto: { chatId: string; text: string }) => Promise<unknown>;
+
+  const moduleRefStub = {
+    get: () =>
+      ({
+        sendText: (sessionId: string, dto: { chatId: string; text: string }) => sendImpl(sessionId, dto),
+      }) as unknown as MessageService,
+  } as unknown as ModuleRef;
+
+  beforeEach(async () => {
+    ds = new DataSource({
+      type: 'better-sqlite3',
+      database: ':memory:',
+      entities: [Session, AutomationRule],
+      synchronize: true,
+    });
+    await ds.initialize();
+    const sessions = ds.getRepository(Session);
+    for (const id of ['sessA', 'sessB']) {
+      await sessions.save(sessions.create({ id, name: id, status: SessionStatus.READY, config: {} }));
+    }
+    sends = [];
+    sendImpl = (sessionId, dto) => {
+      sends.push({ sessionId, chatId: dto.chatId, text: dto.text });
+      return Promise.resolve({});
+    };
+    service = new AutomationRulesService(
+      ds.getRepository(AutomationRule),
+      ds.getRepository(Session),
+      moduleRefStub,
+      undefined,
+    );
+  });
+
+  afterEach(async () => {
+    await ds.destroy();
+  });
+
+  const inbound = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'wamid.1',
+    from: '628111@c.us',
+    to: '628222@c.us',
+    chatId: '628111@c.us',
+    body: 'hello there',
+    type: 'text',
+    fromMe: false,
+    isGroup: false,
+    ...over,
+  });
+
+  describe('per-session cap', () => {
+    // Every inbound message is evaluated against every rule of its session, so an unbounded count
+    // turns each message into unbounded work — the same reason the webhook fan-out is capped.
+    const cappedService = (max: number): AutomationRulesService =>
+      new AutomationRulesService(
+        ds.getRepository(AutomationRule),
+        ds.getRepository(Session),
+        moduleRefStub,
+        undefined,
+        {
+          get: (_key: string, def?: number) => max ?? def,
+        } as unknown as ConfigService,
+      );
+
+    it('refuses a NEW rule at or over the cap; existing ones are grandfathered', async () => {
+      const svc = cappedService(2);
+      await svc.create('sessA', { name: 'r1', replyText: 'a' });
+      await svc.create('sessA', { name: 'r2', replyText: 'b' });
+      await expect(svc.create('sessA', { name: 'r3', replyText: 'c' })).rejects.toBeInstanceOf(BadRequestException);
+      // The cap is per-session — another session is unaffected.
+      await expect(svc.create('sessB', { name: 'r1', replyText: 'a' })).resolves.toBeDefined();
+    });
+
+    it('0 disables the cap', async () => {
+      const svc = cappedService(0);
+      for (let i = 0; i < 5; i++) await svc.create('sessA', { name: `r${i}`, replyText: 'x' });
+      await expect(svc.create('sessA', { name: 'more', replyText: 'x' })).resolves.toBeDefined();
+    });
+  });
+
+  describe('CRUD scoping', () => {
+    it('create applies the defaults: enabled, 60s cooldown, no conditions', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'hi' });
+      expect(rule.enabled).toBe(true);
+      expect(rule.cooldownSeconds).toBe(60);
+      expect(rule.conditions).toBeNull();
+    });
+
+    it('findOne returns a rule only for its owning session', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'hi' });
+      expect((await service.findOne('sessA', rule.id)).id).toBe(rule.id);
+      await expect(service.findOne('sessB', rule.id)).rejects.toThrow(NotFoundException);
+    });
+
+    it('update refuses (404) a rule owned by another session and does not mutate it', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'hi' });
+      await expect(service.update('sessB', rule.id, { replyText: 'hijacked' })).rejects.toThrow(NotFoundException);
+      expect((await ds.getRepository(AutomationRule).findOneByOrFail({ id: rule.id })).replyText).toBe('hi');
+    });
+
+    // Stalls the next findOne after it has read, so a second request can run between the read and
+    // the write of the first, which is the window a read-modify-save update loses writes in.
+    const stallNextRead = (): { release: () => void } => {
+      const repository = ds.getRepository(AutomationRule);
+      const realFindOne = repository.findOne.bind(repository);
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>(resolve => (release = resolve));
+      jest.spyOn(repository, 'findOne').mockImplementationOnce(async options => {
+        const row = await realFindOne(options);
+        await gate;
+        return row;
+      });
+      return { release };
+    };
+
+    it('an overlapping edit does not write back columns it never touched', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'old' });
+      const { release } = stallNextRead();
+
+      const slow = service.update('sessA', rule.id, { replyText: 'new' });
+      await service.update('sessA', rule.id, { enabled: false });
+      release();
+      await slow;
+
+      const stored = await ds.getRepository(AutomationRule).findOneByOrFail({ id: rule.id });
+      expect(stored.replyText).toBe('new');
+      expect(stored.enabled).toBe(false);
+    });
+
+    it('an edit that loses a race with a delete answers 404 and does not resurrect the rule', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'old' });
+      const { release } = stallNextRead();
+
+      const slow = service.update('sessA', rule.id, { replyText: 'new' });
+      await service.remove('sessA', rule.id);
+      release();
+
+      await expect(slow).rejects.toThrow(NotFoundException);
+      expect(await ds.getRepository(AutomationRule).countBy({ id: rule.id })).toBe(0);
+    });
+
+    it('update stores conditions and returns the stored row', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'hi' });
+      const conditions: WebhookFilters = { conditions: [{ field: 'body', operator: 'contains', value: 'refund' }] };
+
+      const updated = await service.update('sessA', rule.id, { conditions, cooldownSeconds: 0 });
+
+      expect(updated.conditions).toEqual(conditions);
+      expect(updated.cooldownSeconds).toBe(0);
+      expect(updated.replyText).toBe('hi');
+    });
+
+    it('update with no fields returns the rule untouched', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'hi' });
+      expect((await service.update('sessA', rule.id, {})).replyText).toBe('hi');
+    });
+
+    it('remove refuses (404) a rule owned by another session and does not delete it', async () => {
+      const rule = await service.create('sessA', { name: 'r', replyText: 'hi' });
+      await expect(service.remove('sessB', rule.id)).rejects.toThrow(NotFoundException);
+      expect(await ds.getRepository(AutomationRule).countBy({ id: rule.id })).toBe(1);
+    });
+
+    it('findAll returns only the session’s rules', async () => {
+      await service.create('sessA', { name: 'a', replyText: 'x' });
+      await service.create('sessB', { name: 'b', replyText: 'y' });
+      expect((await service.findAll('sessA')).map(r => r.name)).toEqual(['a']);
+    });
+
+    // SQLite serves every repository from one connection, so a transaction the save opened would hold what other
+    // callers wrote while it was open, and the rollback of its failed insert would undo those writes.
+    it('keeps a write made beside a create whose session is deleted after the check', async () => {
+      const sessions = ds.getRepository(Session);
+      jest.spyOn(sessions, 'exists').mockResolvedValue(true);
+      let steps = 0;
+      let beside: Promise<unknown> = Promise.resolve();
+      ds.subscribers.push({
+        listenTo: () => AutomationRule,
+        beforeInsert: () => {
+          beside = (async () => {
+            for (let i = 0; i < steps; i += 1) await Promise.resolve();
+            await sessions.update('sessB', { status: SessionStatus.FAILED });
+          })();
+        },
+      });
+
+      for (; steps <= 10; steps += 1) {
+        await sessions.update('sessB', { status: SessionStatus.READY });
+        await expect(service.create('gone', { name: 'r', replyText: 'hi' })).rejects.toThrow(/FOREIGN KEY/);
+        await beside;
+        expect({ steps, status: (await sessions.findOneByOrFail({ id: 'sessB' })).status }).toEqual({
+          steps,
+          status: SessionStatus.FAILED,
+        });
+      }
+    });
+  });
+
+  describe('evaluateInbound', () => {
+    it('replies through the send path when a condition matches', async () => {
+      await service.create('sessA', {
+        name: 'greet',
+        replyText: 'welcome!',
+        conditions: { conditions: [{ field: 'body', operator: 'contains', value: 'hello' }] },
+      });
+
+      await service.evaluateInbound('sessA', inbound());
+
+      expect(sends).toEqual([{ sessionId: 'sessA', chatId: '628111@c.us', text: 'welcome!' }]);
+    });
+
+    // The chat id is a third party's number: the reply line carries it as debug metadata only.
+    it('logs the reply at debug and keeps the chat id out of info-level lines', async () => {
+      await service.create('sessA', { name: 'any', replyText: 'hi' });
+      const logger = (service as unknown as { logger: { log: () => void; debug: () => void } }).logger;
+      const log = jest.spyOn(logger, 'log');
+      const debug = jest.spyOn(logger, 'debug').mockImplementation(() => undefined);
+
+      await service.evaluateInbound('sessA', inbound());
+
+      expect(debug).toHaveBeenCalledWith('Automation rule replied', expect.objectContaining({ chatId: '628111@c.us' }));
+      expect(JSON.stringify(log.mock.calls)).not.toContain('628111');
+    });
+
+    it('a rule without conditions matches every inbound message', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack' });
+
+      await service.evaluateInbound('sessA', inbound({ body: 'anything at all' }));
+
+      expect(sends).toHaveLength(1);
+    });
+
+    it('a rule with no kind condition never answers a channel, broadcast list or status', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 0 });
+      await service.create('sessA', {
+        name: 'hello',
+        replyText: 'hi',
+        cooldownSeconds: 0,
+        conditions: { conditions: [{ field: 'body', operator: 'contains', value: 'hello' }] },
+      });
+
+      for (const chatId of ['120363000000000001@newsletter', '1234@broadcast', 'status@broadcast']) {
+        await service.evaluateInbound('sessA', inbound({ chatId, from: chatId }));
+      }
+      expect(sends).toHaveLength(0);
+
+      // Direct and group chats are still answered.
+      await service.evaluateInbound('sessA', inbound());
+      await service.evaluateInbound('sessA', inbound({ chatId: '120363000000000002@g.us', isGroup: true }));
+      expect(sends.map(s => s.chatId)).toEqual(['628111@c.us', '120363000000000002@g.us']);
+    });
+
+    it('an explicit kind condition still reaches a channel or broadcast list', async () => {
+      // Ordered first, so it would win if the kind guard did not skip it for the channel.
+      const all = await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 0 });
+      await service.create('sessA', {
+        name: 'channels',
+        replyText: 'channel-reply',
+        cooldownSeconds: 0,
+        conditions: { conditions: [{ field: 'kind', operator: 'is', value: ['channel', 'broadcast'] }] },
+      });
+      // createdAt has 1s precision on SQLite; pin it so the evaluation order is the one described.
+      await ds.getRepository(AutomationRule).update(all.id, { createdAt: new Date('2026-01-01T00:00:00Z') });
+
+      await service.evaluateInbound('sessA', inbound({ chatId: '120363000000000001@newsletter' }));
+      await service.evaluateInbound('sessA', inbound({ chatId: '1234@broadcast' }));
+
+      expect(sends.map(s => [s.chatId, s.text])).toEqual([
+        ['120363000000000001@newsletter', 'channel-reply'],
+        ['1234@broadcast', 'channel-reply'],
+      ]);
+    });
+
+    it('never replies to the account’s own messages (fromMe)', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack' });
+
+      await service.evaluateInbound('sessA', inbound({ fromMe: true }));
+
+      expect(sends).toHaveLength(0);
+    });
+
+    it('skips disabled rules and non-matching conditions', async () => {
+      await service.create('sessA', { name: 'off', replyText: 'no', enabled: false });
+      await service.create('sessA', {
+        name: 'other',
+        replyText: 'no',
+        conditions: { conditions: [{ field: 'body', operator: 'contains', value: 'zzz-no-match' }] },
+      });
+
+      await service.evaluateInbound('sessA', inbound());
+
+      expect(sends).toHaveLength(0);
+    });
+
+    it('first matching rule wins — one message never gets two replies', async () => {
+      const first = await service.create('sessA', { name: 'first', replyText: 'first-reply' });
+      await service.create('sessA', { name: 'second', replyText: 'second-reply' });
+      // createdAt has 1s precision on SQLite; pin distinct timestamps so order is the one asserted.
+      await ds.getRepository(AutomationRule).update(first.id, { createdAt: new Date('2026-01-01T00:00:00Z') });
+
+      await service.evaluateInbound('sessA', inbound());
+
+      expect(sends.map(s => s.text)).toEqual(['first-reply']);
+    });
+
+    it.each([
+      ['a null condition', { conditions: [null] }, inbound()],
+      ['a non-list conditions value on a broadcast message', { conditions: 'x' }, inbound({ kind: 'broadcast' })],
+      ['a non-list conditions value', { conditions: 'x' }, inbound()],
+      ['an object as the conditions value', { conditions: {} }, inbound()],
+      ['a string as the conditions object', 'x', inbound()],
+      ['an array as the conditions object', [], inbound()],
+    ])('a rule with %s is skipped on its own; later rules still answer', async (_label, conditions, message) => {
+      const broken = await service.create('sessA', { name: 'broken', replyText: 'broken-reply', cooldownSeconds: 0 });
+      // Stored the way a restore writes it: the DTO would refuse this value.
+      await ds
+        .getRepository(AutomationRule)
+        .update(broken.id, { conditions: conditions as never, createdAt: new Date('2026-01-01T00:00:00Z') });
+      await service.create('sessA', {
+        name: 'valid',
+        replyText: 'valid-reply',
+        cooldownSeconds: 0,
+        conditions: { conditions: [{ field: 'kind', operator: 'is', value: ['individual', 'broadcast'] }] },
+      });
+
+      await expect(service.evaluateInbound('sessA', message)).resolves.toBeUndefined();
+
+      expect(sends.map(s => s.text)).toEqual(['valid-reply']);
+    });
+
+    it('cooldown: the same rule stays quiet in the same chat, other chats unaffected', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 300 });
+
+      await service.evaluateInbound('sessA', inbound());
+      await service.evaluateInbound('sessA', inbound({ id: 'wamid.2' }));
+      await service.evaluateInbound('sessA', inbound({ id: 'wamid.3', chatId: '628333@c.us', from: '628333@c.us' }));
+
+      expect(sends.map(s => s.chatId)).toEqual(['628111@c.us', '628333@c.us']);
+    });
+
+    it('cooldown: an edited cooldownSeconds governs a quiet period that is already running', async () => {
+      const rule = await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 300 });
+      const start = Date.now();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      try {
+        await service.evaluateInbound('sessA', inbound());
+        await service.update('sessA', rule.id, { cooldownSeconds: 1 });
+        now.mockReturnValue(start + 2_000);
+        await service.evaluateInbound('sessA', inbound({ id: 'wamid.2' }));
+      } finally {
+        now.mockRestore();
+      }
+
+      expect(sends).toHaveLength(2);
+    });
+
+    it('cooldown: a raised cooldownSeconds survives the sweep of a large cooldown map', async () => {
+      const rule = await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 60 });
+      const start = Date.now();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      try {
+        await service.evaluateInbound('sessA', inbound());
+        await service.update('sessA', rule.id, { cooldownSeconds: 3600 });
+        // Pad the map past the sweep threshold with copies of the live entry.
+        const cooldowns = (service as unknown as { cooldowns: Map<string, unknown> }).cooldowns;
+        const entry = cooldowns.values().next().value;
+        for (let i = 0; i < 10_000; i++) cooldowns.set(`pad:${i}`, entry);
+        now.mockReturnValue(start + 120_000);
+        // Another chat fires, which sweeps the map before it enters its own cooldown.
+        await service.evaluateInbound('sessA', inbound({ id: 'wamid.2', chatId: '628333@c.us', from: '628333@c.us' }));
+        await service.evaluateInbound('sessA', inbound({ id: 'wamid.3' }));
+      } finally {
+        now.mockRestore();
+      }
+
+      expect(sends.map(s => s.chatId)).toEqual(['628111@c.us', '628333@c.us']);
+    });
+
+    it('cooldown: a sweep that frees nothing is not repeated on the next reply', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 60 });
+      const cooldowns = (service as unknown as { cooldowns: Map<string, number> }).cooldowns;
+      for (let i = 0; i < 10_000; i++) cooldowns.set(`pad:${i}`, Date.now());
+      const entries = cooldowns[Symbol.iterator].bind(cooldowns);
+      let scans = 0;
+      cooldowns[Symbol.iterator] = () => {
+        scans++;
+        return entries();
+      };
+
+      for (let i = 0; i < 5; i++) {
+        await service.evaluateInbound(
+          'sessA',
+          inbound({ id: `wamid.${i}`, chatId: `62800${i}@c.us`, from: `62800${i}@c.us` }),
+        );
+      }
+
+      expect(sends).toHaveLength(5);
+      expect(scans).toBe(1);
+    });
+
+    it('cooldownSeconds 0 disables the quiet period', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 0 });
+
+      await service.evaluateInbound('sessA', inbound());
+      await service.evaluateInbound('sessA', inbound({ id: 'wamid.2' }));
+
+      expect(sends).toHaveLength(2);
+    });
+
+    it('a rejected send is swallowed, and the cooldown still holds (no retry storm)', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 300 });
+      sendImpl = () => Promise.reject(new Error('engine down'));
+
+      await expect(service.evaluateInbound('sessA', inbound())).resolves.toBeUndefined();
+      sendImpl = (sessionId, dto) => {
+        sends.push({ sessionId, chatId: dto.chatId, text: dto.text });
+        return Promise.resolve({});
+      };
+      await service.evaluateInbound('sessA', inbound({ id: 'wamid.2' }));
+
+      expect(sends).toHaveLength(0);
+    });
+
+    it('refuses a rule for a session that does not exist with 404, not a driver error', async () => {
+      // The sessionId FK would otherwise surface as a 500 from the save, with an unknown-exception
+      // stack in the logs, for what is simply a wrong id in the path.
+      await expect(service.create('no-such-session', { name: 'x', replyText: 'ack' })).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('a failing rule lookup resolves without throwing (receive path stays safe)', async () => {
+      const broken = new AutomationRulesService(
+        { find: () => Promise.reject(new Error('db gone')) } as never,
+        ds.getRepository(Session),
+        moduleRefStub,
+        undefined,
+      );
+
+      await expect(broken.evaluateInbound('sessA', inbound())).resolves.toBeUndefined();
+    });
+
+    it('tolerates a missing ModuleRef (unit wiring) without throwing', async () => {
+      const bare = new AutomationRulesService(
+        ds.getRepository(AutomationRule),
+        ds.getRepository(Session),
+        undefined,
+        undefined,
+      );
+      await service.create('sessA', { name: 'all', replyText: 'ack' });
+
+      await expect(bare.evaluateInbound('sessA', inbound())).resolves.toBeUndefined();
+      expect(sends).toHaveLength(0);
+    });
+
+    it('never answers a stale message — an offline-replayed backlog must not trigger a reply burst', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack' });
+
+      await service.evaluateInbound('sessA', inbound({ timestamp: Math.floor(Date.now() / 1000) - 3600 }));
+
+      expect(sends).toHaveLength(0);
+    });
+
+    it('a fresh timestamp (and a missing one) still get their reply', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 0 });
+
+      await service.evaluateInbound('sessA', inbound({ timestamp: Math.floor(Date.now() / 1000) - 5 }));
+      await service.evaluateInbound('sessA', inbound({ id: 'wamid.2' }));
+
+      expect(sends).toHaveLength(2);
+    });
+
+    it('ignores messages without a chatId', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack' });
+
+      await service.evaluateInbound('sessA', inbound({ chatId: undefined }));
+
+      expect(sends).toHaveLength(0);
+    });
+  });
+});

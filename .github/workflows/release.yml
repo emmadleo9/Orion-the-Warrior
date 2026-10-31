@@ -1,0 +1,1079 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Serialize ALL release runs in one global group, deliberately not a per-tag group
+# (`release-${{ github.ref_name }}`). The mutable channels (the X.Y minor tag and `latest`)
+# are shared state across releases: a per-tag group would let two overlapping releases complete
+# out of order, with the older build re-pointing those channels last. cancel-in-progress: false
+# so a newer tag can never abort a promotion already in flight: a half-promoted registry state
+# is worse than a waiting release.
+#
+# The group is not a queue. It holds the running release and at most one pending run, and a run
+# queued behind a pending one cancels it: a tag pushed while one release runs and another waits
+# drops the waiting one, which publishes nothing until it is re-run. `queue: max` would keep up to
+# 100 runs waiting, but the actionlint release the chart job pins (1.7.12) rejects that key.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  DOCKER_PLATFORMS: linux/amd64,linux/arm64
+
+permissions:
+  contents: read
+
+jobs:
+  # ──── Release Gate (CI-strength) ──────────────────────────────────
+  # Mirror the CI workflow's gate jobs so a tag can never publish an image or GitHub Release that
+  # lint, the spec type-check, OpenAPI snapshot, unit + e2e tests, the Postgres migration smoke, or the
+  # dashboard build/lint/type-check would have rejected. Each job below matches its CI counterpart; only the tag-match
+  # guard and the publish jobs (docker, release) are release-specific.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          # Both trees are installed in this job (the dashboard audit below), so both lockfiles
+          # belong in the cache key.
+          cache-dependency-path: |
+            package-lock.json
+            dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail fast (before tests, image build, or the GitHub Release) if the release is inconsistent:
+      # the tag must match package.json, and the docs/CHANGELOG version guard must pass. This stops a
+      # mis-tagged or under-documented release from ever publishing an image or a GitHub Release.
+      - name: Verify tag matches package.json version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${TAG#v}"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag '$TAG' (version '$TAG_VERSION') does not match package.json version '$PKG_VERSION'. Bump package.json or fix the tag before releasing."
+            exit 1
+          fi
+          echo "Tag $TAG matches package.json $PKG_VERSION"
+
+      - name: Security audit
+        # Matches ci.yml's advisory rules exactly, including its per-advisory allowlist. For the trees
+        # the image ships, the release gate must not be laxer than the PR gate, or a HIGH advisory
+        # blocked on every PR would still sail through at tag time, and it must not excuse fewer
+        # advisories either, or a tag fails on something main has already accepted. The one
+        # difference is an audit that could not run: PR CI skips it with a warning, while a release
+        # refuses to publish with no advisory checked. A re-run clears a transient npm outage.
+        env:
+          CHECK_AUDIT_REQUIRED: '1'
+        run: npm run check:audit
+
+      # The dashboard tree, same rule. Its runtime deps are bundled into dashboard/dist and the
+      # published image serves them to every operator's browser, so the tag path must scan them for
+      # the same reason ci.yml's audit job does, or this gate is laxer than the PR gate for exactly
+      # the dependencies that reach a user. The third tree, sdk/javascript, is not audited here: the
+      # image does not ship it, and js-sdk-release.yml audits it before publishing the SDK.
+      - name: Install dashboard dependencies
+        run: cd dashboard && npm ci
+
+      - name: Security audit (dashboard)
+        run: cd dashboard && npm audit --audit-level=high
+
+      - name: Run ESLint
+        run: npm run lint
+
+      # Same gap as CI: `nest build` excludes specs, so a spec-only type regression slips past every
+      # existing release gate. tsconfig.json includes both src and test, so this is the full-program
+      # check that also covers spec files.
+      - name: Type-check full program (including specs)
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Check version consistency (docs track package.json)
+        run: npm run check:versions
+
+      # Same guard as CI: the published image is built from this ref, so the context must be sane.
+      - name: Check Docker build context (.dockerignore)
+        run: npm run check:dockerignore
+
+      - name: Check OpenAPI snapshot is up to date
+        run: npm run openapi:check
+
+      # The same gates ci.yml runs. Its comment there notes this workflow never ran them, which is
+      # the gap: a tag pushed with `--follow-tags` starts both workflows, and only the branch one
+      # could see an SDK left behind by a contract change. The release path has to stand on its own,
+      # and it is the path that actually publishes the image and the GitHub Release.
+      - name: Check SDK routes against the contract
+        run: npm run check:sdk-routes
+
+      - name: Check the contract is covered by every SDK
+        run: npm run check:sdk-coverage
+
+      - name: Check SDK webhook events against the contract
+        run: npm run check:sdk-events
+
+      - name: Check SDK docs cover the shipped client surface
+        run: npm run check:sdk-docs
+
+      # The typed-SDK wire-shape gate: the last lane gate ci.yml runs that this workflow lacked, so
+      # a tag could publish SDK builds whose mapped response types had drifted from the contract
+      # while the branch path would have caught it.
+      - name: Check contract shapes across the typed SDKs
+        run: npm run check:contract-shapes
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Mirrors ci.yml's test job. The queue-on and throttler-redis e2e suites need this service: under
+    # GitHub Actions they fail rather than skipping when Redis is unreachable, so the tag is never
+    # verified less than the branch it came from.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test -- --coverage
+
+      # jest's rootDir is src/, so the repo-level script specs run on the plain node runner and were
+      # absent from the tag path entirely.
+      - name: Run script unit tests
+        run: npm run test:scripts
+
+      # The repo-file drift specs (docs, trees, gates) run on the branch path; a tag is the one
+      # place that must not be verified less than the branch it came from.
+      - name: Run docs unit tests
+        run: npm run test:docs
+
+      - name: Run e2e smoke tests
+        run: npm run test:e2e
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: '6379'
+
+  test-postgres:
+    name: Test (PostgreSQL migrations)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: openwa
+          POSTGRES_PASSWORD: openwa
+          POSTGRES_DB: openwa
+          # Same as ci.yml: initdb takes the server's default TimeZone from this, so the data
+          # connection's session pin has something to override.
+          TZ: Asia/Jakarta
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openwa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (compiles the data migrations to dist/)
+        run: npm run build
+
+      # Applies the full data-migration chain to a real Postgres and asserts every generated-uuid PK
+      # has a DB DEFAULT — the dialect gap SQLite-only tests can't see.
+      - name: Migrate + uuid-default smoke against PostgreSQL
+        run: npm run test:pg-smoke
+        env:
+          DATABASE_TYPE: postgres
+          DATABASE_HOST: localhost
+          DATABASE_PORT: '5432'
+          DATABASE_USERNAME: openwa
+          DATABASE_PASSWORD: openwa
+          DATABASE_NAME: openwa
+
+      # Runtime-proves BuiltInFtsProvider on Postgres (websearch_to_tsquery + ts_headline against the
+      # STORED body_ts tsvector), the boot-migration advisory lock (two concurrent migrators on one
+      # database), that a paged message list has a total order, that the data entities can build
+      # their own schema (raw SQL the ORM passes through verbatim, such as a partial index predicate,
+      # only case-folds on a real server), that the UTC pin holds across a backup round trip, a
+      # retention window and a local-midnight count, that webhook failure recovery and media metadata
+      # updates hold on the real server, that a send idempotency key is claimed by a unique-violation
+      # insert, that a replace-all import runs, and that a schema-scoped backup of a schema another role
+      # owns loads into an empty database. The PostgreSQL-specific suites self-skip unless
+      # DATABASE_TYPE=postgres. Session lifetime, two-node delete, failed takeover start, lid mapping ownership, chat-media
+      # retention marker, message edit re-emission, foreign-chat receipt, API-send sender, own-sender
+      # search, the lid mapping report-source migration, merged-ack status and the two adapters' lid
+      # mapping writes use SQLite in the default test job and the postgres:16 service here.
+      # TZ is deliberately not UTC, for the reason ci.yml states.
+      - name: Postgres specs (every PostgreSQL-only and dialect-switched spec)
+        # --runInBand: same reason the CI job passes it — both specs issue DDL against the one
+        # shared service database, and jest's default file-parallelism races their catalog writes
+        # (the first v0.19.0 tag failed this step on `relation "messages" already exists` over a
+        # tree CI had passed minutes earlier). The lock spec's own two-migrator race is in-file
+        # (Promise.all) and unaffected by runInBand. The synchronize spec additionally CREATEs and
+        # DROPs a scratch database of its own, which is only safe serialized.
+        run: npx jest --runInBand src/database/migrations/__tests__/1782400000000-AddMessagesFts.pg.spec.ts src/modules/search/providers/builtin-fts.provider.contains.pg.spec.ts src/database/migrations/__tests__/pg-boot-migrations.pg.spec.ts src/modules/message/message-list-ordering.pg.spec.ts src/database/migrations/__tests__/pg-entity-synchronize.pg.spec.ts src/database/postgres-utc.pg.spec.ts src/modules/webhook/webhook-recovery.pg.spec.ts src/modules/message/idempotency/send-idempotency.service.pg.spec.ts src/modules/infra/infra-data.import.pg.spec.ts src/modules/infra/infra-data.optional-tables.pg.spec.ts src/modules/message/message-selection-restore.pg.spec.ts src/database/migrations/__tests__/scoped-backup-schema-owner.pg.spec.ts src/modules/session/session-content-lifetime.spec.ts src/modules/session/session-delete-claim.spec.ts src/modules/takeover/session-takeover-failed-adoption.spec.ts src/engine/identity/lid-mapping-store.spec.ts src/modules/chat-media/chat-media-retention-marker.spec.ts src/modules/session/message-edit-persisted.spec.ts src/modules/session/ack-foreign-chat.spec.ts src/modules/message/outgoing-row-sender.spec.ts src/modules/search/search-own-sender.spec.ts src/database/migrations/__tests__/1791400000000-AddLidMappingReportSource.spec.ts src/modules/session/message-projector.merged-ack.spec.ts src/engine/adapters/baileys.adapter.spec.ts src/engine/adapters/whatsapp-web-js.adapter.spec.ts
+        env:
+          TZ: Asia/Jakarta
+          DATABASE_TYPE: postgres
+          DATABASE_HOST: localhost
+          DATABASE_PORT: '5432'
+          DATABASE_USERNAME: openwa
+          DATABASE_PASSWORD: openwa
+          DATABASE_NAME: openwa
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: cd dashboard && npm ci
+
+      - name: Run ESLint
+        run: cd dashboard && npm run lint
+
+      # The root format:check globs are anchored at the repo root and never reach dashboard/, so
+      # this is the only gate on dashboard formatting — and it was present on the branch path only.
+      - name: Check formatting
+        run: cd dashboard && npm run format:check
+
+      - name: Type-check dashboard tests
+        run: cd dashboard && npm run typecheck
+
+      - name: Check i18n parity
+        run: cd dashboard && npm run i18n:check
+
+      - name: Build dashboard
+        run: cd dashboard && npm run build
+
+      # --test-timeout in test:unit fails a hung test by name; this bounds a hang it cannot see.
+      - name: Run dashboard unit tests
+        timeout-minutes: 10
+        run: cd dashboard && npm run test:unit
+
+  # Mirrors ci.yml's scripts-smoke job, which had no counterpart here at all: the shell scripts that
+  # ship inside the image were linted and exercised on the branch path and on nothing else.
+  scripts-smoke:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install sqlite3
+        # Bounded, and skipped when the runner image already ships the CLI. An unbounded apt-get
+        # against a slow mirror held this job open for over an hour with every other job already
+        # green, so the run never reported and main went without a signal.
+        timeout-minutes: 5
+        run: command -v sqlite3 >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends sqlite3; }
+
+      - name: Install shellcheck
+        # Runs its own update rather than inheriting one from the step above, which no longer
+        # always runs.
+        timeout-minutes: 5
+        run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
+
+      - name: shellcheck every shell script
+        run: shellcheck docker-entrypoint.sh scripts/*.sh
+
+      - name: Run backup/restore smoke test
+        run: ./scripts/smoke-test-backup-restore.sh
+
+  # Mirrors ci.yml's chart job. The chart is published from the tag, so without this the only path
+  # that renders and validates it is the branch path — a chart that breaks between the last branch
+  # build and the tag ships unvalidated.
+  chart:
+    name: Helm chart and workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # For the behaviour check below. No `npm ci`: it imports only node: builtins, so pinning the
+      # runtime is the whole dependency — without this the step would silently take whatever Node the
+      # runner image happens to ship.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: helm lint
+        run: docker run --rm -v "$PWD/charts:/charts:ro" alpine/helm:4.2.3 lint /charts/openwa
+
+      # Two value sets: the defaults an operator gets, and every optional resource switched on, so a
+      # template that only breaks under a toggle cannot pass unnoticed.
+      - name: helm template
+        run: |
+          mkdir -p rendered
+          docker run --rm -v "$PWD/charts:/charts:ro" alpine/helm:4.2.3 \
+            template ci /charts/openwa > rendered/default.yaml
+          docker run --rm -v "$PWD/charts:/charts:ro" alpine/helm:4.2.3 \
+            template ci /charts/openwa \
+            --set ingress.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --set serviceMonitor.enabled=true > rendered/toggled.yaml
+
+      # -ignore-missing-schemas so the ServiceMonitor CRD is skipped rather than failing the run;
+      # without it the toggled render exits 1 on a resource whose schema is not in the catalogue.
+      - name: Validate rendered manifests
+        run: |
+          docker run --rm -v "$PWD/rendered:/w:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
+            -strict -ignore-missing-schemas -summary /w/default.yaml /w/toggled.yaml
+
+      # What the rendered chart would DO in a cluster, which neither helm lint nor kubeconform can
+      # see: config changes roll the pods, the startup budget exceeds the liveness budget, the
+      # metrics selector names one Service. Nothing here publishes the chart — operators install it
+      # from this ref — so the tag is the last gate it passes, and a chart that renders validly but
+      # misbehaves must not get past it.
+      - name: Check chart behaviour
+        run: npm run check:chart
+
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.12 -color
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint, test, dashboard, scripts-smoke, chart]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project
+        run: npm run build
+
+      # Same lane as ci.yml's build job: inbound messages through the real Baileys library.
+      - name: Run inbound messages through the real Baileys library
+        run: npm run test:engine-real
+
+  # ──── Create GitHub Release ───────────────────────────────────────
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Gate the public Release on every CI-strength job AND a successfully built+pushed image that
+    # also boots, so a tag never produces a GitHub Release without passing the same gate CI enforces,
+    # a matching container image, and a runtime boot check on both architectures (boot-smoke runs the
+    # published image on amd64 + arm64). Trades a few minutes of buildx/boot latency for release
+    # safety.
+    needs: [lint, test, test-postgres, dashboard, build, docker, boot-smoke, image-scan, release-tags, promote, verify-published]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        id: changelog
+        env:
+          # Through the environment, not interpolated into the script: the value comes from the tag name.
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          # Extract the section for this version from CHANGELOG.md
+          NOTES=$(awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release v${VERSION}"
+          fi
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          # Author the release as a real user (the PAT owner) instead of github-actions[bot].
+          # Add a repo secret RELEASE_PAT — a fine-grained PAT scoped to this repo with
+          # "Contents: read and write". Falls back to GITHUB_TOKEN (bot-authored) when the secret
+          # is absent, so the job never breaks before the token is configured.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.version.outputs.VERSION }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          draft: false
+          # Same rule as the image channels below: any tag with a '-' suffix is a prerelease, so a
+          # tag kept off X.Y and latest can never become GitHub's "Latest" release either. A stable
+          # release that did not take the `latest` image channel (a patch to an older line) is not
+          # marked Latest, which the in-app update check reads. release-tags is false for both.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ needs.release-tags.outputs.latest }}
+
+  # ──── Docker Image with Version Tag ───────────────────────────────
+  docker:
+    name: Docker Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    needs: [lint, test, test-postgres, dashboard, build]
+    # The promote and verify-published jobs consume exactly what this build produced — the pushed
+    # manifest digest and the tag set computed once here — instead of re-deriving tags from the
+    # tag pattern downstream. What is promoted and verified is by construction what was built.
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish under a throwaway staging tag ONLY. The release tags (X.Y.Z, X.Y, latest) are
+      # applied by the `promote` job, after boot-smoke has actually started the image on both
+      # architectures. Publishing them here would make a broken image pullable before the test that
+      # catches it has run — which is exactly how a non-starting image reached `latest` in 0.10.3.
+      - name: Resolve staging ref
+        id: staging
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "ref=ghcr.io/${REPO,,}:smoke-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          # Both registries the promote job tags. Computed once here and handed to promote /
+          # verify-published via job outputs, so the promoted set cannot drift from the build.
+          images: |
+            ghcr.io/${{ github.repository }}
+            docker.io/rmyndharis/openwa
+          tags: |
+            type=semver,pattern={{version}}
+            # The mutable channels (X.Y, latest) are disabled for prereleases, meaning any tag with
+            # a '-' suffix (rc, beta, alpha or any other): such a build must never become what
+            # `docker pull openwa:0.11` or `:latest` resolves to.
+            # The exact prerelease tag ({{version}}) is still published.
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push (staging tag only)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          push: true
+          platforms: ${{ env.DOCKER_PLATFORMS }}
+          tags: ${{ steps.staging.outputs.ref }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # provenance is generated by default (build-push-action v7); pin it explicitly and opt into
+          # an SBOM attestation so each release image carries an in-toto SLSA provenance + SBOM pair,
+          # verifiable via `docker buildx imagetools inspect`.
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Never serve the production stage's `apt-get update && apt-get upgrade && apt-get install` from cache. That
+          # layer's cache key is its own command text, which does not change when Debian publishes a
+          # security update — so a cached hit silently installs whatever the apt index held when the
+          # layer was first built, and the release image ships known-vulnerable packages. It is not a
+          # theoretical risk: the first two v0.12.3 attempts installed chromium 150.0.7871.181 from a
+          # cached layer while bookworm-security already carried 151.0.7922.71 on BOTH architectures,
+          # and image-scan failed with 228 then 240 findings. The filter names a whole stage, so every
+          # layer of `production` is rebuilt, not only the OS-package one: the PGDG client, the
+          # production `npm ci`, the browser download and the COPY --from=builder steps too. Only the
+          # builder stage keeps its cache.
+          no-cache-filters: production
+
+  # ──── Boot Smoke (amd64 + arm64) ──────────────────────────────────
+  # The docker job proves the image BUILDS for both architectures; this proves the just-pushed image
+  # actually BOOTS and serves the liveness endpoint on both. A boot regression that only surfaces at
+  # runtime on one architecture (e.g. a native-dep/Chromium SIGTRAP on arm64 that a clean build still
+  # produces) cannot reach a public Release. Runs the published image — not a rebuild — against the
+  # dependency-free /api/health/live (NOT /ready, which needs a DB and would conflate boot failure
+  # with database setup). Both architectures are tried even if the first fails, so logs name both.
+  boot-smoke:
+    name: Boot smoke (amd64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      packages: read
+    needs: [docker]
+    steps:
+      # Required by the non-root check below, which runs a script from the repo. Without it the
+      # step exits 127 and this job — the only gate between a root image and `latest` — fails on
+      # every tag instead of guarding anything.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve staging image ref
+        id: image
+        # The image under test carries only the staging tag at this point — the release tags are
+        # applied by `promote`, after this job passes. ${REPO,,} lowercases github.repository: GHCR
+        # normalizes the repo name to lowercase on push and `docker run` rejects a mixed-case
+        # reference, so the pull target must be lowercase too (this repo is rmyndharis/OpenWA).
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "ref=ghcr.io/${REPO,,}:smoke-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      # The tag path is the one that promotes to `latest`, so it must not be laxer than the PR gate —
+      # the same rule this workflow's own audit step states. ci.yml verifies the root→openwa drop on
+      # the built image; without it here, a change leaving Node on uid 0 reaches `latest` through the
+      # only path that publishes it.
+      - name: Verify the image drops from root to the openwa user
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: OPENWA_SMOKE_IMAGE="$IMAGE" ./scripts/smoke-test-non-root.sh
+
+      # Boot below proves the image starts, not that either engine can: Baileys is imported on the
+      # first session start and the browser is launched per session, and both differ by
+      # architecture. Hermetic, so a WhatsApp outage cannot block a release. Both architectures are
+      # tried even if the first fails, and the boot check below still runs, so logs name both.
+      # arm64 runs under QEMU on this amd64 runner, so there the script runs the browser binary
+      # instead of launching it.
+      - name: Load both engine libraries on each architecture
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          rc=0
+          for platform in linux/amd64 linux/arm64; do
+            OPENWA_SMOKE_IMAGE="$IMAGE" OPENWA_SMOKE_PLATFORM="$platform" ./scripts/smoke-test-engine-libs.sh || rc=1
+          done
+          exit "$rc"
+
+      - name: Boot + liveness check on each architecture
+        if: ${{ !cancelled() }}
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          exit_code=0
+          for platform in linux/amd64 linux/arm64; do
+            echo "::group::boot-smoke $platform"
+            docker rm -f openwa-smoke >/dev/null 2>&1 || true
+            # Deliberately NOT --rm: a container that exits on its own is auto-removed by --rm, so
+            # `docker logs` below finds nothing and the failure reports no cause. The explicit
+            # `docker rm -f` at the end of each iteration handles cleanup instead.
+            if ! docker run --platform "$platform" -d -p 2785:2785 --name openwa-smoke "$IMAGE" >/dev/null; then
+              echo "FAIL: $platform — could not start container (image pull/run error)"
+              exit_code=1
+              echo "::endgroup::"
+              continue
+            fi
+            ok=""
+            for _ in $(seq 1 40); do
+              if curl -sf http://127.0.0.1:2785/api/health/live >/dev/null 2>&1; then ok=1; break; fi
+              sleep 5
+            done
+            if [ -n "$ok" ]; then
+              echo "OK: $platform — /api/health/live returned 200"
+            else
+              echo "FAIL: $platform — /api/health/live did not return 200 within ~200s; container logs follow:"
+              docker logs openwa-smoke 2>&1 | tail -60 || true
+              exit_code=1
+            fi
+            docker stop openwa-smoke >/dev/null 2>&1 || true
+            docker rm -f openwa-smoke >/dev/null 2>&1 || true
+            echo "::endgroup::"
+          done
+          exit "$exit_code"
+
+  # ──── Image Vulnerability Scan (amd64 + arm64) ────────────────────
+  # Scans the just-pushed staging image for OS-package and library CVEs and blocks promotion of a
+  # vulnerable image to the public release tags. This is the coverage the `npm audit` gate in ci.yml
+  # cannot give: audit sees the npm tree, but the Debian packages baked into node:22-slim — and, on
+  # arm64 only, the `chromium`/`chromium-sandbox` packages the amd64 image never installs (amd64 uses
+  # a downloaded Chrome-for-Testing binary, not a .deb) — are visible only by scanning the built
+  # artifact. Both architectures are scanned because their OS package sets diverge. The amd64
+  # browser is outside that coverage: no dpkg package owns the Chrome for Testing binary and no
+  # lockfile names it, so neither scanner sees it and a clean amd64 scan says nothing about the
+  # browser (.trivyignore records the same, next to the arm64 chromium note). Runs at release
+  # time, not on every PR, so it never hits the fork-PR permission limits a push/PR scan would.
+  # `ignore-unfixed` keeps a release from being blocked by a CVE with no fix yet; a fixable
+  # HIGH/CRITICAL fails the job and — via promote's `needs` below — stops the release tags.
+  image-scan:
+    name: Image scan (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      packages: read
+    needs: [docker]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      # Needed for .trivyignore: the scan reads the image from the registry, but the ignore file
+      # is repo state and trivy-action resolves it from the workspace — without a checkout the
+      # file simply is not there and every entry is silently inert.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve staging image ref
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "ref=ghcr.io/${REPO,,}:smoke-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # trivy reads TRIVY_PLATFORM for its --platform flag. Scanning is static (it reads the
+          # image layers, it does not run the image), so no QEMU is needed to inspect the arm64
+          # variant of the manifest — only a pull, which the GHCR login above authorizes.
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          # Explicit rather than implicit: each entry in .trivyignore carries a written
+          # justification and a condition for removing it.
+          trivyignores: .trivyignore
+
+  # Picks the tags promote may move. The X.Y and latest channels only ever move forward: a stable
+  # release older than what a channel already serves (a re-run of an old tag, a patch to an earlier
+  # line) leaves that channel alone and is published under the channels it still leads. A channel
+  # whose state cannot be read fails the release instead of being treated as absent; only the
+  # registry's own "manifest unknown" answer counts as absent. The lookups are anonymous pulls,
+  # made here so that the job holding the push, id-token and attestation grants issues none.
+  release-tags:
+    name: Resolve release image channels
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: read
+    needs: [docker]
+    outputs:
+      tags: ${{ steps.select.outputs.tags }}
+      # Whether this release leads every `latest` channel it published to. The GitHub Release follows it,
+      # or an older line's patch release would become the Latest release the update check reads.
+      latest: ${{ steps.select.outputs.latest }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Select release tags without moving newer channels
+        id: select
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.docker.outputs.version }}
+          TAGS: ${{ needs.docker.outputs.tags }}
+        run: |
+          set -euo pipefail
+          stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          channel_version() {
+            local ref="$1" image config version token_url manifest_url token status
+            image="${ref%:*}"
+            if config="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' 2>"$work/inspect.err")"; then
+              # Both published architectures must identify the same stable application version.
+              version="$(jq -er '[.["linux/amd64"].config.Labels["org.opencontainers.image.version"], ((.["linux/arm64"] // .["linux/arm64/v8"]).config.Labels["org.opencontainers.image.version"])] | if all(.[]; type == "string") and (unique | length) == 1 then .[0] else error("missing or inconsistent platform versions") end' <<< "$config")" || { echo "::error::$ref has no consistent version label on both platforms" >&2; return 1; }
+              if [[ ! "$version" =~ $stable ]]; then
+                echo "::error::$ref has no stable release version identity" >&2
+                return 1
+              fi
+              printf '%s\n' "$version"
+              return 0
+            fi
+            # A failed inspect is not evidence of absence. Only a registry 404 carrying its
+            # structured manifest/repository-not-found code permits creating a missing channel.
+            case "$image" in
+              ghcr.io/*)
+                token_url="https://ghcr.io/token?service=ghcr.io&scope=repository:${image#ghcr.io/}:pull"
+                manifest_url="https://ghcr.io/v2/${image#ghcr.io/}/manifests/${ref##*:}"
+                ;;
+              docker.io/*)
+                token_url="https://auth.docker.io/token?service=registry.docker.io&scope=repository:${image#docker.io/}:pull"
+                manifest_url="https://registry-1.docker.io/v2/${image#docker.io/}/manifests/${ref##*:}"
+                ;;
+              *) echo "::error::Unsupported release registry for $ref" >&2; return 1 ;;
+            esac
+            token="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 "$token_url" | jq -er '.token // .access_token | select(type == "string" and length > 0)')" || { echo "::error::Cannot get a registry token for $ref" >&2; cat "$work/inspect.err" >&2; return 1; }
+            status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$work/manifest.json" --write-out '%{http_code}' --header "Authorization: Bearer $token" --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' "$manifest_url")" || { echo "::error::Cannot reach the registry for $ref" >&2; cat "$work/inspect.err" >&2; return 1; }
+            if [ "$status" = 404 ] && jq -e '.errors | type == "array" and length > 0 and all(.[]; .code == "MANIFEST_UNKNOWN" or .code == "NAME_UNKNOWN")' "$work/manifest.json" >/dev/null; then
+              printf 'absent\n'
+              return 0
+            fi
+            echo "::error::Cannot determine the existing release identity for $ref (registry HTTP $status)" >&2
+            cat "$work/inspect.err" >&2
+            return 1
+          }
+          selected=()
+          latest=true
+          [[ "$REF_NAME" != *-* ]] || latest=false
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            channel="${tag##*:}"
+            if [[ "$channel" = latest || "$channel" =~ ^[0-9]+\.[0-9]+$ ]]; then
+              if [[ "$REF_NAME" == *-* ]]; then
+                echo "Skipping stable channel $tag for a prerelease"
+                continue
+              fi
+              if [[ ! "$VERSION" =~ $stable ]]; then
+                echo "::error::Cannot order release version '$VERSION': it is not a stable X.Y.Z"
+                exit 1
+              fi
+              current="$(channel_version "$tag")"
+              if [ "$current" != absent ] && [ "$(printf '%s\n' "$VERSION" "$current" | LC_ALL=C sort -V | tail -n 1)" != "$VERSION" ]; then
+                echo "Keeping $tag at newer release $current"
+                [ "$channel" != latest ] || latest=false
+                continue
+              fi
+            elif [ "$channel" != "$VERSION" ]; then
+              echo "::error::Unexpected release tag $tag for version $VERSION"
+              exit 1
+            fi
+            selected+=("$tag")
+          done <<< "$TAGS"
+          if [ "${#selected[@]}" -eq 0 ]; then
+            echo "::error::No release tags were selected"
+            exit 1
+          fi
+          {
+            echo 'tags<<RELEASE_TAGS'
+            printf '%s\n' "${selected[@]}"
+            echo 'RELEASE_TAGS'
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+
+  # Applies the release tags (X.Y.Z — plus X.Y and latest for non-prereleases) to the image
+  # boot-smoke just proved can start, on BOTH registries (GHCR + Docker Hub — the tag set computed
+  # once by the docker job's metadata-action covers both. release-tags drops the channels that would
+  # move backwards and hands the rest here via job outputs, so the promoted set is by construction
+  # a subset of the build's own tag set, never a re-derived pattern).
+  # `imagetools create` re-points tags at the existing manifest list without rebuilding, so the
+  # promoted image is bit-identical to the one tested on both registries, and its provenance and
+  # SBOM attestations travel with it. Before re-pointing anything, the job records a signed
+  # build-provenance attestation for that digest, which `gh attestation verify` checks against this
+  # repository; the id-token grant it needs lives on this job alone, not on the jobs that build or
+  # test the image. If boot-smoke fails, this job never runs and the release tags never appear
+  # anywhere.
+  promote:
+    name: Promote image to release tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    needs: [docker, boot-smoke, image-scan, release-tags]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Dual-publish: the same boot-tested manifest is also tagged on Docker Hub, where the public
+      # pull count lives (GHCR exposes no download metrics). Requires the DOCKERHUB_USERNAME /
+      # DOCKERHUB_TOKEN repo secrets; without them this step fails before any tag is applied.
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve the image name to attest
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
+      # Before any release tag moves, so a failed attestation publishes nothing. Keyed by digest in
+      # GitHub's attestation store, so it covers every tag promoted below on both registries, each of
+      # which must resolve to this digest. Not pushed to the registry, which would add an untagged
+      # package version per release.
+      - name: Attest build provenance for the tested digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ needs.docker.outputs.digest }}
+
+      - name: Tag the smoke-tested image with the release tags
+        env:
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          TAGS: ${{ needs.release-tags.outputs.tags }}
+          EXPECTED_DIGEST: ${{ needs.docker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          staging="ghcr.io/${REPO,,}:smoke-${{ github.run_id }}"
+          # Identity gate before anything is re-pointed: the staging manifest must be exactly the
+          # manifest the docker job built (and boot-smoke/image-scan tested). A mismatch means the
+          # tag under promotion is not the tested content, so stop.
+          actual="$(docker buildx imagetools inspect "$staging" --format '{{.Manifest.Digest}}')"
+          if [ "$actual" != "$EXPECTED_DIGEST" ]; then
+            echo "::error::staging digest $actual != build digest $EXPECTED_DIGEST — refusing to promote untested content"
+            exit 1
+          fi
+          # One tag per line. A here-string rather than a pipe, so the loop runs in this shell and
+          # `set -e` actually aborts the step on a failed promotion instead of the pipeline
+          # swallowing it.
+          promoted=0
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            # Defense in depth on top of the metadata `enable=` guards: a minor tag (X.Y) must
+            # never be promoted from prerelease content, even if the tag set upstream changes.
+            if [[ "$REF_NAME" == *-* ]] && [[ "$tag" =~ :[0-9]+\.[0-9]+$ ]]; then
+              echo "skipping $tag — minor tags are not promoted from a prerelease"
+              continue
+            fi
+            echo "promoting -> $tag"
+            docker buildx imagetools create --tag "$tag" "$staging"
+            # Each promoted tag must resolve to the build digest — the promotion is a re-point,
+            # never new content.
+            promoted_digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+            if [ "$promoted_digest" != "$EXPECTED_DIGEST" ]; then
+              echo "::error::$tag resolved to $promoted_digest after promotion, expected $EXPECTED_DIGEST"
+              exit 1
+            fi
+            promoted=$((promoted + 1))
+          done <<< "$TAGS"
+          if [ "$promoted" -eq 0 ]; then
+            echo "::error::no release tags were produced by metadata-action — nothing was promoted"
+            exit 1
+          fi
+          echo "promoted $promoted tag(s), all digest-identical to the tested build"
+
+      - name: Verify the release tag resolves and is multi-arch
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          ref="ghcr.io/${REPO,,}:${GITHUB_REF#refs/tags/v}"
+          docker buildx imagetools inspect "$ref" | tee /tmp/inspect.txt
+          for want in linux/amd64 linux/arm64; do
+            grep -q "$want" /tmp/inspect.txt || { echo "MISSING PLATFORM: $want"; exit 1; }
+          done
+
+  # ──── Staging tag cleanup (only when promote never ran) ───────────
+  # Best-effort tidy-up of the staging tag, and it MUST refuse to act unless that tag is the only
+  # one on its version.
+  #
+  # GHCR deletes by *version*, not by tag, and a version carries every tag pointing at it. The
+  # promote job re-points the release tags at content identical to the staging image, so they
+  # resolve to the same digest and therefore the same version — whose tag list is
+  # ["smoke-<run>", "X.Y.Z", "X.Y", "latest"]. Deleting that version by id took the release tags
+  # with it: v0.10.5 published a GitHub Release while `latest`, `0.10` and `0.10.5` all vanished
+  # from the registry, so `docker pull` failed for everyone until they were restored.
+  #
+  # This lives in its own `if: always()` job — not inside promote — because the docker job can fail
+  # after pushing the staging tag, which would otherwise leak. On the happy path the release tags
+  # share the staging version, so the step below does not run at all (the deliberate retention
+  # documented above): the package-versions API is eventually consistent, and a read that does not
+  # list the new release tags yet would count the staging tag alone and delete the version just
+  # published. The same holds for a promote that failed after re-pointing some tags, so the step runs
+  # only when promote never ran. It also keeps the tag when the docker job succeeded and a gate
+  # (boot-smoke or image-scan) failed: "Re-run failed jobs" pulls that tag again, and with it deleted
+  # a flaky scan could only be recovered by rebuilding everything. That leaves one stray tag behind
+  # when the release is abandoned instead.
+  cleanup-staging:
+    name: Clean up the staging tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: always()
+    permissions:
+      packages: write
+    needs: [docker, boot-smoke, image-scan, promote]
+    steps:
+      - name: Remove the staging tag (only when it is alone on its version)
+        # Only when promote never ran: once it has started re-pointing tags, the version can carry
+        # release tags that a stale read does not list yet. A failed or cancelled promote leaves the
+        # stray staging tag behind, the same retention as the happy path. And only when the docker job
+        # did not succeed: a gate that failed on top of a good staging image is re-run against it.
+        if: needs.promote.result == 'skipped' && needs.docker.result != 'success'
+        # Best-effort: a failed tidy-up must not turn an otherwise successful release red.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          staging="smoke-${{ github.run_id }}"
+          version_json=$(gh api "/users/${{ github.repository_owner }}/packages/container/openwa/versions" \
+            --jq ".[] | select(.metadata.container.tags[]? == \"$staging\") | {id, tags: .metadata.container.tags}" | head -1)
+          if [ -z "$version_json" ]; then
+            echo "staging tag not found (docker job failed before pushing, or already cleaned up)"
+            exit 0
+          fi
+          version_id=$(printf '%s' "$version_json" | jq -r .id)
+          tags=$(printf '%s' "$version_json" | jq -r '.tags | join(",")')
+          tag_count=$(printf '%s' "$version_json" | jq -r '.tags | length')
+          if [ "$tag_count" = "1" ]; then
+            gh api -X DELETE "/users/${{ github.repository_owner }}/packages/container/openwa/versions/$version_id" \
+              && echo "removed staging-only version $version_id"
+          else
+            echo "keeping version $version_id — the release tags share it (tags: $tags)."
+            echo "Deleting it would unpublish them; the stray staging tag is left behind on purpose."
+          fi
+
+  # ──── Verify what the public can actually pull ────────────────────
+  # The last thing to run, and the only check that looks at the registry the way a user does.
+  #
+  # v0.10.5 shipped with every job green and nothing pullable: the promote step tagged correctly, its
+  # own verify step confirmed the tag, and the cleanup step immediately after deleted the version those
+  # tags shared — so `latest`, `0.10` and `0.10.5` all vanished. Nothing noticed, because every existing
+  # check ran BEFORE the cleanup and from a runner already logged in to GHCR.
+  #
+  # This job fixes both blind spots. It runs after promote (so it sees the final state, cleanup
+  # included) and it never logs in, so it fails on a tag that exists but is not publicly readable —
+  # which is indistinguishable from a missing tag to everyone downstream. The checked set is the
+  # release-tags selection (both registries), so it matches what promote was told to move: for a
+  # prerelease that is only the exact X.Y.Z-pre tag, and a channel that already served a newer
+  # release is not expected to have moved. Every tag must also resolve to the build's digest, so a
+  # re-pointed channel can never silently serve content other than the tested image.
+  verify-published:
+    name: Verify published tags (anonymous)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # After cleanup-staging, not beside it: that job deletes registry versions, so this check has to
+    # see the registry after it, and run last. It is a best-effort job, so gate on promote rather
+    # than on its result.
+    needs: [docker, release-tags, promote, cleanup-staging]
+    if: always() && needs.promote.result == 'success'
+    # attestations: read for `gh attestation verify` below. GH_TOKEN is an API credential for the
+    # attestation lookup, not a registry login: every pull here stays anonymous.
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      # Deliberately NO docker/login-action here. Authenticating would defeat the purpose.
+      - name: Resolve every promoted tag without credentials
+        env:
+          TAGS: ${{ needs.release-tags.outputs.tags }}
+          EXPECTED_DIGEST: ${{ needs.docker.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Fail closed. A verification step that reports success because something upstream of the
+          # assertion broke is worse than no verification at all — `set -e` plus the checked-count
+          # assertion below mean this job cannot pass without having actually resolved every
+          # promoted tag.
+          set -euo pipefail
+          checked=0
+          failed=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "::group::$ref"
+            if ! docker buildx imagetools inspect "$ref" > /tmp/pub.txt 2>&1; then
+              echo "::error::$ref is not publicly pullable after promotion."
+              cat /tmp/pub.txt
+              failed=1
+              echo "::endgroup::"
+              continue
+            fi
+            for want in linux/amd64 linux/arm64; do
+              if ! grep -q "$want" /tmp/pub.txt; then
+                echo "::error::$ref resolves but is missing $want"
+                failed=1
+              fi
+            done
+            digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
+            if [ "$digest" != "$EXPECTED_DIGEST" ]; then
+              echo "::error::$ref resolves to $digest, not the tested build digest $EXPECTED_DIGEST"
+              failed=1
+            fi
+            # The same pins as the operator checklist in docs/04: --repo alone accepts an attestation
+            # from any workflow in the repository on any ref.
+            if ! gh attestation verify "oci://$ref" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" > /tmp/attest.txt 2>&1; then
+              echo "::error::$ref has no build-provenance attestation from $GITHUB_REPOSITORY's release workflow at $GITHUB_REF"
+              cat /tmp/attest.txt
+              failed=1
+            fi
+            echo "$ref OK ($digest)"
+            checked=$((checked + 1))
+            echo "::endgroup::"
+          done <<< "$TAGS"
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no promoted tags were verified — treating that as a failed release."
+            failed=1
+          fi
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::The release is not usable. Re-point the missing tags before announcing it."
+            exit 1
+          fi
+          echo "all $checked release tags are publicly pullable, multi-arch, digest-identical to the tested build, and attested"

@@ -1,0 +1,215 @@
+import { ConflictException, Injectable, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createLogger } from '../../common/services/logger.service';
+import { resolveFeatureFlags } from '../../config/feature-flags';
+import { Session, SessionStatus } from '../session/entities/session.entity';
+import { SessionOwnershipService } from '../session/session-ownership.service';
+import { ShutdownService } from '../../common/services/shutdown.service';
+import { SessionService } from '../session/session.service';
+import { ServerShuttingDownException, SessionStoppedException } from '../session/session-engine-controls';
+import { resolveMaxConcurrentSessions } from '../session/session-engine-lifecycle.service';
+
+/**
+ * Statuses worth adopting from a lapsed node. They all mean "an engine was (or should be) running".
+ * QR_READY is deliberately absent — an unpaired session on a dead node has nothing to resume, and
+ * restarting it elsewhere just renders a QR nobody asked for. FAILED is deliberately absent too:
+ * it marks a session an operator must look at, and silently relocating it would hide that.
+ *
+ * DISCONNECTED is present, so the status correction must never write it over a row this sweep would
+ * otherwise leave alone: markLapsedDisconnected corrects READY, INITIALIZING, AUTHENTICATING and
+ * ACTION_REQUIRED, which are adopted either way, and QR_READY only on a row with no phone, which
+ * isEligible refuses either way.
+ */
+const TAKEOVER_STATUSES = new Set<SessionStatus>([
+  SessionStatus.READY,
+  SessionStatus.INITIALIZING,
+  SessionStatus.AUTHENTICATING,
+  SessionStatus.ACTION_REQUIRED,
+  SessionStatus.DISCONNECTED,
+]);
+
+/** Pause between successive engine launches, matching the boot auto-start's Chromium stagger. */
+const TAKEOVER_START_STAGGER_MS = 2000;
+
+/**
+ * How many lease TTLs past its expiry a lease must be before the status correction treats its holder
+ * as "really gone".
+ *
+ * Two, not one. A lease lapses while its holder is perfectly healthy whenever a query runs long, and
+ * the next heartbeat re-extends it; correcting a status on a single lapse would report a live peer's
+ * sessions as disconnected, and nothing would put that right, because the peer's own renewal still
+ * finds its nodeId and detects no loss. A lease expires one TTL after the holder's last renewal, so a
+ * row is corrected more than three TTLs after that renewal, plus up to one sweep interval.
+ *
+ * Adoption does not wait for this and acts on the first lapse. It goes through claim(), which takes a
+ * lapsed lease outright: a holder that was only slow loses the session and tears its engine down at
+ * its next heartbeat.
+ */
+const STRANDED_LEASE_TTL_MULTIPLE = 2;
+
+/**
+ * Adopts sessions whose holder's lease has lapsed.
+ *
+ * Boot auto-start runs exactly once, so it misses two real cases, both observed live: a peer that
+ * crashes AFTER this node booted, and a container recreate whose new boot lands BEFORE the old
+ * identity's lease expires (the claim is correctly refused, and nothing ever retried — the session
+ * sat disconnected until someone called POST /start). This sweep is the retry: every tick it looks
+ * for lapsed-lease sessions and starts them here through the ordinary start path, so the claim
+ * stays race-safe against peers doing the same.
+ *
+ * The lapsed holder's unfinished bulk batches are failed after the claim, by the adoption handler
+ * BulkMessageService registers with SessionOwnershipService, the same as for an explicit POST
+ * /start, so the sweep only starts sessions.
+ */
+@Injectable()
+export class SessionTakeoverService implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = createLogger('SessionTakeoverService');
+  private sweepTimer?: ReturnType<typeof setInterval>;
+  private sweepInFlight = false;
+  /**
+   * Set by onModuleDestroy. Clearing the interval stops the NEXT sweep; it does nothing about one
+   * already running, which is neither aborted nor awaited. Without this signal a sweep mid-flight
+   * during a rolling restart could construct and register an engine after the shutdown path had
+   * already emptied the registry — nothing would tear it down — and claim the ownership lease for a
+   * process about to exit, pinning the session to a dead node until the lease lapsed.
+   */
+  private shuttingDown = false;
+
+  constructor(
+    private readonly sessionService: SessionService,
+    private readonly ownership: SessionOwnershipService,
+    @Optional()
+    private readonly configService?: ConfigService,
+    // The drain signal, not module destruction. `onModuleDestroy` runs at app.close(), AFTER the
+    // bounded shutdown delay — throughout that window the timer is still armed, so without this a
+    // tick could launch an engine and claim an ownership lease for a process about to exit. Same
+    // source session-engine-lifecycle and the liveness watchdog already consult.
+    @Optional()
+    private readonly shutdownService?: ShutdownService,
+  ) {}
+
+  /** True once EITHER the drain has begun or Nest has torn this module down. */
+  private get stopping(): boolean {
+    return this.shuttingDown || this.shutdownService?.isShuttingDown() === true;
+  }
+
+  onApplicationBootstrap(): void {
+    // Deliberately NOT gated on auto-start any more. The sweep now has a second job that starts
+    // nothing: correcting a status whose owner is gone. Nothing else revisits one, because the boot
+    // reset skips a foreign claim that is still live and after a container recreate the previous
+    // hostname IS foreign, so with auto-start off the row went on reporting a running engine no
+    // process holds. The adopt loop below is still behind the flag: an operator who disabled
+    // auto-start asked for no spontaneous engine starts, not for a dashboard that lies.
+    const sweepMs = this.configService?.get<number>('session.takeoverSweepMs', 30_000) ?? 30_000;
+    this.sweepTimer = setInterval(() => {
+      // At most one sweep at a time: a slow start (Chromium launch) must not stack a second sweep
+      // on top of the first — the claim would refuse, but the log noise and DB churn are pointless.
+      if (this.sweepInFlight) return;
+      this.sweepInFlight = true;
+      void this.sweep()
+        .catch(error =>
+          this.logger.warn('Takeover sweep failed', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        )
+        .finally(() => {
+          this.sweepInFlight = false;
+        });
+    }, sweepMs);
+    this.sweepTimer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    this.shuttingDown = true;
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = undefined;
+    }
+  }
+
+  /**
+   * One pass: correct every stale status a vanished node left behind, then, when AUTO_START_SESSIONS
+   * is on, adopt every eligible lapsed session. Runs on every node whatever that flag says, and a
+   * failed correction is logged without costing the pass its adoptions. Exposed for the spec; the
+   * timer drives it.
+   */
+  async sweep(): Promise<void> {
+    if (this.stopping) return;
+    const lapsed = await this.ownership.lapsedHeldByOthers();
+
+    // Correct the stale statuses BEFORE adopting: a row this pass goes on to start gets its
+    // INITIALIZING written by start() afterwards, so the correction can never land on a live engine.
+    // Idempotent, because DISCONNECTED is not one of the statuses it acts on. A failure leaves no
+    // write pending, so the adopt loop still runs; the next pass retries the correction.
+    const goneBefore = new Date(Date.now() - this.ownership.leaseTtlMs * STRANDED_LEASE_TTL_MULTIPLE);
+    try {
+      await this.sessionService.markLapsedDisconnected(lapsed, goneBefore);
+    } catch (error) {
+      this.logger.warn('Lapsed session status correction failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    if (!resolveFeatureFlags(this.configService).autoStartSessions) return;
+    const eligible = lapsed.filter(session => this.isEligible(session));
+    if (eligible.length === 0) return;
+
+    for (let i = 0; i < eligible.length; i++) {
+      const session = eligible[i];
+      // Re-checked per iteration, not just at entry: each adoption costs a browser launch plus a
+      // stagger, so the loop spans a large part of the sweep interval and shutdown can begin partway
+      // through. Everything already adopted is left to the normal teardown; nothing further starts.
+      if (this.stopping) return;
+      // start() refuses at the cap without touching the lease, so stopping here only saves a refused
+      // launch per remaining row; the lease stays where a peer with room adopts it.
+      if (!this.hasStartCapacity()) {
+        this.logger.debug('Takeover paused: this node is at MAX_CONCURRENT_SESSIONS', {
+          pending: eligible.length - i,
+        });
+        return;
+      }
+      try {
+        await this.sessionService.start(session.id);
+        this.logger.log(`Adopted session ${session.name} from lapsed node ${session.nodeId ?? '?'}`, {
+          sessionId: session.id,
+          fromNode: session.nodeId,
+          action: 'session_takeover',
+        });
+      } catch (error) {
+        if (error instanceof SessionStoppedException) {
+          // Stopped between the sweep's read and this start; the start refused it, as it should.
+          this.logger.debug(`Session ${session.name} skipped: stopped by an operator`, { sessionId: session.id });
+        } else if (error instanceof ServerShuttingDownException) {
+          // Shutdown began while this start was in flight; the session is left for a peer or the next boot.
+          this.logger.debug(`Takeover of session ${session.name} abandoned: shutting down`, { sessionId: session.id });
+          return;
+        } else if (error instanceof ConflictException) {
+          // A peer won the race — exactly the claim doing its job.
+          this.logger.debug(`Session ${session.name} was adopted by another node first`, { sessionId: session.id });
+        } else {
+          this.logger.warn(`Takeover start failed for session ${session.name}`, {
+            sessionId: session.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      if (i < eligible.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, TAKEOVER_START_STAGGER_MS));
+      }
+    }
+  }
+
+  /** The same count the start path's MAX_CONCURRENT_SESSIONS check uses. */
+  private hasStartCapacity(): boolean {
+    const max = resolveMaxConcurrentSessions(this.configService);
+    return max === null || this.sessionService.hasStartCapacity(max);
+  }
+
+  private isEligible(session: Session): boolean {
+    // Only authenticated sessions (phone set): an engine is worth relaunching exactly when the
+    // saved credentials can restore the link without a human scanning anything. A session an
+    // operator stopped, or whose delete failed part-way, stays down until an explicit start, wherever
+    // its claim lapsed.
+    return Boolean(session.phone) && TAKEOVER_STATUSES.has(session.status) && !session.desiredState;
+  }
+}

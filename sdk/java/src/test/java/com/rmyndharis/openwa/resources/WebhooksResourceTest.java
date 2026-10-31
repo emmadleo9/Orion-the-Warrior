@@ -1,0 +1,171 @@
+package com.rmyndharis.openwa.resources;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.rmyndharis.openwa.ClientConfig;
+import com.rmyndharis.openwa.OpenWAClient;
+import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.CreateWebhookRequest;
+import com.rmyndharis.openwa.model.RedriveWebhookDeliveriesRequest;
+import com.rmyndharis.openwa.model.UpdateWebhookRequest;
+import com.rmyndharis.openwa.model.WebhookEvent;
+import com.rmyndharis.openwa.model.WebhookFilterCondition;
+import com.rmyndharis.openwa.model.WebhookFilters;
+import com.rmyndharis.openwa.model.WebhookRedriveResult;
+import com.rmyndharis.openwa.model.WebhookDeliveryFailure;
+import com.rmyndharis.openwa.support.MockTransport;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class WebhooksResourceTest {
+    static final String WEBHOOK_JSON =
+        "{\"id\":\"w1\",\"sessionId\":\"s\",\"url\":\"http://x\",\"events\":[\"message.received\"],"
+            + "\"active\":true,\"retryCount\":3,\"lastTriggeredAt\":null,\"createdAt\":\"t\",\"updatedAt\":\"t\"}";
+
+    final MockTransport tx = new MockTransport();
+    final OpenWAClient client = new OpenWAClient(
+        ClientConfig.builder().baseUrl("http://h").apiKey("k").transport(tx).build());
+
+    @Test
+    void deliveryFailurePreservesThePreviousConstructor() {
+        WebhookDeliveryFailure row = new WebhookDeliveryFailure(
+            "id", "webhook", "session", "message.received", "https://example.test",
+            "key", "delivery", 1, 503, "unavailable", "2026-10-05T00:00:00Z");
+        assertEquals("id", row.id());
+        assertEquals(false, row.replayable());
+    }
+
+    @Test
+    void redriveDeliveryFailuresPostsTheFilterOrAnEmptyBody() {
+        String result =
+            "{\"redriven\":1,\"delivered\":1,\"enqueued\":0,\"failed\":0,\"skipped\":0,\"remaining\":3}";
+        tx.respond(200, result);
+        WebhookRedriveResult out =
+            client.webhooks.redriveDeliveryFailures(
+                RedriveWebhookDeliveriesRequest.builder().sessionId("s").limit(10).build());
+        assertEquals("http://h/api/webhooks/delivery-failures/redrive", tx.lastRequest().url());
+        assertEquals(HttpMethod.POST, tx.lastRequest().method());
+        assertEquals("{\"sessionId\":\"s\",\"limit\":10}", tx.lastRequest().body());
+        assertEquals(3, out.remaining());
+        tx.respond(200, result);
+        client.webhooks.redriveDeliveryFailures(null);
+        assertEquals("{}", tx.lastRequest().body());
+    }
+
+    @Test
+    void redriveDeliveryFailuresKeepsAnExplicitEmptyIdsList() {
+        // The gateway reads ids: [] as "replay nothing" and an omitted ids as "replay up to 100 rows".
+        tx.respond(200, "{\"redriven\":0,\"delivered\":0,\"enqueued\":0,\"failed\":0,\"skipped\":0,\"remaining\":3}");
+        client.webhooks.redriveDeliveryFailures(RedriveWebhookDeliveriesRequest.builder().ids(List.of()).build());
+        assertEquals("{\"ids\":[]}", tx.lastRequest().body());
+    }
+
+    @Test
+    void listHitsWebhooksRoot() {
+        tx.respond(200, "[]");
+        client.webhooks.list("s");
+        assertEquals("http://h/api/sessions/s/webhooks", tx.lastRequest().url());
+        assertEquals(HttpMethod.GET, tx.lastRequest().method());
+    }
+
+    @Test
+    void getEncodesIds() {
+        tx.respond(200, WEBHOOK_JSON);
+        client.webhooks.get("a/b", "w/1");
+        assertEquals("http://h/api/sessions/a%2Fb/webhooks/w%2F1", tx.lastRequest().url());
+        assertEquals(HttpMethod.GET, tx.lastRequest().method());
+    }
+
+    @Test
+    void createSendsBody() {
+        tx.respond(200, WEBHOOK_JSON);
+        client.webhooks.create(
+            "s",
+            CreateWebhookRequest.builder()
+                .url("https://example.test/hook")
+                .events(List.of(WebhookEvent.MESSAGE_RECEIVED))
+                .retryCount(5)
+                .build());
+        assertEquals("http://h/api/sessions/s/webhooks", tx.lastRequest().url());
+        assertEquals(HttpMethod.POST, tx.lastRequest().method());
+        assertTrue(tx.lastRequest().body().contains("https://example.test/hook"));
+        assertTrue(tx.lastRequest().body().contains("message.received"));
+    }
+
+    @Test
+    void updateSendsBodyAndEncodesId() {
+        tx.respond(200, WEBHOOK_JSON);
+        client.webhooks.update("s", "w/1", UpdateWebhookRequest.builder().active(false).build());
+        assertEquals("http://h/api/sessions/s/webhooks/w%2F1", tx.lastRequest().url());
+        assertEquals(HttpMethod.PUT, tx.lastRequest().method());
+        assertTrue(tx.lastRequest().body().contains("\"active\":false"));
+    }
+
+    @Test
+    void updateClearsFiltersWithAnEmptyListAndLeavesThemOnNull() {
+        // The documented way to remove every filter: null fields are omitted, so filters(null)
+        // cannot clear them.
+        tx.respond(200, WEBHOOK_JSON);
+        client.webhooks.update("s", "w1", UpdateWebhookRequest.builder().filters(new WebhookFilters(List.of())).build());
+        assertEquals("{\"filters\":{\"conditions\":[]}}", tx.lastRequest().body());
+        tx.respond(200, WEBHOOK_JSON);
+        client.webhooks.update("s", "w1", UpdateWebhookRequest.builder().filters(null).build());
+        assertEquals("{}", tx.lastRequest().body());
+    }
+
+    @Test
+    void deleteHitsWebhookPath() {
+        tx.respond(204, "");
+        client.webhooks.delete("s", "w1");
+        assertEquals("http://h/api/sessions/s/webhooks/w1", tx.lastRequest().url());
+        assertEquals(HttpMethod.DELETE, tx.lastRequest().method());
+    }
+
+    @Test
+    void testHitsTestPath() {
+        tx.respond(200, "{\"success\":true,\"statusCode\":200}");
+        client.webhooks.test("s", "w1");
+        assertEquals("http://h/api/sessions/s/webhooks/w1/test", tx.lastRequest().url());
+        assertEquals(HttpMethod.POST, tx.lastRequest().method());
+    }
+
+    @Test
+    void createSerializesNewEventTypes() {
+        tx.respond(200, WEBHOOK_JSON);
+        client.webhooks.create(
+            "s",
+            CreateWebhookRequest.builder()
+                .url("https://example.test/hook")
+                .events(List.of(
+                    WebhookEvent.GROUP_JOIN, WebhookEvent.GROUP_LEAVE, WebhookEvent.GROUP_UPDATE,
+                    WebhookEvent.CALL_RECEIVED))
+                .build());
+        assertTrue(tx.lastRequest().body().contains("group.join"));
+        assertTrue(tx.lastRequest().body().contains("group.leave"));
+        assertTrue(tx.lastRequest().body().contains("group.update"));
+        assertTrue(tx.lastRequest().body().contains("call.received"));
+    }
+
+    @Test
+    void createSerializesPolymorphicFilterValues() {
+        tx.respond(200, WEBHOOK_JSON);
+        // The filter value is polymorphic on the wire: string list (id/enum
+        // fields), single string (text fields, optionally caseSensitive), and
+        // boolean (boolean fields).
+        client.webhooks.create(
+            "s",
+            CreateWebhookRequest.builder()
+                .url("https://example.test/hook")
+                .filters(new WebhookFilters(List.of(
+                    new WebhookFilterCondition("sender", "is", List.of("123@c.us")),
+                    new WebhookFilterCondition("body", "contains", "invoice", true),
+                    new WebhookFilterCondition("isGroup", "is", false, null))))
+                .build());
+        String body = tx.lastRequest().body();
+        assertTrue(body.contains("\"value\":[\"123@c.us\"]"), body);
+        assertTrue(body.contains("\"value\":\"invoice\""), body);
+        assertTrue(body.contains("\"caseSensitive\":true"), body);
+        assertTrue(body.contains("\"value\":false"), body);
+    }
+}

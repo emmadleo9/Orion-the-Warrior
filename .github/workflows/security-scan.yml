@@ -1,0 +1,179 @@
+name: Scheduled Security Scan
+
+# The PR and tag paths gate every change against the advisories known at merge time, but a newly
+# published advisory burns silently until the next push or dependabot PR — nothing re-runs
+# `npm audit` or the image scan in between. This workflow gives both a run of their own: weekly
+# (and on demand) it re-runs the exact gates CI already uses, against the current dependency trees
+# and the PUBLISHED image, so a fresh CVE in a shipped layer (chromium, the Debian base, the
+# bundled npm CLI) turns something red within days instead of at the next release.
+#
+# Scheduled runs execute on the default branch only. workflow_dispatch exists for on-demand runs —
+# note a workflow is dispatchable only once its file exists on the default branch, so the first
+# live run necessarily happens post-merge.
+
+on:
+  schedule:
+    # Wednesdays 03:00 UTC — offset from Monday's dependabot npm wave so the scan sees the
+    # dependency graph as it stands AFTER the weekly updates, not mid-churn.
+    - cron: '0 3 * * 3'
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan
+  cancel-in-progress: false
+
+jobs:
+  # Mirrors the ci.yml `audit` job step for step, with one difference: an audit npm cannot answer
+  # fails here (CHECK_AUDIT_REQUIRED=1) instead of skipping, because this job exists to detect
+  # advisories.
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          # Both trees are installed below, so both lockfiles belong in the cache key.
+          cache-dependency-path: |
+            package-lock.json
+            dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Security audit
+        # check:audit, not bare `npm audit`: the per-advisory allowlist in scripts/check-audit.mjs
+        # applies, so an advisory already excused by id (with its recorded reason and drop
+        # condition) does not fire a false weekly alarm. Required here: this job exists to detect
+        # advisories, and a skipped audit would report the whole week clean.
+        env:
+          CHECK_AUDIT_REQUIRED: '1'
+        run: npm run check:audit
+
+      # The dashboard is a second dependency tree and the one that reaches a browser; same
+      # rationale as the ci.yml audit job.
+      - name: Install dashboard dependencies
+        run: cd dashboard && npm ci
+
+      - name: Security audit (dashboard)
+        run: cd dashboard && npm audit --audit-level=high
+
+      # Audited from its lockfile alone; same rationale as the ci.yml audit job.
+      - name: Security audit (JavaScript SDK)
+        run: cd sdk/javascript && npm audit --audit-level=high
+
+  # Dependabot proposes refreshed node:22-slim digests, yet the pin has trailed the tag for weeks
+  # (a refresh that is late or left unmerged), and a stale base ages silently: Node patch releases
+  # and Debian fixes that the image scan below does not flag (medium/low, or not yet fixed upstream)
+  # stay out. This compares the pin with what the tag serves today. The tag can sit unchanged for
+  # weeks, so the pin's age alone cannot tell a late refresh from a tag that moved yesterday: the
+  # run fails only once the tag has served the newer image for 7 days (a Monday Dependabot run has
+  # seen it), or once the pin is 28 days old and the tag has served the newer image for 3 days (the
+  # Wednesday scan then follows a Monday run that saw it). The first move after a quiet month still
+  # gets its Monday run, and a tag that keeps moving holds a stale pin only while every move lands
+  # in the three days before a scan.
+  base-image-drift:
+    name: Base image drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The pin's age comes from git history; a shallow clone would date every pin to today.
+          fetch-depth: 0
+
+      - name: Compare the Dockerfile pin with node:22-slim
+        run: |
+          pins=$(grep -oE 'node:22-slim@sha256:[0-9a-f]{64}' Dockerfile | sort -u)
+          if [ "$(printf '%s\n' "$pins" | grep -c .)" -ne 1 ]; then
+            echo "::error file=Dockerfile::expected one node:22-slim digest shared by both stages, found: ${pins:-none}"
+            exit 1
+          fi
+          pinned=${pins#node:22-slim@}
+          # A registry outage or rate limit is not drift.
+          if ! live=$(docker buildx imagetools inspect docker.io/node:22-slim --format '{{.Manifest.Digest}}'); then
+            echo "::warning::could not resolve docker.io/node:22-slim; drift not checked this run"
+            exit 0
+          fi
+          if [ "$pinned" = "$live" ]; then
+            echo "node:22-slim pin is current: $pinned"
+            exit 0
+          fi
+          # The live image's build time stands in for when the tag moved; the push follows it by minutes.
+          if ! created=$(docker buildx imagetools inspect docker.io/node:22-slim --format '{{json .Image}}' |
+            jq -er '.["linux/amd64"].created | sub("\\.[0-9]+"; "") | fromdateiso8601'); then
+            echo "::warning::could not read when node:22-slim $live was built; drift not checked this run"
+            exit 0
+          fi
+          live_days=$(( ($(date +%s) - created) / 86400 ))
+          age_days=$(( ($(date +%s) - $(git log -1 --format=%ct -G 'node:22-slim@sha256' -- Dockerfile)) / 86400 ))
+          if [ "$live_days" -lt 7 ] && { [ "$age_days" -lt 28 ] || [ "$live_days" -lt 3 ]; }; then
+            echo "::notice::node:22-slim moved to $live $live_days day(s) ago; the $age_days-day-old pin $pinned is inside the grace"
+            exit 0
+          fi
+          echo "::error file=Dockerfile::node:22-slim pin $pinned is $age_days days old and the tag now serves $live; refresh both FROM lines"
+          exit 1
+
+  # Mirrors the release.yml `image-scan` job, minus the staging ref: this scans the image the
+  # release pipeline actually promoted, on both architectures.
+  image-scan:
+    name: Image scan (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      # Needed for .trivyignore: the scan reads the image from the registry, but the ignore file
+      # is repo state and trivy-action resolves it from the workspace — without a checkout the
+      # file simply is not there and every entry is silently inert.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve published image ref
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        # `latest` moves only through the release workflow's promote step (never the CI build), so
+        # this always scans an image boot-smoke proved on both architectures. Bash ${VAR,,}
+        # lowercases — GHCR paths are lowercase and github.repository may not be.
+        run: echo "ref=ghcr.io/${REPO,,}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # trivy reads TRIVY_PLATFORM for its --platform flag. Scanning is static (it reads the
+          # image layers, it does not run the image), so no QEMU is needed to inspect the arm64
+          # variant of the manifest — only a pull, which the GHCR login above authorizes.
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          # Explicit rather than implicit: each entry in .trivyignore carries a written
+          # justification and a condition for removing it.
+          trivyignores: .trivyignore

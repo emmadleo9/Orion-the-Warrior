@@ -1,0 +1,159 @@
+import { Injectable, NestMiddleware, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Request, Response, NextFunction } from 'express';
+import { AuthService, UnresolvedApiKeyException } from '../../modules/auth/auth.service';
+import { ApiKeyRole } from '../../modules/auth/entities/api-key.entity';
+import { AuditService } from '../../modules/audit/audit.service';
+import { AuditAction } from '../../modules/audit/entities/audit-log.entity';
+import { allowUnauthenticatedAuditRow } from '../../modules/audit/auth-failure-audit-limiter';
+import { KeyRateLimiter, readIpRateLimitConfig } from '../../modules/mcp/mcp-rate-limit';
+import { limiterKeyForIp, resolveClientIp } from '../utils/ip';
+import { presentedApiKey } from './bearer-token';
+import { setRequestActor } from '../services/request-context';
+
+/**
+ * Protects the Bull Board UI (/admin/queues).
+ *
+ * Bull Board is mounted as raw Express middleware by @bull-board/nestjs, so the
+ * global ApiKeyGuard — which only runs on Nest controller handlers — does not
+ * cover it. This middleware requires a valid ADMIN-role API key, supplied via
+ * the X-API-Key header or an Authorization: Bearer token.
+ *
+ * The ?apiKey query-string fallback was removed: an ADMIN key in the
+ * URL leaks into proxy/access logs, browser history, bookmarks, and the Referer header.
+ *
+ * A pre-auth per-IP throttle (mirroring the MCP mount's createIpThrottle) bounds a credential-probing
+ * flood BEFORE it reaches the validateApiKey DB lookup. It uses the same KeyRateLimiter + IP-rate-limit
+ * settings as MCP, so the two raw-Express mounts share one generous pre-auth IP-flood policy.
+ *
+ * Audit trail at this boundary (the Nest guard cannot see this mount):
+ *  - 401/403 rejections are recorded as WARN API_KEY_AUTH_FAILED, mirroring the REST guard and the
+ *    MCP mount. The pre-auth IP throttle above is the flood bound — a throttled 429 is NOT audited,
+ *    so a probing flood cannot drown the audit table either.
+ *    A 401 row also draws on a per-IP budget shared with the REST guard (auth-failure-audit-limiter).
+ *  - An authenticated non-GET/HEAD request is recorded as INFO QUEUE_BOARD_MUTATED with method+path.
+ *    This is a boundary trace of queue-mutation attempts reaching the Bull Board router (the UI's
+ *    retry/remove/pause actions are POSTs); it deliberately does NOT model Bull Board's internal
+ *    per-action outcomes, which are invisible from middleware.
+ * Session-restricted keys are refused outright: the board is deployment-global, so a key confined to
+ * a subset of sessions has no scope to enforce against it.
+ * Both are fire-and-forget: audit logging is best-effort and must never affect the auth decision.
+ */
+@Injectable()
+export class BullBoardAuthMiddleware implements NestMiddleware {
+  private readonly ipRateLimiter: KeyRateLimiter;
+
+  constructor(
+    private readonly authService: AuthService,
+    private readonly configService: ConfigService,
+    private readonly auditService?: AuditService,
+    ipRateLimiter?: KeyRateLimiter,
+  ) {
+    // Default to MCP's pre-auth per-IP policy (max 120 / 60s) when not supplied. Tests inject a tight
+    // limiter; production (instantiated manually in main.ts) takes the default.
+    this.ipRateLimiter = ipRateLimiter ?? BullBoardAuthMiddleware.createDefaultIpLimiter();
+  }
+
+  private static createDefaultIpLimiter(): KeyRateLimiter {
+    const { max, windowMs } = readIpRateLimitConfig();
+    return new KeyRateLimiter(max, windowMs);
+  }
+
+  async use(req: Request, _res: Response, next: NextFunction): Promise<void> {
+    try {
+      const clientIp = this.getClientIp(req);
+      // Pre-auth, per-IP throttle — runs BEFORE the credential check so a login-attempt flood is rejected
+      // before the DB lookup. Mirrors MCP's createIpThrottle. Throws HttpException(429) when exceeded;
+      // forwarded to Nest's exception layer below as a standard 429.
+      this.ipRateLimiter.check(limiterKeyForIp(clientIp));
+
+      const rawKey = this.extractKey(req);
+      if (!rawKey) {
+        throw new UnresolvedApiKeyException('API key is required to access the queue dashboard');
+      }
+
+      const apiKey = await this.authService.validateApiKey(rawKey, clientIp);
+
+      // Stamp the resolved actor before the two authorization checks below, matching ApiKeyGuard.
+      // Both of those throw, and the catch that audits the denial cannot see `apiKey` — it is a const
+      // inside this try. Without the stamp, a denial on the most privileged UI in the deployment was
+      // recorded against an IP alone, so the operator could not tell which key had tried to reach the
+      // queue dashboard without ADMIN, or which confined key had tried to escape its session fence.
+      // This mount runs inside the request-context scope (requestContextMiddleware is installed
+      // ahead of it in main.ts), so the stamp reaches AuditService.
+      setRequestActor({ apiKeyId: apiKey.id, apiKeyName: apiKey.name, ipAddress: clientIp });
+
+      if (!this.authService.hasPermission(apiKey, ApiKeyRole.ADMIN)) {
+        throw new ForbiddenException('Admin role required to access the queue dashboard');
+      }
+
+      // The board shows and mutates every queue in the deployment, and carries no session dimension
+      // to scope against. validateApiKey above is called without a session id, so a key restricted to
+      // specific sessions passes its scope check by default — reject it here instead. This mirrors
+      // @RequireUnscopedKey on the REST surface, which cannot reach this raw-Express mount.
+      if ((apiKey.allowedSessions?.length ?? 0) > 0) {
+        throw new ForbiddenException('API keys restricted to specific sessions cannot access the queue dashboard');
+      }
+
+      // A key restricted to selected chats is refused here too. This mount is the third surface
+      // outside ApiKeyGuard (beside /events and the MCP mount), and the board shows and mutates the
+      // webhook job queue, whose payloads carry every chat's events — so it has no chat dimension to
+      // scope against and must refuse such a key outright.
+      if ((apiKey.allowedChats?.length ?? 0) > 0) {
+        throw new ForbiddenException('API keys restricted to selected chats cannot access the queue dashboard');
+      }
+
+      // Boundary trace of queue-mutation attempts. GET/HEAD are the UI's read/poll traffic; every
+      // other method reaching the Bull Board router mutates queue state, so record it with the
+      // authenticated key, the resolved client IP, and the method + full path (no query string).
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        void this.auditService?.logInfo(AuditAction.QUEUE_BOARD_MUTATED, {
+          apiKey,
+          ipAddress: clientIp,
+          method: req.method,
+          path: this.auditPath(req),
+        });
+      }
+
+      next();
+    } catch (err) {
+      // Audit the rejected/denied attempt for a forensic trail, like the REST guard and the MCP
+      // mount do. A throttle overrun (HttpException 429) is deliberately NOT audited: the limiter
+      // already rejected it, and logging each throttled hit would let a flood write unbounded rows.
+      // A 401 that resolved no key draws on the per-IP budget it shares with the REST guard; any
+      // rejection of a stored key, 401 or 403, is always recorded.
+      if (this.auditService && (err instanceof UnauthorizedException || err instanceof ForbiddenException)) {
+        const clientIp = this.getClientIp(req);
+        if (!(err instanceof UnresolvedApiKeyException) || allowUnauthenticatedAuditRow(clientIp)) {
+          void this.auditService.logWarn(AuditAction.API_KEY_AUTH_FAILED, {
+            ipAddress: clientIp,
+            method: req.method,
+            path: this.auditPath(req),
+            errorMessage: err.message,
+          });
+        }
+      }
+      // Forward to Nest's exception layer so the response uses the standard format. A throttle overrun
+      // surfaces here as an HttpException(429) → rendered as a standard 429 by the global exception filter.
+      next(err);
+    }
+  }
+
+  /** Full request path (mount prefix included) with any query string stripped. */
+  private auditPath(req: Request): string {
+    const url = req.originalUrl ?? req.url ?? '';
+    return url.split('?')[0];
+  }
+
+  private extractKey(req: Request): string | undefined {
+    // No ?apiKey query fallback — an admin key in the URL leaks into logs/history.
+    return presentedApiKey(req.headers);
+  }
+
+  private getClientIp(req: Request): string {
+    // Mirror the ApiKeyGuard's IP model so allowedIps is enforced consistently for the queue UI:
+    // X-Forwarded-For is honored only behind a configured trusted proxy.
+    const trustedProxies = this.configService.get<string[]>('security.trustedProxies') ?? [];
+    return resolveClientIp(req, trustedProxies);
+  }
+}

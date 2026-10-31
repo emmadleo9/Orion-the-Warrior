@@ -1,0 +1,151 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication } from '@nestjs/common';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import request from 'supertest';
+import { App } from 'supertest/types';
+import { AppModule } from './../src/app.module';
+import { applyGlobalValidation } from './../src/config/app-validation';
+import { requestContextMiddleware } from './../src/common/middleware/request-context.middleware';
+import { AuthService } from './../src/modules/auth/auth.service';
+import { ApiKeyRole } from './../src/modules/auth/entities/api-key.entity';
+import { Session } from './../src/modules/session/entities/session.entity';
+import { AuditAction, AuditLog } from './../src/modules/audit/entities/audit-log.entity';
+
+/**
+ * Cross-session aggregates, environment-derived settings, and session creation all act outside any
+ * single session, so the guard's route-param fence cannot scope them. A key restricted to specific
+ * sessions must not read deployment-wide activity, read server configuration, or create sessions
+ * outside its own allowlist.
+ */
+describe('Global read and create routes reject session-scoped keys (e2e)', () => {
+  let app: INestApplication<App>;
+  let scopedAdminKey: string; // ADMIN, allowedSessions: [sessA]
+  let scopedAdminKeyId: string;
+  let scopedOperatorKey: string; // OPERATOR, allowedSessions: [sessA]
+  let adminKey: string; // ADMIN, unrestricted
+  let scopedSessionId: string; // the session the scoped keys are confined to
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleFixture.createNestApplication();
+    applyGlobalValidation(app);
+    // Installed by configureApp in production; audit rows take their key from this context.
+    app.use(requestContextMiddleware);
+    await app.init();
+
+    const sessionRepo: Repository<Session> = app.get(getRepositoryToken(Session, 'data'));
+    const a = await sessionRepo.save(sessionRepo.create({ name: `e2e-global-scope-${Date.now()}` }));
+    scopedSessionId = a.id;
+
+    const authService = app.get(AuthService);
+    const scoped = await authService.createApiKey({
+      name: 'e2e-global-scoped',
+      role: ApiKeyRole.ADMIN,
+      allowedSessions: [a.id],
+    });
+    scopedAdminKey = scoped.rawKey;
+    scopedAdminKeyId = scoped.apiKey.id;
+    scopedOperatorKey = (
+      await authService.createApiKey({ name: 'e2e-global-op', role: ApiKeyRole.OPERATOR, allowedSessions: [a.id] })
+    ).rawKey;
+    adminKey = (await authService.createApiKey({ name: 'e2e-global-admin', role: ApiKeyRole.ADMIN })).rawKey;
+  });
+
+  afterAll(async () => {
+    try {
+      await app?.close();
+    } catch {
+      /* ignore teardown-only multi-datasource quirk */
+    }
+  });
+
+  it('rejects a scoped ADMIN on GET /api/stats/overview', async () => {
+    await request(app.getHttpServer()).get('/api/stats/overview').set('X-API-Key', scopedAdminKey).expect(403);
+  });
+
+  it('rejects a scoped ADMIN on GET /api/stats/messages', async () => {
+    await request(app.getHttpServer()).get('/api/stats/messages').set('X-API-Key', scopedAdminKey).expect(403);
+  });
+
+  it('rejects a scoped ADMIN on GET /api/settings', async () => {
+    await request(app.getHttpServer()).get('/api/settings').set('X-API-Key', scopedAdminKey).expect(403);
+  });
+
+  it('rejects a scoped ADMIN on POST /api/sessions', async () => {
+    await request(app.getHttpServer())
+      .post('/api/sessions')
+      .set('X-API-Key', scopedAdminKey)
+      .send({ name: `e2e-escape-admin-${Date.now()}` })
+      .expect(403);
+  });
+
+  it('rejects a scoped OPERATOR on POST /api/sessions (cannot create outside its allowlist)', async () => {
+    await request(app.getHttpServer())
+      .post('/api/sessions')
+      .set('X-API-Key', scopedOperatorKey)
+      .send({ name: `e2e-escape-operator-${Date.now()}` })
+      .expect(403);
+  });
+
+  it('lets an unrestricted key reach the global stats overview', async () => {
+    // Control: the fence rejects scoped keys on this route but must not hinder an unrestricted one.
+    const res = await request(app.getHttpServer()).get('/api/stats/overview').set('X-API-Key', adminKey);
+    expect(res.status).toBe(200);
+  });
+
+  it('lets a session-scoped key reach per-session stats for its own session', async () => {
+    // The per-session route carries no fence — its :sessionId route param is the scope. Pin that the
+    // global-route fencing above does not over-reach onto it.
+    const res = await request(app.getHttpServer())
+      .get(`/api/stats/sessions/${scopedSessionId}`)
+      .set('X-API-Key', scopedAdminKey);
+    expect(res.status).toBe(200);
+  });
+
+  it('counts only its own sessions for a scoped key on GET /api/sessions/stats/overview', async () => {
+    // The route names no :sessionId, so the guard cannot scope it: the key's allowlist handed to the
+    // service is the only thing keeping the gateway-wide totals from a scoped key. A session outside the
+    // allowlist makes the two answers differ; the control proves it is really counted.
+    const sessionRepo: Repository<Session> = app.get(getRepositoryToken(Session, 'data'));
+    await sessionRepo.save(sessionRepo.create({ name: `e2e-global-scope-stats-${Date.now()}` }));
+    const overview = (key: string) =>
+      request(app.getHttpServer())
+        .get('/api/sessions/stats/overview')
+        .set('X-API-Key', key)
+        .expect(200)
+        .then(res => res.body as { total: number; byStatus: Record<string, number> });
+
+    expect(await overview(scopedOperatorKey)).toMatchObject({ total: 1, byStatus: { created: 1 } });
+    expect((await overview(adminKey)).total).toBeGreaterThanOrEqual(2);
+  });
+
+  it('denies a session-scoped key per-session stats for a session outside its scope', async () => {
+    // The param-scope check refuses a live key, so it answers 403 like the fence above, and the audit
+    // row names the key that was refused.
+    const sessionRepo: Repository<Session> = app.get(getRepositoryToken(Session, 'data'));
+    const other = await sessionRepo.save(sessionRepo.create({ name: `e2e-global-scope-other-${Date.now()}` }));
+    const res = await request(app.getHttpServer())
+      .get(`/api/stats/sessions/${other.id}`)
+      .set('X-API-Key', scopedAdminKey)
+      .expect(403);
+    expect((res.body as { message: string }).message).toBe('API key not authorized for this session');
+
+    const auditRepo: Repository<AuditLog> = app.get(getRepositoryToken(AuditLog, 'main'));
+    const path = `/api/stats/sessions/${other.id}`;
+    let row: AuditLog | null = null;
+    for (let i = 0; i < 50 && !row; i++) {
+      row = await auditRepo.findOne({ where: { action: AuditAction.API_KEY_AUTH_FAILED, path } });
+      if (!row) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(row?.apiKeyId).toBe(scopedAdminKeyId);
+  });
+
+  it('leaves an unrestricted ADMIN able to create a session', async () => {
+    await request(app.getHttpServer())
+      .post('/api/sessions')
+      .set('X-API-Key', adminKey)
+      .send({ name: `e2e-global-ok-${Date.now()}` })
+      .expect(201);
+  });
+});

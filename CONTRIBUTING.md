@@ -1,0 +1,133 @@
+# Contributing to OpenWA
+
+Thanks for your interest in improving OpenWA! This guide covers how to get set up, the
+conventions we follow, and how to get a change merged. Contributions of all sizes are
+welcome — bug fixes, features, docs, and tests.
+
+## Project layout
+
+OpenWA is a NestJS (backend) + React/Vite (dashboard) project:
+
+- `src/` — the NestJS API. Feature modules under `src/modules/` (session, message,
+  webhook, queue, audit, settings, infra, …), the WhatsApp engine abstraction under
+  `src/engine/`, and shared utilities under `src/common/`.
+- `dashboard/` — the React dashboard.
+- `docs/` — architecture, API specification, and operational docs.
+
+See `docs/03-system-architecture.md` for the bigger picture.
+
+## Getting started
+
+OpenWA targets **Node.js 22.19 or newer** (`engines.node`).
+
+```bash
+npm ci
+npm run dev   # API on 2785, dashboard (Vite) on 2886
+```
+
+Dashboard dependencies install with the root ones (postinstall). `npm run start:dev` runs the API
+alone. Use `npm install` only when intentionally changing dependencies.
+
+Default storage is SQLite, so no external services are required to run locally.
+
+No `.env` is needed: the first boot writes `data/.env.generated` with these defaults. Create a
+`.env` only to pin values. If you copy `.env.example` for that, change its `NODE_ENV=production`
+to `NODE_ENV=development`, or the dev server runs with production behaviour (no Swagger UI,
+generic validation errors, JSON logs).
+
+## Before opening a pull request
+
+Please make sure these pass locally:
+
+Backend:
+
+```bash
+npm run build               # NestJS build (tsc)
+npx tsc --noEmit            # also type-checks specs, which the build excludes
+npm test                    # unit tests (Jest)
+npm run test:docs           # docs-sync specs, a separate lane `npm test` does not run
+npm run lint                # ESLint
+npm run format              # Prettier (CI runs `format:check`)
+```
+
+Dashboard, where CI runs each of these as its own step:
+
+```bash
+cd dashboard
+npm run lint && npm run format:check && npm run typecheck
+npm run i18n:check && npm run build && npm run test:unit
+```
+
+If you changed a DTO, a route, or an `@ApiResponse`, also run `npm run openapi:export` and
+commit the snapshot, then `npm run openapi:check` and `npm run check:contract-shapes`. The
+hand-written SDK types are compared against the schemas and will fail CI by field name. A new
+route also needs a method in each of the five SDKs and a row in `docs/18-sdk-design.md`, or an
+entry in the unexposed list of `sdk/README.md`, which `npm run check:sdk-routes`,
+`check:sdk-coverage`, `check:sdk-events` and `check:sdk-docs` verify, as CI's lint job does
+with `npm run check:versions`.
+
+- Add or update tests for behavior changes. Backend specs are colocated as `*.spec.ts`
+  and run under Jest; dashboard tests are colocated as `*.test.ts` and run under
+  `node --test`, so a dashboard file named `*.spec.ts` is never executed.
+- Keep each PR focused on one logical change; it makes review (and credit) much easier.
+- Update `docs/` and the `CHANGELOG.md` `[Unreleased]` section when your change is
+  user-visible. (Maintainers own version stamping and release cutting.)
+
+## Conventions
+
+- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/) —
+  `feat(...)`, `fix(...)`, `docs(...)`, `chore(...)`, etc.
+- **Style:** single quotes, 2-space indentation, 120-column width, semicolons — all
+  enforced by Prettier + ESLint. Run `npm run format` before committing.
+- **Types:** explicit types, avoid `any`.
+- **Requests:** validate request bodies with DTOs + `class-validator`.
+- **Errors & logging:** throw NestJS HTTP exceptions; use the project `LoggerService`
+  (`createLogger`) rather than `console.*`.
+- **Database:** changes to the persisted (data) schema need a TypeORM migration under
+  `src/database/migrations/`.
+
+## Scope notes (please read before large PRs)
+
+- The default engine is **whatsapp-web.js**. Some capabilities are engine-limited — for
+  example, interactive **Buttons / List** messages are not supported on whatsapp-web.js,
+  so PRs adding them won't function against the default engine.
+- The **REST API is the public contract**. Please avoid changing response shapes or
+  status codes without opening an issue to discuss first.
+- For substantial architectural changes (new frameworks, large rewrites), please open an
+  issue to align on the approach before investing the work.
+
+## Reporting issues
+
+Use the **Bug report** or **Feature request** issue templates — the structured fields
+(version, deployment, engine, logs, reproduction) make triage much faster. For security
+vulnerabilities, see [`SECURITY.md`](SECURITY.md) — please do **not** open a public issue.
+
+### Issues vs. Discussions — pick the right channel
+
+A large share of opened issues turn out to be configuration, provider, or environment
+questions rather than defects in OpenWA. Routing them correctly upfront saves everyone
+(time to answer, time to triage, cleaner issue history). When in doubt, open a Discussion
+first — it can always be promoted to an Issue if a real defect is confirmed.
+
+| Open an **Issue** (here)                                                 | Open a **Discussion**                                                       |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| Reproducible defect in OpenWA code with clear steps, expected vs. actual | Setup / configuration help ("my proxy doesn't work, how do I configure X?") |
+| Crash, panic, wrong API response, regression after upgrade               | Provider-specific quirks (webshare, IPRoyal, brightdata, Twilio, etc.)      |
+| Documented behavior contradicted by actual behavior                      | "Is X possible?" / "What's the best way to Y?"                              |
+| Security issue (use `SECURITY.md` instead)                               | Hosting-platform / network / firewall questions                             |
+
+When an Issue lands in the gray zone, maintainers will label it `needs-info`,
+`not-a-bug`, or `move-to-discussions`. If after follow-up it turns out to be
+environmental or provider-side, it will be closed and we'll continue in Discussions.
+The full table and label reference live in
+[`docs/20-community-guidelines.md`](docs/20-community-guidelines.md#issue-vs-discussions).
+
+## Code of conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By participating,
+you're expected to uphold it.
+
+## License
+
+By contributing, you agree that your contributions are licensed under the project's
+[MIT License](LICENSE).

@@ -1,0 +1,783 @@
+/**
+ * Plugin System Interfaces
+ * Defines the contract for OpenWA plugins
+ */
+
+import { HookManager, HookEvent, HookHandler } from '../hooks';
+import type { MessageResponseDto } from '../../modules/message/dto';
+import type { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import type { PluginNetRequestInit, PluginNetResponse } from './plugin-net';
+import type { HandoverState } from '../../modules/integration/entities/conversation-mapping.entity';
+import type { WebhookRequest, WebhookResponse, WebhookHandler } from './sandbox/worker-webhooks';
+
+// Re-export the ingress webhook types on the public SDK surface so plugin authors can type their
+// handler without importing from sandbox internals.
+export type { WebhookRequest, WebhookResponse, WebhookHandler };
+
+// ============================================================================
+// Plugin Types
+// ============================================================================
+
+export enum PluginType {
+  ENGINE = 'engine', // WhatsApp engine (whatsapp-web.js, baileys, etc.)
+  STORAGE = 'storage', // Storage backends (local, S3, GCS, etc.)
+  QUEUE = 'queue', // Queue systems (Redis, RabbitMQ, etc.)
+  AUTH = 'auth', // Authentication providers
+  EXTENSION = 'extension', // General extensions (auto-reply, scheduler, etc.)
+}
+
+export enum PluginStatus {
+  INSTALLED = 'installed',
+  ENABLED = 'enabled',
+  DISABLED = 'disabled',
+  ERROR = 'error',
+}
+
+// ============================================================================
+// Plugin Manifest
+// ============================================================================
+
+export interface PluginManifest {
+  id: string; // Unique identifier (e.g., 'whatsapp-web.js', 'auto-reply')
+  name: string; // Display name
+  version: string; // Semver
+  type: PluginType;
+  description?: string;
+  author?: string;
+  homepage?: string;
+  repository?: string;
+  license?: string;
+
+  // Entry point
+  main: string; // Relative path to main file
+
+  // Dependencies
+  dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+
+  // Configuration schema (optional, for UI generation)
+  configSchema?: PluginConfigSchema;
+
+  // Optional sandboxed-iframe config editor. `entry` is a plugin-relative path to a self-contained
+  // HTML file (inline JS/CSS — a sandboxed opaque-origin iframe can't load subresources). Served by
+  // the host via the authenticated GET /plugins/:id/config-ui and injected as an iframe `srcdoc`; the
+  // editor exchanges config over a postMessage bridge (the API key never reaches the iframe). When
+  // present, the dashboard prefers it over the declarative `configSchema` form.
+  configUi?: { entry: string; height?: number };
+
+  // Hooks this plugin listens to
+  hooks?: HookEvent[];
+
+  // Features provided by this plugin
+  provides?: string[];
+
+  // Required features from other plugins
+  requires?: string[];
+
+  // Capability permissions this plugin declares; the loader enforces them at the capability
+  // boundary (see PluginCapabilityPermission). A capability call whose permission is not declared
+  // here is denied with a PluginCapabilityError. Absent / empty = no capability access.
+  permissions?: string[];
+
+  // Session ids this plugin may act on, or ['*']. Absent = ['*'] (all). Enforced by the
+  // capability facade. Static (manifest) by design: editing plugin config cannot widen scope.
+  sessions?: string[];
+
+  // Whether the plugin is scoped to specific sessions (default true). A session-scoped plugin only
+  // receives hook events for the sessions an operator has activated it for (see activeSessions); a
+  // global plugin (false) always runs, with no per-number notion (e.g. a metrics logger).
+  sessionScoped?: boolean;
+
+  // Outbound-HTTP host allowlist for `ctx.net.fetch` (requires the `net:fetch` permission). Each
+  // entry is `host:port` (exact) or a bare `host` (any port); `'*'` allows any public host. Absent /
+  // empty = deny all. `allowConfigHosts` additionally admits the https origin (host and port) of each
+  // named config key (e.g. an operator-set base URL), resolved at fetch time. The SSRF guard still
+  // blocks internal IPs regardless.
+  net?: { allow?: string[]; allowConfigHosts?: string[] };
+
+  // Localized dashboard text (name/description/config field titles) per locale code. English is the
+  // base manifest + fallback. Dashboard-only; does not affect runtime behavior.
+  i18n?: PluginI18n;
+
+  // Integration SDK major.minor the plugin was authored against (e.g. '1' or '1.2'). Only the major
+  // is enforced — see SUPPORTED_SDK_MAJOR / validateIngressManifest. Absent = treated as '1'.
+  sdkVersion?: string;
+
+  // Oldest OpenWA release the plugin runs on (MAJOR.MINOR.PATCH). validatePluginManifest refuses the
+  // plugin at install and at boot load when the running host is older. Absent or null = no floor.
+  minOpenWAVersion?: string | null;
+
+  // Inbound webhook routes this plugin claims (requires the `webhook:ingress` permission). Validated
+  // by validateIngressManifest, which the loader calls on every external plugin load (loadPlugin).
+  // (Built-in registration declares no ingress and bypasses that validation.)
+  ingress?: PluginIngressRoute[];
+}
+
+/** Localized overrides for a plugin's dashboard-facing text, per locale (dashboard i18n). */
+export interface PluginI18nText {
+  title?: string;
+  description?: string;
+}
+export interface PluginI18nLocale {
+  name?: string;
+  description?: string;
+  /** Keyed by a TOP-LEVEL configSchema.properties key; only title/description are localized. */
+  config?: Record<string, PluginI18nText>;
+}
+/** Keyed by a dashboard locale code (e.g. "es", "zh-CN"). Untranslated entries fall back to English. */
+export type PluginI18n = Record<string, PluginI18nLocale>;
+
+/**
+ * One field in a plugin's config schema. Recursive: an `object` field nests `properties`, an `array`
+ * field describes its element with `items` (array-of-rows when `items.type === 'object'`). The host
+ * renders this into an authenticated form; the plugin still reads `ctx.config` defensively.
+ */
+export interface PluginConfigField {
+  // 'textarea' is a string rendered multi-line; a field with `enum` renders as a <select>.
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'textarea';
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[]; // when present (any scalar type), the field renders as a <select>
+  required?: boolean;
+  secret?: boolean; // sensitive (e.g. API key): masked on read, kept on an unchanged write, removed by null
+  // Validation hints, surfaced as HTML input attributes (advisory — not hard-enforced server-side):
+  min?: number; // number: value bound; string/textarea: minLength; array: min rows
+  max?: number; // number: value bound; string/textarea: maxLength; array: max rows
+  pattern?: string; // string/textarea: HTML validation regex
+  // Composite kinds:
+  items?: PluginConfigField; // array element schema; array-of-rows when items.type === 'object'
+  properties?: Record<string, PluginConfigField>; // nested-object fields (type: 'object')
+}
+
+export interface PluginConfigSchema {
+  type: 'object';
+  properties: Record<string, PluginConfigField>;
+}
+
+// ============================================================================
+// Plugin Capability
+// ============================================================================
+
+/**
+ * Capability permissions a plugin declares in its manifest `permissions` and that the loader
+ * enforces at the capability boundary. A plugin may only use a capability whose permission it
+ * declares; an undeclared (or missing-permission) plugin is denied with a PluginCapabilityError.
+ */
+export const PluginCapabilityPermission = {
+  /** `ctx.messages.*` — send / reply on a session. */
+  MESSAGES_SEND: 'messages:send',
+  /** `ctx.engine.*` — read-only engine queries (group info, contacts, chats, number check). */
+  ENGINE_READ: 'engine:read',
+  /** `ctx.net.fetch` — SSRF-guarded outbound HTTP, scoped to the manifest `net.allow` host list. */
+  NET_FETCH: 'net:fetch',
+  /**
+   * `ctx.storage.*` — per-plugin key/value persistence on the host disk (get / set / delete / list).
+   * The per-plugin directory, the key-shape check and the byte quota already bound what a plugin can
+   * reach, so this is a DECLARATION boundary rather than a containment one: without it a manifest
+   * declaring no permissions at all still wrote to disk, and the operator reading that manifest had
+   * no way to see it.
+   */
+  STORAGE_USE: 'storage:use',
+  /** `ctx.registerWebhook` — claim an inbound ingress route. Loader-enforced; cannot be widened by config. */
+  WEBHOOK_INGRESS: 'webhook:ingress',
+  /** `ctx.conversations.send` — normalized outbound send translated to MessageService. */
+  CONVERSATION_SEND: 'conversation:send',
+  /**
+   * `ctx.registerSearchProvider` — serve the gateway's /search queries. Under the default
+   * SEARCH_PROVIDER=auto a registered provider is also made ACTIVE, superseding builtin-fts, so an
+   * undeclared plugin would otherwise see every search query the gateway serves.
+   */
+  SEARCH_PROVIDE: 'search:provide',
+} as const;
+export type PluginCapabilityPermission = (typeof PluginCapabilityPermission)[keyof typeof PluginCapabilityPermission];
+
+// ============================================================================
+// Integration SDK v1 — inbound webhook ingress + normalized outbound send
+// ============================================================================
+
+/** How an inbound webhook's authenticity is established before the plugin sees it. */
+export interface IngressSignatureSpec {
+  /**
+   * - `hmac-sha256`: HMAC over a `contentTemplate` (tokens `{rawBody}`/`{timestamp}`/`{id}`).
+   * - `shared-secret`: constant-time compare of a header value against `instance.secret`.
+   * - `standard-webhooks`: host-side [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks)
+   *   verify. The wire format is fixed by the spec (headers `webhook-id`/`webhook-timestamp`/
+   *   `webhook-signature`, signed content `${webhook-id}.${webhook-timestamp}.${rawBody}`, base64
+   *   HMAC-SHA256 with the base64-decoded Svix key, `v1,` prefix, space-separated candidate list), so
+   *   `header`/`contentTemplate`/`encoding`/`prefix`/`timestampHeader` are IGNORED — only
+   *   `toleranceSec` (falling back to the host default, itself 300) and `dedupHeader` apply. The
+   *   operator pastes the Svix secret (`v1,whsec_<base64>`) as `instance.secret`.
+   */
+  scheme: 'hmac-sha256' | 'shared-secret' | 'standard-webhooks' | 'none';
+  header?: string;
+  // Template over which the HMAC is computed. `{rawBody}` `{timestamp}` `{id}` placeholders.
+  contentTemplate?: string;
+  encoding?: 'hex' | 'base64';
+  prefix?: string;
+  timestampHeader?: string;
+  // Replay window for the declared timestampHeader. When absent, the host default applies
+  // (INGRESS_TIMESTAMP_TOLERANCE_SEC, default 300) — freshness is enforced either way; an explicit
+  // value only narrows/widens the window. When present, must be a finite number > 0 (see
+  // validateIngressManifest).
+  toleranceSec?: number;
+  dedupHeader?: string;
+}
+
+const INGRESS_SIGNATURE_SCHEMES: readonly IngressSignatureSpec['scheme'][] = [
+  'hmac-sha256',
+  'shared-secret',
+  'standard-webhooks',
+  'none',
+];
+
+/** Provider webhook-verification challenge (e.g. a GET handshake on route registration). */
+export interface IngressChallengeSpec {
+  method: 'GET';
+  tokenParam: string;
+  echoParam: string;
+}
+
+/** A host-side preflight check on an inbound route, evaluated AFTER signature verify and BEFORE the
+ *  dedup persist. First failure short-circuits to its mapped HTTP status. O(1), never initializes the
+ *  engine, never mutates state. */
+export type IngressPreflightCheck = {
+  // Reject (503) when the route's concrete-scoped WhatsApp session is not alive (no live engine, or
+  // EngineStatus.FAILED). Recoverable statuses (INITIALIZING/QR_READY/AUTHENTICATING/DISCONNECTED) and
+  // READY pass through to a normal ack + enqueue so the worker can fail fast and the dedup row holds the
+  // delivery. Skipped for wildcard (sessionScope null/'*') scopes — there is no single session to probe.
+  type: 'session-alive';
+};
+
+/** Declares the synchronous HTTP response an inbound route returns to the provider, computed entirely
+ *  host-side. The plugin ALWAYS runs async (enqueued, full DLQ/retry) regardless of this contract. */
+export interface IngressResponseContract {
+  preflight?: IngressPreflightCheck[];
+  ack?: {
+    status?: number; // default 202
+    body?: string; // literal, or a '{rawBody}'/'{timestamp}'/'{id}' template rendered host-side
+    headers?: Record<string, string>; // static; validated at load (HTTP-token name, a value Node can write)
+  };
+  deadlineMs?: number; // documented provider ack budget (advisory; not enforced)
+}
+
+/** One inbound webhook route a plugin claims. Requires the `webhook:ingress` permission. */
+export interface PluginIngressRoute {
+  route: string; // one URL path segment (no '/'); host prefixes it; the plugin never binds a port
+  /**
+   * @deprecated 'sync-reply' is inert dead code since the P0 substrate (#568) and is NOT wired to the
+   * HTTP response — the pipeline is always async + fast-ack. Declare synchronous response behavior via
+   * `response` instead. Kept in the union only to preserve SDK v1 additive-only compatibility; do not
+   * remove within major 1, and do not rely on either value at runtime.
+   */
+  mode: 'async' | 'sync-reply';
+  signature: IngressSignatureSpec;
+  challenge?: IngressChallengeSpec;
+  /** Reserved/advisory compatibility field. Authenticity is currently verified by the host according
+   *  to `signature`; the worker does not perform an additional `self` verification pass. */
+  verify: 'core' | 'self';
+  maxBodyBytes: number;
+  // Optional: where the provider's conversation id lives, so the host can compute a per-conversation
+  // ordering key (P1). Absent => the P1 lock falls back to per-instance serialization. The host never
+  // needs to understand the provider's schema beyond this one pointer.
+  conversationId?: { header?: string; jsonPointer?: string };
+  /**
+   * What identifies a retry of the same delivery. `header` (the default) trusts the dedup header
+   * whenever the provider sends one and falls back to a hash of the raw body only when it is
+   * absent. `body` keys every delivery on that hash regardless of the header, for a provider that
+   * mints a fresh delivery id on each retry attempt, so its retries would otherwise never dedup.
+   * Byte-identical bodies collapse within `INGRESS_DEDUP_RETENTION_DAYS`; a provider whose retries
+   * legitimately differ in the body (a fresh timestamp or nonce inside the signed payload) keeps
+   * the default, since `body` would then dedup nothing. When the body is empty the hash also covers
+   * the method and the query string, so query-borne deliveries stay apart; a delivery with neither
+   * a body nor a query has one id per route, and its repeats collapse.
+   */
+  dedupOn?: 'header' | 'body';
+  /** Optional synchronous-response contract (host-side preflight + ack). Additive; absent = today's
+   *  default 202 fast-ack, byte-identical. Validated by validateIngressManifest. */
+  response?: IngressResponseContract;
+}
+
+// Normalized outbound envelope for ctx.conversations.send (POJO across the wire).
+export interface ConversationSendEnvelope {
+  sessionId?: string;
+  instanceId?: string;
+  chatId?: string;
+  type: 'text' | 'image' | 'file' | 'audio' | 'video' | 'voice' | 'location';
+  text?: string;
+  mediaUrl?: string;
+  replyTo?: string;
+  /**
+   * Ask the engine for a link preview on a plain text send. Baileys generates one only when this is
+   * `true`, so a plugin relaying a URL gets a bare link without it; whatsapp-web.js previews by
+   * default and takes `false` to suppress. Ignored on media, location and quoted sends, which route
+   * through engine paths that take no preview option.
+   */
+  linkPreview?: boolean;
+  /** WGS84 coordinates; required for type 'location', ignored otherwise. `text` doubles as the
+   *  location description. */
+  latitude?: number;
+  longitude?: number;
+  source?: { provider: string; externalConversationId: string };
+}
+
+/** Integration SDK major version this host supports. A plugin whose `sdkVersion` major differs is refused. */
+export const SUPPORTED_SDK_MAJOR = 1;
+
+// ack header guards: name must be an RFC 7230 token (no spaces/separators), value must be one Node's
+// setHeader accepts (HTAB, visible ASCII, space, and 0x80-0xFF; so no CR/LF and no other control
+// character or anything above U+00FF). A value Node refuses throws at write time, after the delivery
+// was persisted, and answers every attempt with a 500. The header source is the static manifest,
+// validated once at load.
+const HTTP_HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const HTTP_HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
+// An ingress route must survive as one URL path segment. The controller matches the first decoded
+// segment after the instance id, so '/' (and '\\', which a WHATWG URL parser turns into '/') splits
+// it, '?' and '#' end the path, a bare '%' is a malformed escape, and a URL parser strips tab and
+// newline (so control characters are refused outright). Anything else, a space or a non-ASCII letter
+// included, is percent-encoded in the minted ingress URL and decoded back before the match. A lone
+// UTF-16 surrogate has no UTF-8 form: encodeURIComponent throws on it and no URL decodes to it.
+// eslint-disable-next-line no-control-regex
+const INGRESS_ROUTE_SEGMENT = /^[^/\\?#%\x00-\x1f\x7f\p{Cs}]+$/u;
+
+/**
+ * Validates a manifest's `ingress` declarations: SDK major compatibility, the `webhook:ingress`
+ * permission, route uniqueness, that each route is a single URL path segment the controller can
+ * match, that a declared `toleranceSec` is a finite number > 0 (a replay window of zero or less, or
+ * NaN, would make the tolerance check a no-op), that `dedupOn` is 'header' or 'body', that a
+ * declared ack is a final status (200-599) with a string body and header names and values Node can
+ * write, and that no route declares `signature.scheme: 'none'` unless the operator has explicitly
+ * opted in via `ALLOW_UNSIGNED_INGRESS=true`. A `none`-scheme route is a fully-unauthenticated `@Public()`
+ * endpoint — once an instance is provisioned, anyone who can reach the host can POST a forged
+ * payload that triggers outbound WhatsApp sends. Rejecting it at load (rather than only warning)
+ * keeps that surface from lighting up silently. A manifest with no `ingress` entries is a no-op.
+ * Called from PluginLoaderService.loadPlugin, so a malformed declaration is rejected at load time.
+ */
+export function validateIngressManifest(manifest: PluginManifest, allowUnsignedIngress = false): void {
+  if (!manifest.ingress?.length) return; // no ingress declared → nothing to validate
+  const declaredMajor = Number.parseInt((manifest.sdkVersion ?? '1').split('.')[0], 10);
+  if (!Number.isFinite(declaredMajor) || declaredMajor !== SUPPORTED_SDK_MAJOR) {
+    throw new Error(
+      `Plugin ${manifest.id}: SDK major ${manifest.sdkVersion} is not supported by this host (supports ${SUPPORTED_SDK_MAJOR})`,
+    );
+  }
+  const perms = manifest.permissions ?? [];
+  if (!perms.includes(PluginCapabilityPermission.WEBHOOK_INGRESS)) {
+    throw new Error(
+      `Plugin ${manifest.id}: declares ingress routes but is missing the 'webhook:ingress' permission. ` +
+        `Add "webhook:ingress" to the "permissions" array in the plugin's manifest.json.`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const r of manifest.ingress) {
+    if (!r.route || seen.has(r.route)) {
+      throw new Error(`Plugin ${manifest.id}: duplicate or empty ingress route '${r.route}'`);
+    }
+    seen.add(r.route);
+    if (typeof r.route !== 'string' || !INGRESS_ROUTE_SEGMENT.test(r.route) || r.route === '.' || r.route === '..') {
+      throw new Error(
+        `Plugin ${manifest.id}: ingress route '${String(r.route)}' must be a single URL path segment ` +
+          `(no '/', '\\', '?', '#', '%', control character or lone surrogate, and not '.' or '..')`,
+      );
+    }
+    // The verifier treats any scheme it does not know as hmac-sha256, so a typo would load and then
+    // reject every delivery as a signature mismatch, with nothing pointing back at the manifest.
+    const signature: Partial<IngressSignatureSpec> | undefined =
+      r.signature && typeof r.signature === 'object' ? r.signature : undefined;
+    if (!signature?.scheme || !INGRESS_SIGNATURE_SCHEMES.includes(signature.scheme)) {
+      throw new Error(
+        `Plugin ${manifest.id}: route '${r.route}' signature.scheme must be one of ` +
+          `${INGRESS_SIGNATURE_SCHEMES.join(', ')} (got '${String(signature?.scheme)}')`,
+      );
+    }
+    // Only hmac-sha256 reads `encoding`; the other schemes ignore it, so a stray value there still loads.
+    if (
+      signature.scheme === 'hmac-sha256' &&
+      signature.encoding !== undefined &&
+      signature.encoding !== 'hex' &&
+      signature.encoding !== 'base64'
+    ) {
+      throw new Error(
+        `Plugin ${manifest.id}: route '${r.route}' signature.encoding must be 'hex' or 'base64' ` +
+          `(got '${String(signature.encoding)}')`,
+      );
+    }
+    if (r.signature.scheme === 'none' && !allowUnsignedIngress) {
+      throw new Error(
+        `Plugin ${manifest.id}: ingress route '${r.route}' declares signature.scheme 'none', which is an ` +
+          `unauthenticated public endpoint that can trigger WhatsApp sends. Set ALLOW_UNSIGNED_INGRESS=true to ` +
+          `opt in (and front the route with a network/reverse-proxy ACL).`,
+      );
+    }
+    // A manifest is third-party JSON, so the field is only a number by declaration. The verifier's
+    // `skew > tolerance` compares against NaN for a value like "5m" or {}, which is always false, so the
+    // replay window silently disappeared. A quoted number ("300") coerces correctly there and still loads.
+    const tol: unknown = r.signature.toleranceSec;
+    if (tol !== undefined) {
+      const n = typeof tol === 'number' ? tol : typeof tol === 'string' && tol.trim() !== '' ? Number(tol) : Number.NaN;
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error(
+          `Plugin ${manifest.id}: route '${r.route}' toleranceSec must be a positive number of seconds ` +
+            `(a replay guard would be a no-op)`,
+        );
+      }
+    }
+    if (r.dedupOn !== undefined && r.dedupOn !== 'header' && r.dedupOn !== 'body') {
+      throw new Error(
+        `Plugin ${manifest.id}: route '${r.route}' dedupOn must be 'header' or 'body' (got '${String(r.dedupOn)}')`,
+      );
+    }
+    if (r.response) {
+      const ackStatus = r.response.ack?.status;
+      // A 1xx is an informational response: Node writes it with no final response after it, so the
+      // provider waits until it times out.
+      if (ackStatus !== undefined && (!Number.isInteger(ackStatus) || ackStatus < 200 || ackStatus > 599)) {
+        throw new Error(
+          `Plugin ${manifest.id}: route '${r.route}' response.ack.status must be a final HTTP status (200-599)`,
+        );
+      }
+      const ackBody = r.response.ack?.body;
+      if (ackBody !== undefined && typeof ackBody !== 'string') {
+        throw new Error(`Plugin ${manifest.id}: route '${r.route}' response.ack.body must be a string`);
+      }
+      if (r.response.ack?.headers) {
+        for (const [name, value] of Object.entries(r.response.ack.headers)) {
+          if (!HTTP_HEADER_NAME.test(name)) {
+            throw new Error(
+              `Plugin ${manifest.id}: route '${r.route}' response.ack header name '${name}' is not a valid HTTP token`,
+            );
+          }
+          // Before the character guard: RegExp.test coerces its argument, so a number would pass it and
+          // then be dropped at render time, leaving the header silently absent from every ack.
+          if (typeof value !== 'string') {
+            throw new Error(`Plugin ${manifest.id}: route '${r.route}' response.ack header '${name}' must be a string`);
+          }
+          if (!HTTP_HEADER_VALUE.test(value)) {
+            throw new Error(
+              `Plugin ${manifest.id}: route '${r.route}' response.ack header '${name}' has invalid characters ` +
+                `(control characters and characters above U+00FF cannot be written in a header)`,
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Warns about each ingress route declared with `scheme: 'none'` — a fully-unauthenticated public endpoint
+ * that anyone who can reach the host can use to trigger WhatsApp sends. Such a route only loads when the
+ * operator has opted in via `ALLOW_UNSIGNED_INGRESS=true` (otherwise `validateIngressManifest` rejects it);
+ * this warning keeps the exposure loud at boot and on dynamic install so an operator who enabled the flag
+ * for one provider is reminded to front the URL with a network/reverse-proxy ACL.
+ * Called from PluginLoaderService.loadPlugin.
+ */
+export function warnUnauthenticatedIngressRoutes(
+  manifest: PluginManifest,
+  logger: { warn: (message: string, context?: Record<string, unknown>) => void },
+): void {
+  for (const r of manifest.ingress ?? []) {
+    if (r.signature.scheme === 'none') {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' uses signature scheme 'none' — it is an ` +
+          `UNAUTHENTICATED public endpoint that can trigger WhatsApp sends. Only keep this if the provider ` +
+          `offers no HMAC and the URL is guarded by a network/reverse-proxy ACL.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_unauthenticated_route' },
+      );
+    }
+  }
+}
+
+/**
+ * Warns about hmac-sha256 ingress routes whose declared timestamp is not actually bound into the
+ * signature. Declaring `timestampHeader` makes the host enforce timestamp freshness, but freshness
+ * alone does not stop a replay: if the provider's `contentTemplate` omits `{timestamp}`, the
+ * timestamp is UNSIGNED, so a captured (body, signature) pair can be re-sent with a freshly-minted
+ * timestamp and a new delivery id forever. Binding the timestamp (`contentTemplate` containing
+ * `{timestamp}`, e.g. `{timestamp}.{rawBody}`) makes the signed bytes expire with the window. The
+ * inverse declaration — a `{timestamp}` token with no `timestampHeader` — signs the empty string,
+ * which is equally inert.
+ *
+ * It also warns about routes whose default header-keyed dedup is the only thing between a copy of a
+ * delivery and a second enqueue: an hmac-sha256 route that binds no timestamp, and a shared-secret
+ * route (which binds neither body nor time). The dedup header is not covered by the credential, so a
+ * copy sent with a different header value is accepted as new. `dedupOn: 'body'` silences it.
+ *
+ * Warn-only (SDK v1 is additive within a major; a load-time rejection would break already-installed
+ * manifests). Called from PluginLoaderService.loadPlugin.
+ */
+export function warnUnsignedTimestampRoutes(
+  manifest: PluginManifest,
+  logger: { warn: (message: string, context?: Record<string, unknown>) => void },
+): void {
+  for (const r of manifest.ingress ?? []) {
+    if (r.signature.scheme === 'shared-secret' && r.dedupOn !== 'body') {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' uses scheme 'shared-secret', which binds ` +
+          `neither the body nor a timestamp, and dedups on a header the secret does not cover: a copy of a ` +
+          `delivery sent with a different header value is accepted as new. Prefer an hmac-sha256 scheme ` +
+          `with a signed timestamp, or set dedupOn: 'body' if the provider's retries are byte-identical.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_replayable_route' },
+      );
+      continue;
+    }
+    if (r.signature.scheme !== 'hmac-sha256') continue; // only hmac templates can bind a timestamp
+    const signsTimestamp = (r.signature.contentTemplate ?? '{rawBody}').includes('{timestamp}');
+    if (r.signature.timestampHeader && !signsTimestamp) {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' declares timestampHeader ` +
+          `'${r.signature.timestampHeader}' but its contentTemplate does not sign it — the timestamp is ` +
+          `freshness-checked but UNSIGNED, so a replayed body can mint a fresh timestamp. Include ` +
+          `{timestamp} in the contentTemplate (e.g. '{timestamp}.{rawBody}') to bind it.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_unsigned_timestamp' },
+      );
+    } else if (!r.signature.timestampHeader && signsTimestamp) {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' signs a {timestamp} token but declares no ` +
+          `timestampHeader — the token binds the empty string and no freshness check runs. Declare the ` +
+          `provider's timestamp header (and optionally toleranceSec) to activate the replay window.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_unsigned_timestamp' },
+      );
+    } else if (!r.signature.timestampHeader && r.dedupOn !== 'body') {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' signs no timestamp and dedups on a header ` +
+          `the signature does not cover: a copy of a delivery sent with a different header value is ` +
+          `accepted as new. Declare and sign the provider's timestamp (timestampHeader plus {timestamp} ` +
+          `in the contentTemplate), or set dedupOn: 'body' if the provider's retries are byte-identical.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_replayable_route' },
+      );
+    }
+  }
+}
+
+/**
+ * Thrown by a plugin capability when a call is rejected (missing permission, out-of-scope session,
+ * unstarted session, etc.). Gives plugins a predictable failure instead of a raw TypeError.
+ */
+export class PluginCapabilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PluginCapabilityError';
+  }
+}
+
+export interface PluginMessagingCapability {
+  sendText(sessionId: string, chatId: string, text: string): Promise<MessageResponseDto>;
+  reply(sessionId: string, chatId: string, quotedMessageId: string, text: string): Promise<MessageResponseDto>;
+}
+
+export interface PluginEngineReadCapability {
+  getGroupInfo(sessionId: string, groupId: string): ReturnType<IWhatsAppEngine['getGroupInfo']>;
+  getContacts(sessionId: string): ReturnType<IWhatsAppEngine['getContacts']>;
+  getContactById(sessionId: string, contactId: string): ReturnType<IWhatsAppEngine['getContactById']>;
+  checkNumberExists(sessionId: string, phone: string): ReturnType<IWhatsAppEngine['checkNumberExists']>;
+  getChats(sessionId: string): ReturnType<IWhatsAppEngine['getChats']>;
+  /**
+   * Recent messages for a chat (both directions), oldest first, for history backfill. `limit` is
+   * clamped host-side.
+   */
+  getChatHistory(
+    sessionId: string,
+    chatId: string,
+    limit?: number,
+    includeMedia?: boolean,
+  ): ReturnType<IWhatsAppEngine['getChatHistory']>;
+  /**
+   * Canonical (neutral) form of a chat id: resolves a `@lid` privacy id to its stable `<phone>@c.us`
+   * when the lid->phone mapping is known, and otherwise returns the id unchanged. Lets a plugin key a
+   * chat by one identity across WhatsApp's `@lid` migration (best-effort; an unresolved lid stays `@lid`).
+   */
+  canonicalChatId(sessionId: string, chatId: string): Promise<string>;
+}
+
+/** Outbound HTTP for a plugin — always through the host SSRF guard, scoped to `manifest.net.allow`. */
+export interface PluginNetCapability {
+  fetch(url: string, init?: PluginNetRequestInit): Promise<PluginNetResponse>;
+}
+
+/** Normalized outbound send for a plugin — translated host-side to MessageService.sendText/reply. */
+export interface PluginConversationsCapability {
+  send(env: ConversationSendEnvelope): Promise<unknown>;
+}
+
+/**
+ * Flip a mapped conversation's handover state. Reuses the `conversation:send` permission — flipping
+ * handover is part of owning the conversation, not a distinct capability grant.
+ */
+export interface PluginHandoverCapability {
+  set(key: { sessionId: string; chatId: string; instanceId: string }, state: HandoverState): Promise<unknown>;
+}
+
+/**
+ * Plugin-facing conversation mapping: create/read the WA-chat <-> provider-conversation link an adapter
+ * needs so handover.set and conversation.send({source}) can resolve. Reuses the `conversation:send`
+ * permission — owning the mapping is part of owning the conversation.
+ */
+export interface PluginMappingsCapability {
+  upsert(key: { sessionId: string; chatId: string; instanceId: string }, providerConversationId: string): Promise<void>;
+  get(key: {
+    sessionId: string;
+    chatId: string;
+    instanceId: string;
+  }): Promise<{ providerConversationId: string; handoverState: HandoverState } | null>;
+  getByProvider(
+    instanceId: string,
+    providerConversationId: string,
+  ): Promise<{ sessionId: string; chatId: string; handoverState: HandoverState } | null>;
+}
+
+// ============================================================================
+// Plugin Context (passed to plugin on initialization)
+// ============================================================================
+
+export interface PluginContext {
+  // Plugin info
+  pluginId: string;
+  manifest: PluginManifest;
+
+  // Configuration
+  config: Record<string, unknown>;
+
+  // Hook system
+  hookManager: HookManager;
+
+  // Logger instance for this plugin
+  logger: PluginLogger;
+
+  // Storage for plugin data
+  storage: PluginStorage;
+
+  // Register a hook handler
+  registerHook: (event: HookEvent, handler: HookHandler, priority?: number) => void;
+
+  // Claim an inbound ingress webhook route (requires the `webhook:ingress` permission). Delivered only
+  // to sandboxed plugins via the ingress pipeline; in-process built-ins cannot receive ingress.
+  registerWebhook: (route: string, handler: WebhookHandler) => void;
+
+  // Curated write surface — routes through MessageService (persistence preserved).
+  messages: PluginMessagingCapability;
+
+  // Read-only, scoped engine queries.
+  engine: PluginEngineReadCapability;
+
+  // SSRF-guarded outbound HTTP, scoped to the manifest `net.allow` host list.
+  net: PluginNetCapability;
+
+  // Normalized outbound send, translated to MessageService. Requires `conversation:send`.
+  conversations: PluginConversationsCapability;
+
+  // Flip a mapped conversation's bot/human/closed handover state. Requires `conversation:send`.
+  handover: PluginHandoverCapability;
+
+  // Create/read the WA-chat <-> provider-conversation mapping. Requires `conversation:send`.
+  mappings: PluginMappingsCapability;
+}
+
+export interface PluginLogger {
+  log: (message: string, meta?: Record<string, unknown>) => void;
+  debug: (message: string, meta?: Record<string, unknown>) => void;
+  warn: (message: string, meta?: Record<string, unknown>) => void;
+  error: (message: string, error?: unknown, meta?: Record<string, unknown>) => void;
+}
+
+export interface PluginStorage {
+  get: <T = unknown>(key: string) => Promise<T | null>;
+  set: <T = unknown>(key: string, value: T) => Promise<void>;
+  delete: (key: string) => Promise<void>;
+  list: (prefix?: string) => Promise<string[]>;
+}
+
+// ============================================================================
+// Plugin Interface (what plugins must implement)
+// ============================================================================
+
+export interface IPlugin {
+  // Lifecycle hooks
+  onLoad?: (context: PluginContext) => Promise<void>;
+  onEnable?: (context: PluginContext) => Promise<void>;
+  onDisable?: (context: PluginContext) => Promise<void>;
+  onUnload?: (context: PluginContext) => Promise<void>;
+
+  // Configuration change handler
+  onConfigChange?: (context: PluginContext, newConfig: Record<string, unknown>) => Promise<void>;
+
+  // Health check (for dashboard monitoring)
+  healthCheck?: () => Promise<{ healthy: boolean; message?: string }>;
+}
+
+// ============================================================================
+// Engine Plugin Interface (extends IPlugin for engine-specific methods)
+// ============================================================================
+
+export interface IEnginePlugin extends IPlugin {
+  type: PluginType.ENGINE;
+
+  // Engine factory method
+  createEngine: (config: Record<string, unknown>) => unknown;
+
+  // Get supported features
+  getFeatures: () => string[];
+
+  // Underlying engine library name + version (e.g. { name: 'whatsapp-web.js', version: '1.34.7' }) —
+  // distinct from the adapter/plugin's own manifest version. Optional: an engine may not report it.
+  getEngineLibrary?: () => { name: string; version: string };
+}
+
+// ============================================================================
+// Plugin Instance (runtime representation)
+// ============================================================================
+
+export interface PluginInstance {
+  manifest: PluginManifest;
+  status: PluginStatus;
+  config: Record<string, unknown>;
+  instance: IPlugin | null;
+  error?: string;
+  loadedAt?: Date;
+  enabledAt?: Date;
+  // Sessions a session-scoped plugin is activated for; ['*'] = all. Defaulted to ['*'] on enable.
+  // Ignored for a global (sessionScoped:false) plugin. Persisted on the registry entry.
+  activeSessions?: string[];
+  // Per-session config overrides, keyed by sessionId. The config a hook sees for session S is the
+  // override deep-merged over `config`, the '*' base (nested objects merge key by key; arrays and
+  // scalars replace) — see resolvePluginConfig. Absent = no overrides (every session gets the base).
+  // Persisted on the registry entry.
+  sessionConfig?: Record<string, Record<string, unknown>>;
+  // First-party built-ins (engines, bundled extensions) run in-process; plugins loaded from the
+  // plugins directory are untrusted and run sandboxed in a worker. `false` => sandboxed.
+  builtIn?: boolean;
+  // Absolute path of the directory this plugin's package was loaded from. Usually
+  // <plugins.dir>/<id>, but the loader also scans the legacy plugins directory, and every later
+  // operation on the package — enable, uninstall, update, config UI — has to act on the tree the
+  // code actually came from rather than assume the configured one. Absent for built-ins, which are
+  // registered programmatically and have no on-disk package.
+  packageDir?: string;
+}
+
+// ============================================================================
+// Plugin Registry Entry (for storage)
+// ============================================================================
+
+export interface PluginRegistryEntry {
+  id: string;
+  type: PluginType;
+  name: string;
+  version: string;
+  status: PluginStatus;
+  config: Record<string, unknown>;
+  builtIn: boolean; // True for bundled plugins
+  installedAt: Date;
+  updatedAt: Date;
+  // Sessions a session-scoped plugin is activated for; ['*'] = all. Absent = not yet set (treated
+  // as ['*'] on enable).
+  activeSessions?: string[];
+  // Per-session config overrides (keyed by sessionId), merged over `config` per session at hook time.
+  sessionConfig?: Record<string, Record<string, unknown>>;
+  // The operator's standing decision, as opposed to `status`, which is where the runtime currently is.
+  // `status` is reset to INSTALLED on every load (enabling runs the lifecycle and is never inherited
+  // from a previous process), so it cannot carry intent across a restart — a restart used to silently
+  // turn every extension plugin off (#856). This field is what bootstrap restores from. Written only by
+  // the operator-facing enable/disable, never by the loader's own teardown. Absent on pre-#856 rows,
+  // which are adopted from a lingering ENABLED status on first load.
+  enabledByOperator?: boolean;
+}

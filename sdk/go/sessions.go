@@ -1,0 +1,191 @@
+package openwa
+
+import "context"
+
+// SessionsService manages the lifecycle of WhatsApp sessions.
+// Backed by src/modules/session/session.controller.ts.
+type SessionsService struct{ client *Client }
+
+// List returns sessions. Pass nil for the default (server-side) limit/offset.
+func (s *SessionsService) List(ctx context.Context, query *ListSessionsQuery) ([]SessionResponse, error) {
+	var out []SessionResponse
+	err := s.client.do(ctx, "GET", "/api/sessions", valuesOf(query), nil, &out)
+	return out, err
+}
+
+// GetConfig reads a session's effective configuration.
+func (s *SessionsService) GetConfig(ctx context.Context, sessionID string) (*SessionConfig, error) {
+	var out SessionConfig
+	err := s.client.do(ctx, "GET", "/api/sessions/"+pathEscape(sessionID)+"/config", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateConfig merges the given keys into a session's stored configuration, running or stopped,
+// with no restart or re-link. AutoRejectCalls applies immediately; MaxReconnectAttempts and
+// ReconnectBaseDelay apply on the next start.
+func (s *SessionsService) UpdateConfig(ctx context.Context, sessionID string, body UpdateSessionConfigRequest) (*SessionConfig, error) {
+	var out SessionConfig
+	err := s.client.do(ctx, "PATCH", "/api/sessions/"+pathEscape(sessionID)+"/config", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetProxy reads a session's masked proxy configuration.
+func (s *SessionsService) GetProxy(ctx context.Context, sessionID string) (*SessionProxy, error) {
+	var out SessionProxy
+	err := s.client.do(ctx, "GET", "/api/sessions/"+pathEscape(sessionID)+"/proxy", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateProxy changes per-session proxy settings. No restart is performed -- changes apply on the
+// next start. Set ClearProxyURL to send an explicit null and clear the proxy; a nil ProxyURL leaves
+// it unchanged. Requires an unscoped ADMIN key.
+func (s *SessionsService) UpdateProxy(ctx context.Context, sessionID string, body UpdateSessionProxyRequest) (*SessionProxy, error) {
+	var out SessionProxy
+	err := s.client.do(ctx, "PATCH", "/api/sessions/"+pathEscape(sessionID)+"/proxy", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Get returns a single session.
+func (s *SessionsService) Get(ctx context.Context, sessionID string) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "GET", "/api/sessions/"+pathEscape(sessionID), nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Create provisions a new session. Requires an OPERATOR-level key; setting ProxyURL requires an ADMIN key.
+func (s *SessionsService) Create(ctx context.Context, body CreateSessionRequest) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "POST", "/api/sessions", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Delete removes a session.
+func (s *SessionsService) Delete(ctx context.Context, sessionID string) error {
+	return s.client.do(ctx, "DELETE", "/api/sessions/"+pathEscape(sessionID), nil, nil, nil)
+}
+
+// Start connects a session (triggers QR / pairing).
+func (s *SessionsService) Start(ctx context.Context, sessionID string) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/start", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Stop disconnects a session gracefully. Returns an HTTP 502 error with
+// code 'SESSION_STOP_INCOMPLETE' when the session was stopped locally but the engine
+// teardown did not complete (the graceful disconnect and the force-destroy escalation
+// both failed, so the engine process may still be running); the status is settled to
+// disconnected and no success audit is written. Retry the stop; restart the node to
+// reap a leaked process.
+func (s *SessionsService) Stop(ctx context.Context, sessionID string) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/stop", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Logout attempts an engine-native unlink of this device, then tears the session down. A 200
+// means the unlink operation AND the required local credential cleanup completed — it is not an
+// independent observation that the handset UI no longer shows the linked device. Because a
+// completed unlink wipes the stored credentials, a later Start requires a fresh QR scan or
+// pairing code. Requires a running session. Returns an HTTP 502 error with
+// code 'SESSION_LOGOUT_INCOMPLETE' when the session was stopped locally but the logout operation
+// did not complete (no send, no acknowledgement, timeout/transport error, or local cleanup
+// failure); phone is cleared and no success audit is written. Start the session again and retry
+// the logout; do not assume the retry reconnects automatically or lands in a guaranteed QR state.
+// On Baileys, a session with no linked device returns an HTTP 409 error instead: it was stopped
+// locally, phone is cleared and no success audit is written. Start it to link a device, or delete
+// it; retrying the logout cannot help.
+func (s *SessionsService) Logout(ctx context.Context, sessionID string) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/logout", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ForceKill terminates a stuck session immediately. It returns an *APIError with
+// StatusCode 502 and Code "SESSION_FORCE_KILL_INCOMPLETE" when the session was
+// stopped locally but the force-destroy threw or timed out, so the engine process
+// may still be running; the status is settled to disconnected and a retry
+// answers 400 because no engine is left to kill. Restart the node to reap a
+// leaked process.
+func (s *SessionsService) ForceKill(ctx context.Context, sessionID string) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/force-kill", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// QRCode returns the current QR code for a session awaiting scan.
+func (s *SessionsService) QRCode(ctx context.Context, sessionID string) (*QrCodeResponse, error) {
+	var out QrCodeResponse
+	err := s.client.do(ctx, "GET", "/api/sessions/"+pathEscape(sessionID)+"/qr", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RequestPairingCode requests a phone-pairing code. On whatsapp-web.js, never request one for a number that
+// already has a linked session: WhatsApp can revoke that device. Link it by QR instead.
+func (s *SessionsService) RequestPairingCode(ctx context.Context, sessionID string, body RequestPairingCodeRequest) (*PairingCodeResponse, error) {
+	var out PairingCodeResponse
+	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/pairing-code", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Stats returns the aggregate session stats overview.
+func (s *SessionsService) Stats(ctx context.Context) (*SessionStatsOverview, error) {
+	var out SessionStatsOverview
+	err := s.client.do(ctx, "GET", "/api/sessions/stats/overview", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SetOnlinePresence sets the account's own global presence — appear online, or offline.
+//
+// Available=false hands notifications back to the phone: a linked device that stays online
+// suppresses the phone's own alerts. This is the ACCOUNT's presence, not a chat's — see
+// ChatsService.SendState for per-chat typing/recording states.
+func (s *SessionsService) SetOnlinePresence(
+	ctx context.Context, sessionID string, body SetOwnPresenceRequest,
+) (*SuccessResult, error) {
+	var out SuccessResult
+	err := s.client.do(ctx, "PUT", "/api/sessions/"+pathEscape(sessionID)+"/presence", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

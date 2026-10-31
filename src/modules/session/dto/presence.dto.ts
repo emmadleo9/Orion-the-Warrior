@@ -1,0 +1,75 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsBoolean, IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
+import { ToStrictBoolean, ToStrictString } from '../../../common/utils/strict-boolean';
+import { CHAT_ID_MAX_LENGTH, CHAT_JID_MESSAGE, CHAT_JID_PATTERN } from '../../message/dto/send-message.dto';
+
+export class SetOwnPresenceDto {
+  @ApiProperty({
+    description:
+      "true = appear online; false = appear offline (hands notifications back to the phone — an always-online linked device suppresses the phone's own alerts)",
+    example: false,
+  })
+  @ToStrictBoolean()
+  @IsBoolean()
+  available!: boolean;
+}
+
+export class SubscribePresenceDto {
+  @ApiProperty({
+    maxLength: CHAT_ID_MAX_LENGTH,
+    description: 'Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890@c.us)',
+    example: '1234567890@c.us',
+  })
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  // Same engine-neutral structural check the other chat-scoped DTOs use: localpart@host, no
+  // whitespace, so a different engine's JID scheme is accepted and the adapter normalises further.
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
+  chatId!: string;
+}
+
+export class ParticipantPresenceDto {
+  @ApiProperty({ description: 'Participant id. In a 1:1 chat this is the chat itself.', example: '1234567890@c.us' })
+  id!: string;
+
+  @ApiProperty({
+    enum: ['available', 'unavailable', 'composing', 'recording', 'paused'],
+    description:
+      '`composing` and `recording` mean actively typing or recording in this chat; `paused` means ' +
+      'they stopped without sending. `available`/`unavailable` describe reachability.',
+    example: 'composing',
+  })
+  state!: string;
+
+  @ApiPropertyOptional({
+    type: Number,
+    description:
+      "Unix SECONDS the contact was last seen. Absent whenever the contact's privacy settings hide " +
+      'last-seen — the common case, and not an error.',
+    example: 1786000000,
+  })
+  lastSeen?: number;
+}
+
+export class ChatPresenceResponseDto {
+  @ApiProperty({ example: '1234567890@c.us' })
+  chatId!: string;
+
+  @ApiProperty({ type: [ParticipantPresenceDto] })
+  participants!: ParticipantPresenceDto[];
+
+  @ApiPropertyOptional({ type: Number, description: 'Online member count, groups only.', example: 3 })
+  groupOnlineCount?: number;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    description:
+      'When this gateway received the report — NOT a WhatsApp timestamp. Presence is short-lived, so ' +
+      'an old `observedAt` means the state is stale rather than steady.',
+    example: '2026-08-03T12:00:00Z',
+  })
+  observedAt!: Date;
+}

@@ -1,0 +1,257 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+      major:
+        update-types:
+          - major
+    labels:
+      - dependencies
+    ignore:
+      # TypeScript 7 is the native port: `require('typescript')` no longer exposes the classic
+      # compiler API from its main entry, so @typescript-eslint/typescript-estree throws at load
+      # reading `ts.Extension` ("Cannot read properties of undefined (reading 'Cjs')"). ts-jest@29
+      # independently caps typescript at ">=4.3 <7". Proven by #727/#729.
+      #
+      # Pinned on the version, not update-types: the 6.x line is healthy (6.0.3 runs fine today) and
+      # this must not silently block it. Lift when typescript-eslint and ts-jest support TypeScript 7.
+      #
+      # NB: typescript-eslint's peer is "<6.1.0", so a future 6.1 bump WILL fail resolution — that is
+      # a separate matter from this ignore; pin with ~ rather than ^ when a 6.0.x bump lands.
+      - dependency-name: "typescript"
+        versions: [">=7.0.0"]
+      # better-sqlite3 v13 is now the SHIPPED line (manifest ^13.0.3, and the package.json override
+      # `better-sqlite3: $better-sqlite3` forces TypeORM's optional ^12 peer onto the root version,
+      # so npm ci resolves clean), and the release boot smoke proves the 13.x prebuild loads on
+      # both architectures in the toolchain-less node:22-slim image. The original three grounds
+      # for freezing v13 (TypeORM peer cap, linux-arm64 prebuild vs bookworm glibc, node-gyp install
+      # step) were all resolved in adopting it, so this ignore no longer describes the tree: pinned
+      # at >=13.0.0 it only blocked patch/minor PRs on the line the manifest itself ships.
+      # A 13.x bump now flows: PR CI proves x64, and an arm64 prebuild regression fails the release
+      # boot smoke visibly rather than silently. v14 re-opens every unknown (peer range, prebuild
+      # targets, install toolchain), so the NEXT major stays frozen until re-evaluated on those
+      # same three grounds.
+      - dependency-name: "better-sqlite3"
+        versions: [">=14.0.0"]
+      # The root pin and $puppeteer override keep whatsapp-web.js on the tested 25.x line.
+      # Browser teardown uses the connected getter. Recheck lifecycle, protocol errors and
+      # engine smoke tests before adopting the next major.
+      - dependency-name: "puppeteer"
+        versions: [">=26.0.0"]
+      # audio-decode v3 collides with Baileys: every 7.0.0-rc line so far (through rc14) declares
+      # `peerOptional audio-decode@"^2.1.3"`, so the bump fails `npm ci` with ERESOLVE before any
+      # CI job runs. The pairing is load-bearing, not incidental — Baileys uses audio-decode to
+      # draw voice-note amplitude bars, and src/engine/adapters/baileys-voice-waveform.spec.ts
+      # fails CI when the installed version drifts outside the peer range. v3 is additionally
+      # ESM-only. Lift when Baileys widens its peer range past v2.
+      - dependency-name: "audio-decode"
+        versions: [">=3.0.0"]
+      # @types/node stays on the Node the production image actually runs. The `^22` pin was set
+      # deliberately alongside the digest-pinned node:22-slim base; v26 types describe APIs that
+      # do not exist on Node 22 and would type-check code that fails at runtime. Lift together
+      # with the base-image Node bump.
+      - dependency-name: "@types/node"
+        versions: [">=23.0.0"]
+      # The NestJS 12 line cannot be adopted yet. The peers no longer block it (the current
+      # @bull-board/nestjs and @nestjs/throttler both admit ^12.0.0), but two in-repo blockers remain:
+      # @nestjs/common@12 is ESM-only and neither jest lane can load it under the current transform
+      # config (many source and spec files import @nestjs/common or @nestjs/testing), and @nestjs/swagger 12
+      # spells nullability per document version, which moves the committed openapi.json snapshot
+      # and cascades into check:contract-shapes across five SDK clients.
+      #
+      # Pinned on the version rather than update-types so the 11.x line keeps flowing. Lift when
+      # both in-repo blockers are resolved; the upgrade itself belongs on a dedicated branch, since
+      # the README framework rows and the jest ESM config have to move in the same commit.
+      - dependency-name: "@nestjs/*"
+        versions: [">=12.0.0"]
+      # tar-stream 3.2.1 is a types-only release: index.js, extract.js, pack.js, headers.js and
+      # constants.js are byte-identical to 3.2.0. What it adds is an `exports` map with a `types`
+      # condition, so under moduleResolution nodenext with resolvePackageJsonExports its bundled
+      # declarations shadow @types/tar-stream. Those declarations do `import { Writable } from
+      # 'streamx'`, but tar-stream still asks for streamx ^2.15.0 while the tree resolves 2.25.0,
+      # which ships no declarations at all. `Extract` and `Pack` then inherit no members and both
+      # src/common/storage/storage-transfer.ts and storage.service.spec.ts stop compiling: 8 type
+      # errors in the build and 23 no-unsafe errors in lint. Proven twice, by #1489 and #1504.
+      #
+      # Dependabot cannot resolve this on its own, because streamx 2.25.0 satisfies every declared
+      # range in the tree, so it bumps tar-stream and leaves streamx alone. Adopting 3.2.1 for real
+      # is three coordinated moves rather than a version bump: an `overrides` entry forcing streamx
+      # to ^2.28.1 (2.28.0 is not enough, its `write()` returns `unknown` where 2.28.1 returns
+      # `boolean`, so a gunzip cannot pipe into an Extract), dropping the then-inert
+      # @types/tar-stream, and widening the entry-stream chunk type. That carries streamx three
+      # minors under archiver and Puppeteer's browser fetch for no runtime change at all.
+      #
+      # Pinned on the version rather than update-types because the defect rides the bundled
+      # declarations, not the semver channel: a 3.3.0 would carry the same index.d.ts and the same
+      # streamx range. Unlike the ignores above, this one freezes the line in use rather than a
+      # major line, so re-check on every tar-stream release, not only when its streamx range
+      # widens. An advisory in the frozen line still fails CI through check:audit. package.json
+      # pins tar-stream exactly at 3.2.0, so npm holds the line even while this entry is silent.
+      - dependency-name: "tar-stream"
+        versions: [">=3.2.1"]
+
+  - package-ecosystem: npm
+    directory: /dashboard
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+      major:
+        update-types:
+          - major
+    labels:
+      - dependencies
+      - dashboard
+    ignore:
+      # TypeScript 7 is the native port: `require('typescript')` no longer exposes the classic
+      # compiler API from its main entry, so @typescript-eslint/typescript-estree throws at load
+      # reading `ts.Extension` ("Cannot read properties of undefined (reading 'Cjs')"). Proven by
+      # #727/#729.
+      #
+      # Pinned on the version, not update-types: the 6.x line is healthy (6.0.3 runs fine today) and
+      # this must not silently block it. Lift when typescript-eslint supports TypeScript 7.
+      #
+      # NB: typescript-eslint's peer is "<6.1.0", so a future 6.1 bump WILL fail resolution — that is
+      # a separate matter from this ignore; pin with ~ rather than ^ when a 6.0.x bump lands.
+      - dependency-name: "typescript"
+        versions: [">=7.0.0"]
+      # Same reasoning as the root tree: the dashboard is served from the node:22-slim image's
+      # build stage, and types past 22 describe a runtime it does not run.
+      - dependency-name: "@types/node"
+        versions: [">=23.0.0"]
+
+  # The JavaScript SDK publishes no runtime dependencies, so every update here moves the toolchain
+  # that builds and tests it. These PRs touch sdk/**, so SDK CI gates each one.
+  - package-ecosystem: npm
+    directory: /sdk/javascript
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+      major:
+        update-types:
+          - major
+    labels:
+      - dependencies
+      - javascript
+
+  # The other SDKs ship runtime dependencies to their consumers (httpx, guzzle, gson), and their
+  # published ranges admit whatever is current, so an advisory in one of them is a PR here, not a
+  # surprise in a user's lockfile. These PRs touch sdk/**, so SDK CI gates each one. The Go client
+  # depends on the standard library alone and its go.mod has no require, so its entry keeps the
+  # one-entry-per-SDK rule and starts proposing updates once a dependency is added.
+  - package-ecosystem: pip
+    directory: /sdk/python
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+
+  - package-ecosystem: maven
+    directory: /sdk/java
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+
+  - package-ecosystem: composer
+    directory: /sdk/php
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+
+  - package-ecosystem: gomod
+    directory: /sdk/go
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+
+  # All workflow action refs are pinned to commit SHAs (with a `# vX.Y.Z` comment). Dependabot
+  # understands that form: it proposes the new SHA and rewrites the version comment, so the pins
+  # stay current without ever floating on a mutable major tag.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - ci
+
+  # Base image (Dockerfile only: node:22-slim@digest in both stages). This ecosystem does not
+  # read docker-compose.yml; the entry below does. It proposes a tag bump when an allowed one
+  # exists and otherwise a refreshed 22-slim digest. The digest pinned on 2026-08-13 still
+  # stayed for weeks while the tag moved, so the base-image-drift job in security-scan.yml
+  # backstops a refresh that is late or left unmerged: it fails once the pin differs from what
+  # the tag serves and either the tag has served that image for 7 or more days, or for 3 or
+  # more days with the pin last changed 28 or more days ago.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    ignore:
+      # A Node major moves by hand, together with the CI Node version, the @types/node ignore above
+      # and the amd64/arm64 build and browser-launch smoke (#783 proposed 26 before its LTS date,
+      # #1684 proposed 25, which never became one). Digest refreshes of node:22-slim are not
+      # affected by this ignore.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+
+  # The compose stack's pinned images (docker-compose.yml): socket-proxy, postgres, redis, and
+  # pgsty/silo for the `minio` service. A postgres, redis or silo bump fails
+  # src/modules/docker/compose-parity.spec.ts until the same image reference (for silo, tag and
+  # digest) is set in src/modules/docker/docker.service.ts; that failure is intended, so edit both
+  # on the Dependabot branch. tecnativa/docker-socket-proxy has no such mirror and no CI gate on its
+  # behaviour: review its release notes against the allow-list in docker-compose.yml and re-run
+  # scripts/smoke-test-docker-proxy.sh by hand before merging one.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    ignore:
+      # A PostgreSQL major cannot open the previous major's data directory: a 16 -> 17 bump merged
+      # as-is stops every existing openwa-postgres volume from starting. It moves by hand, with a
+      # dump/restore or pg_upgrade note.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      # Redis 8 changes the license and must stay in step with the CI service containers
+      # (ci.yml, release.yml), which no ecosystem updates. A deliberate, by-hand move.
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]

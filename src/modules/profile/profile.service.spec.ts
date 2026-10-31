@@ -1,0 +1,95 @@
+import { BadRequestException } from '@nestjs/common';
+import { ProfileService } from './profile.service';
+import { EngineRegistry } from '../../engine/engine-registry.service';
+import { IWhatsAppEngine, MediaInput } from '../../engine/interfaces/whatsapp-engine.interface';
+
+describe('ProfileService', () => {
+  const makeService = (engine: Partial<IWhatsAppEngine> | undefined) => {
+    const engines = new EngineRegistry();
+    if (engine) engines.set('s1', engine as IWhatsAppEngine);
+    return new ProfileService(engines);
+  };
+
+  it('throws 400 "Session is not started" when the engine is missing (guard preserved)', () => {
+    const svc = makeService(undefined);
+    expect(() => svc.setProfileName('s1', 'Name')).toThrow(BadRequestException);
+    expect(() => svc.setProfileName('s1', 'Name')).toThrow('Session is not started');
+  });
+
+  it('setProfileName delegates to the engine', async () => {
+    const setProfileName = jest.fn().mockResolvedValue(undefined);
+    await makeService({ setProfileName }).setProfileName('s1', 'New Name');
+    expect(setProfileName).toHaveBeenCalledWith('New Name');
+  });
+
+  it('setProfileStatus delegates to the engine (empty string clears the about)', async () => {
+    const setProfileStatus = jest.fn().mockResolvedValue(undefined);
+    await makeService({ setProfileStatus }).setProfileStatus('s1', '');
+    expect(setProfileStatus).toHaveBeenCalledWith('');
+  });
+
+  it('deleteProfilePicture delegates to the engine with no arguments (the account is implicit)', async () => {
+    const deleteProfilePicture = jest.fn().mockResolvedValue(undefined);
+    await makeService({ deleteProfilePicture }).deleteProfilePicture('s1');
+    // Called with nothing: the engine removes the picture of the account it is already bound to, so
+    // forwarding the sessionId here would be a jid the adapter never asked for.
+    expect(deleteProfilePicture).toHaveBeenCalledWith();
+  });
+
+  it('deleteProfilePicture throws 400 when the engine is missing', () => {
+    // The route carries no body, so this guard is the only pre-check standing between the caller and
+    // the adapter.
+    expect(() => makeService(undefined).deleteProfilePicture('s1')).toThrow(BadRequestException);
+  });
+
+  describe('setProfilePicture', () => {
+    it('rejects a body with neither url nor base64 (400)', () => {
+      // The guard throws synchronously (the service method is a thin sync pass-through, like GroupService).
+      const svc = makeService({ setProfilePicture: jest.fn() });
+      expect(() => svc.setProfilePicture('s1', {})).toThrow('Either url or base64 must be provided');
+    });
+
+    it('requires mimetype when base64 is used (400)', () => {
+      const svc = makeService({ setProfilePicture: jest.fn() });
+      expect(() => svc.setProfilePicture('s1', { base64: 'QUJD' })).toThrow(
+        'mimetype is required when using base64 data',
+      );
+    });
+
+    it('rejects a url that is not an absolute http(s) URL (400), also when it reaches the service without the DTO', () => {
+      const setProfilePicture = jest.fn();
+      const svc = makeService({ setProfilePicture });
+      for (const url of ['ftp://example.com/a.jpg', 'example.com/a.jpg']) {
+        expect(() => svc.setProfilePicture('s1', { url })).toThrow(BadRequestException);
+        expect(() => svc.setProfilePicture('s1', { url })).toThrow('url must be an absolute http(s) URL');
+      }
+      expect(setProfilePicture).not.toHaveBeenCalled();
+    });
+
+    it('maps a base64 body to a MediaInput (base64 wins over a stale url, #670)', async () => {
+      const setProfilePicture = jest.fn().mockResolvedValue(undefined);
+      await makeService({ setProfilePicture }).setProfilePicture('s1', {
+        base64: 'QUJD',
+        mimetype: 'image/png',
+        url: 'https://example.com/stale.jpg',
+      });
+      const calls = setProfilePicture.mock.calls as Array<[MediaInput]>;
+      expect(calls[0][0]).toEqual({ mimetype: 'image/png', data: 'QUJD' });
+    });
+
+    it('maps a url body to a MediaInput with the default image mimetype', async () => {
+      const setProfilePicture = jest.fn().mockResolvedValue(undefined);
+      await makeService({ setProfilePicture }).setProfilePicture('s1', { url: 'https://example.com/a.jpg' });
+      expect(setProfilePicture).toHaveBeenCalledWith({ mimetype: 'image/jpeg', data: 'https://example.com/a.jpg' });
+    });
+
+    it('accepts a data: URI base64 payload (prefix stripped like the message module)', async () => {
+      const setProfilePicture = jest.fn().mockResolvedValue(undefined);
+      await makeService({ setProfilePicture }).setProfilePicture('s1', {
+        base64: 'data:image/png;base64,QUJD',
+        mimetype: 'image/png',
+      });
+      expect(setProfilePicture).toHaveBeenCalledWith({ mimetype: 'image/png', data: 'QUJD' });
+    });
+  });
+});

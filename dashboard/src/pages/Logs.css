@@ -1,0 +1,364 @@
+.logs-page {
+  padding: 2rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.logs-page .page-header {
+  margin-bottom: 1.5rem;
+}
+
+/* H1 inherited from global */
+
+.logs-page .filters-bar {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.logs-page .search-input {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex: 1;
+  max-width: 400px;
+  padding: 0.75rem 1rem;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.logs-page .search-input svg {
+  color: var(--text-muted);
+}
+
+.logs-page .search-input input {
+  flex: 1;
+  border: none;
+  background: none;
+  font-size: 0.9375rem;
+  color: var(--text-primary);
+}
+
+.logs-page .search-input input:focus {
+  outline: none;
+}
+
+.logs-page .search-input:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.logs-page .filter-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 1rem;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.logs-page .filter-group svg {
+  color: var(--text-muted);
+}
+
+.logs-page .filter-group .custom-select {
+  flex: 1;
+}
+
+.logs-page .logs-table-container {
+  background: var(--bg-white);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.logs-page .logs-table {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  font-size: 0.875rem;
+}
+
+/* Unified row styling - same class for header and data */
+.logs-page .logs-table .table-row {
+  display: grid;
+  grid-template-columns: 180px 200px 150px 150px 150px 1fr;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.logs-page .logs-table .table-row:last-child {
+  border-bottom: none;
+}
+
+.logs-page .logs-table .table-row.header {
+  background: var(--bg-light);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+
+.logs-page .logs-table .table-row:not(.header):hover {
+  background: rgba(37, 211, 102, 0.05);
+}
+
+.logs-page .timestamp {
+  font-family: monospace;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.logs-page .action {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+/* The row's message, which some actions use to name what happened: wraps under the action. */
+.logs-page .action .log-message {
+  display: block;
+  margin-top: 0.25rem;
+  font-weight: 400;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.logs-page .api-key {
+  font-family: monospace;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.logs-page .ip {
+  font-family: monospace;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.logs-page .severity-badge {
+  display: inline-block;
+  padding: 0.25rem 0.625rem;
+  border-radius: 6px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+
+.logs-page .logs-table .table-row > span:last-child {
+  justify-self: end;
+}
+
+.logs-page .severity-badge.info {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--info);
+}
+
+.logs-page .severity-badge.warn {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning-text);
+}
+
+.logs-page .severity-badge.error {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error-text);
+}
+
+.logs-page .pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.logs-page .pagination button {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+
+.logs-page .pagination button:hover:not(:disabled) {
+  background: var(--bg-light);
+}
+
+.logs-page .pagination button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.logs-page .page-numbers {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.logs-page .page-numbers button {
+  min-width: 36px;
+  padding: 0.5rem;
+}
+
+.logs-page .page-numbers button.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #0f172a;
+}
+
+/* Empty Table State */
+.logs-page .empty-table-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.logs-page .empty-table-state svg {
+  margin-bottom: 1rem;
+  opacity: 0.4;
+  color: var(--text-muted);
+}
+
+.logs-page .empty-table-state h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0 0 0.5rem;
+}
+
+.logs-page .empty-table-state p {
+  margin: 0;
+  font-size: 0.875rem;
+  max-width: 300px;
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  .logs-page {
+    padding: 1rem;
+  }
+
+  .logs-page .filters-bar {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .logs-page .search-input {
+    max-width: none;
+  }
+
+  .logs-page .filter-group {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .logs-page .filter-group .custom-select {
+    flex: 1;
+  }
+
+  .logs-page .logs-table-container {
+    overflow-x: visible;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .logs-page .logs-table {
+    display: block;
+  }
+
+  .logs-page .logs-table .table-row.header {
+    display: none;
+  }
+
+  .logs-page .logs-table .table-row:not(.header) {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: start;
+    gap: 0.5rem;
+    padding: 1rem;
+    background: var(--bg-white);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    margin-bottom: 0.75rem;
+  }
+
+  /* Cells inherit centering from the desktop grid; force a start-aligned, scannable card. */
+  .logs-page .logs-table .table-row:not(.header) > span {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: start;
+  }
+
+  .logs-page .logs-table .table-row:not(.header):hover {
+    background: var(--bg-white);
+  }
+
+  /* Action label prominent at top */
+  .logs-page .logs-table .table-row .action {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    order: 1;
+    margin-bottom: 0.25rem;
+  }
+
+  /* Timestamp secondary */
+  .logs-page .logs-table .table-row .timestamp {
+    order: 2;
+    font-size: 0.75rem;
+  }
+
+  /* Session, API Key, IP - inline info */
+  .logs-page .logs-table .table-row > span:nth-child(3),
+  .logs-page .logs-table .table-row > span:nth-child(4),
+  .logs-page .logs-table .table-row > span:nth-child(5) {
+    display: none;
+  }
+
+  /* Severity badge stays visible */
+  .logs-page .logs-table .table-row > span:last-child {
+    order: 3;
+    justify-self: flex-start;
+  }
+
+  .logs-page .pagination {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .logs-page .pagination button {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+  }
+
+  .logs-page .page-numbers button {
+    min-width: 32px;
+    padding: 0.5rem 0.25rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .logs-page {
+    padding: 0.75rem;
+  }
+}

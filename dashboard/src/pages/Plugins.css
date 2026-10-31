@@ -1,0 +1,1178 @@
+.plugins-page {
+  padding: 2rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Plugins Grid */
+.plugins-page .plugins-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1.5rem;
+}
+
+/* Plugin Card */
+.plugins-page .plugin-card {
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s;
+}
+
+.plugins-page .plugin-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.plugins-page .plugin-card-header {
+  padding: 1.25rem 1.25rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.plugins-page .plugin-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.plugins-page .plugin-icon-wrapper {
+  width: 42px;
+  height: 42px;
+  background: var(--bg-light);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.plugins-page .plugin-icon-wrapper svg {
+  color: var(--text-secondary);
+}
+
+/* Calm, low-saturation type tints on the icon only — no loud gradient header, no alarming red. */
+.plugins-page .type-extension .plugin-icon-wrapper {
+  background: rgba(99, 102, 241, 0.12);
+}
+.plugins-page .type-extension .plugin-icon-wrapper svg {
+  color: #6366f1;
+}
+.plugins-page .type-storage .plugin-icon-wrapper {
+  background: rgba(13, 148, 136, 0.12);
+}
+.plugins-page .type-storage .plugin-icon-wrapper svg {
+  color: #0d9488;
+}
+.plugins-page .type-queue .plugin-icon-wrapper {
+  background: rgba(217, 119, 6, 0.12);
+}
+.plugins-page .type-queue .plugin-icon-wrapper svg {
+  color: var(--warning-text);
+}
+.plugins-page .type-auth .plugin-icon-wrapper {
+  background: rgba(147, 51, 234, 0.12);
+}
+.plugins-page .type-auth .plugin-icon-wrapper svg {
+  color: #9333ea;
+}
+
+.plugins-page .plugin-name {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugins-page .plugin-version {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Newer-version chip on an installed plugin's card. Clickable: opens the Install drawer's
+   catalog tab pre-filtered to this plugin, where the actual Update button lives. */
+.plugins-page .plugin-update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-inline-start: 8px;
+  padding: 0.0625rem 0.4375rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--primary-text, #167c3b);
+  background: color-mix(in srgb, var(--primary, #25d366) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary, #25d366) 35%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.plugins-page .plugin-update-chip:hover {
+  background: color-mix(in srgb, var(--primary, #25d366) 20%, transparent);
+}
+
+/* Pending-update counter on the Install button, so updates are visible without opening it. */
+.plugins-page .install-update-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.3125rem;
+  margin-inline-start: 6px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  /* On the brand green Install button in both themes: dark text, as on .btn-primary. The brand-coloured text
+     this had was 2.49:1 on it in light and the same colour as the button in dark (invisible). */
+  color: #0f172a;
+  background: color-mix(in srgb, var(--primary, #25d366) 18%, transparent);
+  border-radius: 999px;
+}
+
+.plugins-page .plugin-builtin-badge {
+  padding: 0.1875rem 0.5rem;
+  background: var(--bg-light);
+  color: var(--text-muted);
+  font-size: 0.625rem;
+  font-weight: 600;
+  border-radius: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.plugins-page .plugin-card-body {
+  padding: 1.25rem;
+}
+
+.plugins-page .plugin-description {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+  line-height: 1.5;
+}
+
+.plugins-page .plugin-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.plugins-page .plugin-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.plugins-page .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.plugins-page .status-dot.enabled {
+  background: #22c55e;
+}
+
+.plugins-page .status-dot.disabled {
+  background: #eab308;
+}
+
+.plugins-page .status-dot.error {
+  background: #ef4444;
+}
+
+.plugins-page .status-dot.installed {
+  background: #64748b;
+}
+
+.plugins-page .status-text {
+  font-size: 0.875rem;
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+
+.plugins-page .plugin-type-label {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.plugins-page .plugin-provides {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-bottom: 1rem;
+}
+
+.plugins-page .provides-tag {
+  padding: 0.25rem 0.5rem;
+  background: var(--bg-light);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
+
+.plugins-page .plugin-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.plugins-page .plugin-error-text {
+  color: var(--error-text);
+  font-size: 0.75rem;
+}
+
+.plugins-page .plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.plugins-page .btn-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+/* Positive action (Enable / Activate): the one solid brand-green CTA, so an action never reads
+   the same as the passive "Active" state below. */
+.plugins-page .btn-toggle.enable {
+  background: var(--primary, #25d366);
+  border: 1px solid var(--primary, #25d366);
+  color: #0f172a;
+}
+
+.plugins-page .btn-toggle.enable:hover {
+  background: #16a34a;
+  border-color: #16a34a;
+}
+
+.plugins-page .btn-toggle.disable {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--error-text);
+}
+
+.plugins-page .btn-toggle.disable:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.plugins-page .btn-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.plugins-page .btn-action {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0;
+}
+
+.plugins-page .btn-action:hover {
+  background: var(--bg-white);
+  border-color: var(--text-muted);
+}
+
+.plugins-page .btn-action svg {
+  color: var(--text-secondary);
+}
+
+/* Empty State */
+.plugins-page .empty-state {
+  text-align: center;
+  padding: 4rem 2rem;
+}
+
+.plugins-page .empty-state svg {
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+}
+
+.plugins-page .empty-state h3 {
+  font-size: 1.25rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.plugins-page .empty-state p {
+  color: var(--text-muted);
+}
+
+/* Config Modal */
+.plugins-page .config-modal {
+  max-width: 640px;
+  width: 90%;
+}
+
+.plugins-page .config-form .form-group {
+  margin-bottom: 1.25rem;
+}
+
+.plugins-page .config-form .form-group label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.plugins-page .config-form .form-group input,
+.plugins-page .config-form .form-group select,
+.plugins-page .config-form .form-group textarea {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  background-color: var(--bg-light);
+  transition: all 0.2s;
+  box-sizing: border-box;
+}
+
+.plugins-page .config-form .form-group textarea {
+  font-family: inherit;
+  resize: vertical;
+  min-height: 4.5rem;
+}
+
+.plugins-page .config-form .form-group input:focus,
+.plugins-page .config-form .form-group select:focus,
+.plugins-page .config-form .form-group textarea:focus {
+  outline: none;
+  border-color: var(--focus-ring);
+  background-color: var(--bg-white);
+  box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.1);
+}
+
+/* Nested object — a bordered group of sub-fields. */
+.plugins-page .config-form .config-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 0.25rem;
+  margin: 0 0 1.25rem;
+  min-width: 0;
+}
+
+.plugins-page .config-form .config-fieldset > legend {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 0 0.4rem;
+}
+
+/* Array-of-rows — repeating rows with add/remove. */
+.plugins-page .config-form .config-array {
+  margin-bottom: 1.25rem;
+}
+
+.plugins-page .config-form .config-array > label,
+.plugins-page .config-form .config-array > .config-array-label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.plugins-page .config-form .config-array-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.plugins-page .config-form .config-array-row-body {
+  flex: 1;
+  min-width: 0;
+  border-inline-start: 2px solid var(--border);
+  padding-inline-start: 0.75rem;
+}
+
+.plugins-page .config-form .config-array-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-light);
+  color: var(--error-text);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.plugins-page .config-form .config-array-remove:hover {
+  background: var(--error);
+  color: #fff;
+  border-color: var(--error);
+}
+
+.plugins-page .config-form .config-array-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.plugins-page .config-form .config-array-add:hover {
+  border-color: var(--primary);
+  color: var(--primary-text);
+}
+
+/* Sandboxed-iframe config editor (B-full). */
+.plugins-page .plugin-config-ui-frame {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-white);
+}
+
+.plugins-page .config-ui-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: var(--text-muted);
+}
+
+.plugins-page .config-ui-error {
+  padding: 1rem;
+  text-align: center;
+  color: var(--error-text);
+}
+
+.plugins-page .config-form .form-group small {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Scoped to .config-form rather than .form-group: the same mark also renders inside an array's
+   caption, which lives in .config-array and so never matched the narrower selector. A required
+   array showed its asterisk in body text instead of the error colour. */
+.plugins-page .config-form .required-mark {
+  color: var(--error-text);
+}
+
+.plugins-page .toggle-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: var(--bg-light);
+  border-radius: 8px;
+}
+
+.plugins-page .toggle-info {
+  flex: 1;
+}
+
+.plugins-page .toggle-info label {
+  display: block !important;
+  margin-bottom: 0.25rem !important;
+}
+
+.plugins-page .toggle-info small {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.plugins-page .toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.plugins-page .toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.plugins-page .toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--border);
+  transition: 0.3s;
+  border-radius: 26px;
+}
+
+.plugins-page .toggle-slider:before {
+  position: absolute;
+  content: '';
+  height: 20px;
+  width: 20px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: 0.3s;
+  border-radius: 50%;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.plugins-page .toggle-switch input:checked + .toggle-slider {
+  background-color: var(--primary);
+}
+
+.plugins-page .toggle-switch input:checked + .toggle-slider:before {
+  transform: translateX(22px);
+}
+
+.plugins-page .toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.plugins-page .no-config {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-muted);
+}
+
+.plugins-page .no-config p {
+  margin-top: 1rem;
+}
+
+/* Update action in the catalog — visually distinct from a fresh Install (which stays the primary
+   green). "Update available" means a newer version exists; differentiating it (amber) tells the
+   operator at a glance which rows need upgrading vs. which are fresh installs, instead of every
+   action button reading identically. Mirrors .btn-primary's metrics so the catalog rows stay aligned. */
+.plugins-page .btn-update {
+  padding: 0.75rem 1.5rem;
+  background: #f59e0b;
+  color: #0f172a;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.plugins-page .btn-update:hover {
+  background: #d97706;
+}
+
+.plugins-page .btn-update:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .plugins-page {
+    padding: 1rem;
+  }
+
+  .plugins-page .plugins-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Two-column control layout: status rail + plugin catalog ─────────────── */
+.plugins-page .plugins-layout {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.plugins-page .plugins-rail {
+  flex: 0 0 280px;
+  position: sticky;
+  top: 1.5rem;
+  /* Pinned, so never taller than the window less its 1.5rem offset: a longer list scrolls inside the rail. */
+  max-height: calc(100vh - 3rem);
+  max-height: calc(100dvh - 3rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+
+.plugins-page .plugins-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.plugins-page .rail-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.625rem;
+}
+
+.plugins-page .rail-stats {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.plugins-page .rail-stat {
+  flex: 1;
+  background: var(--bg-light);
+  border-radius: 8px;
+  padding: 0.625rem 0.75rem;
+  text-align: center;
+}
+
+.plugins-page .rail-stat-num {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.plugins-page .rail-stat-label {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.plugins-page .rail-active-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.plugins-page .rail-active-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.plugins-page .rail-active-name {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugins-page .rail-active-type {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.plugins-page .rail-empty {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+/* Uninstall icon button — neutral, red on hover */
+.plugins-page .btn-action-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.plugins-page .btn-action-danger:hover svg {
+  color: var(--error-text);
+}
+
+/* Install modal */
+.plugins-page .install-hint {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 1rem;
+}
+
+/* Sub-hint (marketplace teaser) under the upload drop — lighter + tighter so it reads as a pointer,
+   not a second paragraph. */
+.plugins-page .install-hint-sub {
+  margin-top: 0.75rem;
+  margin-bottom: 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+/* Trusted-code warning at the top of the install modal — the warning colour and the icon mark it
+   as a caution, not a hint (mirrors .migration-warning on the infrastructure page). */
+.plugins-page .install-hint-warning {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+  color: var(--warning-text);
+}
+
+.plugins-page .install-hint-warning svg {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+}
+
+/* Inline "Catalog" link inside the sub-hint — looks like a link, not a button, so it doesn't compete
+   with the tab strip above or the footer actions. */
+.plugins-page .install-inline-link {
+  display: inline;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--primary-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.plugins-page .install-inline-link:hover {
+  filter: brightness(1.1);
+}
+
+.plugins-page .install-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+  padding: 2rem 1rem;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.plugins-page .install-drop:hover {
+  border-color: var(--primary, #25d366);
+  color: var(--text-secondary);
+}
+
+.plugins-page .install-drop.has-file {
+  border-style: solid;
+  border-color: var(--primary, #25d366);
+  color: var(--text-primary);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.plugins-page .install-drop-name {
+  font-size: 0.875rem;
+  word-break: break-all;
+}
+
+/* Hidden from sight but focusable: the hidden attribute would take the chooser out of the tab order. The drop zone
+   around it shows the keyboard focus. */
+.plugins-page .install-drop input[type='file'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.plugins-page .install-drop:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Beside the 280px rail the card grid keeps its 320px minimum track, which needs 948px of viewport with
+   the sidebar open; below that the rail stacks above the cards. */
+@media (max-width: 950px) {
+  .plugins-page .plugins-layout {
+    flex-direction: column;
+  }
+
+  .plugins-page .plugins-rail {
+    flex-basis: auto;
+    width: 100%;
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
+}
+
+/* ── Install modal: Upload / Catalog tabs + catalog list ─────────────────── */
+/* Segmented pill tab control — shared shape for the install (Upload/Catalog) and
+   config (Configuration/Sessions) modal tabs. Replaces the old flat green underline. */
+.plugins-page .install-tabs,
+.plugins-page .config-modal .modal-tabs {
+  display: inline-flex;
+  align-self: center;
+  gap: 2px;
+  margin: 0 0 0.75rem;
+  padding: 3px;
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+/* The config dialog's strip is a direct child of the dialog card, which is 90% of the window. As one unbreakable row
+   it was wider than the card at 320px (15px past each edge in English, 17px in German, more in Spanish and Turkish)
+   and cut off its outer tabs. It now keeps a margin on each side and wraps its tabs onto a second row when their
+   labels do not fit in one. */
+.plugins-page .config-modal .modal-tabs {
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100% - 1rem);
+}
+
+.plugins-page .config-modal .modal-tab {
+  flex: 1 1 auto;
+}
+
+/* Three-item header (title + tabs + close), drawn in the order of its markup so that keyboard focus runs the way the
+   eye reads. On a narrow viewport the title has a row of its own (flex-wrap on the header) and the tabs share the
+   next one with the close button, without the standalone-row margins that would push the title up or leave a gap. */
+.plugins-page .install-modal .modal-header {
+  flex-wrap: wrap;
+  row-gap: 0.75rem;
+}
+
+.plugins-page .install-modal .modal-header .install-tabs {
+  margin: 0;
+  flex: 1 1 0;
+}
+
+/* From 700px the header is three tracks: the middle one as wide as the tabs, the outer two sharing the rest
+   equally. That puts the tabs in the true horizontal center (justify-content:space-between only
+   approximates it, as the title and the close button differ in width) and cuts a long title inside its own
+   track, where absolute positioning let it run under the tabs. */
+@media (min-width: 700px) {
+  .plugins-page .install-modal .modal-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .plugins-page .install-modal .modal-header .install-tabs {
+    /* Out of the row height, so a tall pill (a label that wraps) does not grow the header, and centered in
+       the header's padding box (1.5rem above the row, 1rem below it) as the absolute positioning it
+       replaces had it: 0.25rem above the center of the row. */
+    margin-block: -3.25rem -2.75rem;
+  }
+
+  .plugins-page .install-modal .modal-header .btn-icon {
+    justify-self: end;
+  }
+}
+
+.plugins-page .install-modal .modal-header h2 {
+  flex: 1 1 100%;
+  min-width: 0;
+  /* Truncate an over-long title rather than collide with the tabs; the modal title is short by
+     design ("Install a plugin"), so this only ever bites an unusually long translation. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Equal-width tabs so "Upload .zip" and "Catalog" don't read as mismatched lengths. Both get the
+   same min-width + flex:1 1 0 so they share the pill's width equally regardless of label length. */
+.plugins-page .install-tab {
+  flex: 1 1 0;
+  min-width: 128px;
+}
+
+.plugins-page .install-tab,
+.plugins-page .config-modal .modal-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0.4rem 0.9rem;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+/* Active tab: a clear primary treatment that reads at a glance — flat, no lift or glow. */
+.plugins-page .install-tab.active,
+.plugins-page .config-modal .modal-tab.active {
+  background: var(--primary);
+  color: #0f172a;
+}
+
+/* Keep the inactive tabs legible against the pill's light track and give them a hover affordance so
+   it's obvious they're clickable before the active treatment snaps in. */
+.plugins-page .install-tab:not(.active):hover,
+.plugins-page .config-modal .modal-tab:not(.active):hover {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--text-primary);
+}
+
+/* On a phone the pill shares its row with the close button, which at 320px leaves less than two 128px tabs need, so
+   the pill and its tabs shrink and a long label wraps. */
+@media (max-width: 699.98px) {
+  .plugins-page .install-modal .modal-header .install-tabs {
+    min-width: 0;
+  }
+
+  .plugins-page .install-tab {
+    min-width: 0;
+    padding-inline: 0.6rem;
+  }
+}
+
+/* The card is 90% of the window. Up to 380px the regular tab padding leaves no room for the three labels of English,
+   German or Spanish in one row, so the padding is cut; wider, only a longer set (Turkish) wraps. */
+@media (max-width: 380px) {
+  .plugins-page .config-modal .modal-tab {
+    padding-inline: 0.35rem;
+  }
+}
+
+/* Sessions tab */
+.plugins-page .sessions-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.plugins-page .sessions-section > h3 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.25rem;
+}
+
+.plugins-page .sessions-section > small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.plugins-page .sessions-radio {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.plugins-page .sessions-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.25rem 0 0.75rem;
+  margin-inline-start: 1.5rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.plugins-page .sessions-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.plugins-page .sessions-empty {
+  margin: 0.25rem 0 0.75rem;
+  margin-inline-start: 1.5rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.plugins-page .sessions-select {
+  width: 100%;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--bg-light);
+  font-size: 0.9375rem;
+  margin-bottom: 1rem;
+  box-sizing: border-box;
+}
+
+/* The rule above out-weighs `select:focus` in index.css and repaints its border. */
+.plugins-page .sessions-select:focus {
+  border-color: var(--focus-ring);
+}
+
+.plugins-page .sessions-override-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.plugins-page .catalog-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px 12px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.plugins-page .catalog-error {
+  flex-wrap: wrap;
+  color: var(--error-text);
+}
+
+.plugins-page .catalog-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.plugins-page .catalog-search input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 0.9375rem;
+  color: var(--text-primary);
+}
+
+.plugins-page .catalog-search:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.plugins-page .catalog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.plugins-page .catalog-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.plugins-page .catalog-row-info {
+  min-width: 0;
+}
+
+.plugins-page .catalog-row-name {
+  font-weight: 600;
+}
+
+.plugins-page .catalog-row-version {
+  color: var(--text-secondary);
+  font-weight: 400;
+  font-size: 0.85em;
+}
+
+.plugins-page .catalog-row-desc {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-top: 2px;
+}
+
+.plugins-page .catalog-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.plugins-page .catalog-badge.update {
+  color: var(--primary-text, #167c3b);
+}
+
+.plugins-page .catalog-row-action {
+  flex-shrink: 0;
+}
+
+.plugins-page .catalog-installed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}

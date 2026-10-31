@@ -1,0 +1,57 @@
+{
+    "name": "@rmyndharis/openwa",
+    "version": "0.8.0",
+    "description": "Official JavaScript/TypeScript SDK for OpenWA, the open-source WhatsApp API Gateway (not affiliated with WhatsApp or Meta)",
+    "type": "module",
+    "main": "./dist/cjs/index.js",
+    "module": "./dist/esm/index.js",
+    "types": "./dist/cjs/index.d.ts",
+    "exports": {
+        ".": {
+            "import": {
+                "types": "./dist/esm/index.d.ts",
+                "default": "./dist/esm/index.js"
+            },
+            "require": {
+                "types": "./dist/cjs/index.d.ts",
+                "default": "./dist/cjs/index.js"
+            }
+        }
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json',JSON.stringify({type:'commonjs'}))\"",
+        "prepublishOnly": "npm run build",
+        "dev": "tsc -p tsconfig.esm.json --watch",
+        "test": "tsc --noEmit && vitest run",
+        "test:watch": "vitest",
+        "smoke": "node scripts/smoke.mjs",
+        "typecheck": "tsc --noEmit"
+    },
+    "keywords": [
+        "whatsapp",
+        "api",
+        "sdk",
+        "openwa",
+        "gateway"
+    ],
+    "author": "OpenWA Contributors",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/rmyndharis/OpenWA",
+        "directory": "sdk/javascript"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "sideEffects": false,
+    "peerDependencies": {},
+    "devDependencies": {
+        "typescript": "^7.0.2",
+        "vitest": "^5.0.3"
+    }
+}

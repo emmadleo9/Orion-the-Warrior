@@ -1,0 +1,96 @@
+import { Boom } from '@hapi/boom';
+import { refusedStatusCode, mapServerRefusal } from './baileys-groups';
+import { wmexRefusalCode } from './baileys-channels';
+import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
+
+/**
+ * `refusedStatusCode` decides whether a Baileys failure was a SERVER refusal (map to 403/404) or a
+ * transport death (must propagate). Every case here is built with a real `Boom`, because that is
+ * what Baileys throws and because the shape is the whole point: Boom's constructor destructures
+ * `data = null`, so no Boom ever carries `data === undefined`.
+ *
+ * The pre-existing fixtures used `Object.assign(new Error(...), { output })` with no `data` at all,
+ * which is why a transport death appeared to propagate in tests while a real one did not.
+ */
+describe('refusedStatusCode', () => {
+  it('reads a server refusal from the numeric data assertNodeErrorFree attaches', () => {
+    // query() runs assertNodeErrorFree before returning, and it throws `data: +errNode.attrs.code`.
+    expect(refusedStatusCode(new Boom('forbidden', { data: 403 }))).toBe(403);
+    expect(refusedStatusCode(new Boom('gone', { data: 410 }))).toBe(410);
+  });
+
+  it.each([
+    ['Connection Closed', 428],
+    ['Timed Out', 408],
+  ])('treats a transport death (%s) as unclassified, so it propagates', (message, statusCode) => {
+    // A real Boom: no server error node, and `data` defaulted to null by the constructor.
+    const err = new Boom(message, { statusCode });
+    expect(err.data).toBeNull();
+    expect(refusedStatusCode(err)).toBeUndefined();
+  });
+
+  it('treats an unanswered query as unclassified rather than a 500-coded refusal', () => {
+    // extractGroupMetadata(undefined) — `data: result` with result undefined, normalised to null.
+    const err = new Boom('Invalid group metadata response: missing <group> node', { data: undefined });
+    expect(refusedStatusCode(err)).toBeUndefined();
+  });
+
+  it('ignores a non-Boom failure entirely', () => {
+    expect(refusedStatusCode(new TypeError('Cannot read properties of undefined'))).toBeUndefined();
+    expect(refusedStatusCode(undefined)).toBeUndefined();
+  });
+});
+
+describe('mapServerRefusal', () => {
+  it('maps a server refusal to EngineRefusedError', async () => {
+    await expect(
+      mapServerRefusal('Setting the group subject', () => Promise.reject(new Boom('forbidden', { data: 403 }))),
+    ).rejects.toBeInstanceOf(EngineRefusedError);
+  });
+
+  it('lets a dead socket through untouched instead of calling it a permissions problem', async () => {
+    const connectionClosed = new Boom('Connection Closed', { statusCode: 428 });
+    await expect(mapServerRefusal('Setting the group subject', () => Promise.reject(connectionClosed))).rejects.toBe(
+      connectionClosed,
+    );
+  });
+
+  it('maps 404 to the not-found error when the caller supplies one, and only 404', async () => {
+    const notFound = () => new Error('no such group');
+    const reject = (code: number) => () => Promise.reject(new Boom('refused', { data: code }));
+    await expect(mapServerRefusal('Leaving the group', reject(404), undefined, notFound)).rejects.toThrow(
+      'no such group',
+    );
+    await expect(mapServerRefusal('Leaving the group', reject(403), undefined, notFound)).rejects.toBeInstanceOf(
+      EngineRefusedError,
+    );
+    await expect(mapServerRefusal('Leaving the group', reject(404))).rejects.toBeInstanceOf(EngineRefusedError);
+  });
+
+  it('lets an unanswered query through untouched', async () => {
+    const noAnswer = new Boom('Invalid group metadata response: missing <group> node', { data: undefined });
+    await expect(mapServerRefusal('Setting the group subject', () => Promise.reject(noAnswer))).rejects.toBe(noAnswer);
+  });
+
+  it('answers a rate limit or a server timeout as 503, not a permissions refusal', async () => {
+    const graphQl = (code: number) =>
+      new Boom('GraphQL server error: rate limited', { statusCode: code, data: { extensions: { error_code: code } } });
+    for (const code of [408, 429]) {
+      await expect(
+        mapServerRefusal('Adding participants', () => Promise.reject(new Boom('rate-overlimit', { data: code }))),
+      ).rejects.toBeInstanceOf(EngineTransportError);
+      await expect(
+        mapServerRefusal('Deleting the channel', () => Promise.reject(graphQl(code)), wmexRefusalCode),
+      ).rejects.toBeInstanceOf(EngineTransportError);
+    }
+  });
+
+  it('marks only a rate limit as throttled, so a pre-charged budget can be given back', async () => {
+    const reject = (code: number) => () => Promise.reject(new Boom('refused', { data: code }));
+    await expect(mapServerRefusal('Creating the group', reject(429))).rejects.toBeInstanceOf(EngineThrottledError);
+    // A server timeout leaves the outcome unknown: it stays a plain transport error.
+    await expect(mapServerRefusal('Creating the group', reject(408))).rejects.not.toBeInstanceOf(EngineThrottledError);
+  });
+});

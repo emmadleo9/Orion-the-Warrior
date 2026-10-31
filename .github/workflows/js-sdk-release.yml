@@ -1,0 +1,148 @@
+name: JavaScript SDK Release
+
+# Publishes @rmyndharis/openwa to npm from sdk/javascript.
+#
+# Authentication is npm Trusted Publishing (OIDC) — there is deliberately NO npm token anywhere in
+# this workflow or in the repository secrets. npm mints a short-lived credential from the GitHub OIDC
+# token, so nothing long-lived exists to leak or expire. It also removes this release path from the
+# 2FA-bypass token deprecation entirely: those tokens lose direct publish in January 2027, whereas a
+# trusted publisher is the migration target rather than a casualty of it.
+#
+# One-time setup on npmjs.com (see sdk/javascript/README.md -> Releasing), required BEFORE the first
+# tag: package settings -> Trusted Publisher -> GitHub Actions, with organization `rmyndharis`,
+# repository `OpenWA`, and workflow filename `js-sdk-release.yml`. Until that exists npm rejects the
+# publish; the guard below fails first with a pointer rather than letting it surface as a raw 404.
+#
+# The SDK version is the package.json version on a dedicated tag (e.g. js-sdk-v0.2.0), NOT the
+# monorepo v* app tags.
+
+on:
+  push:
+    tags: ['js-sdk-v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that installs or runs third-party code (the npm install, the test toolchain, the compiler
+  # that builds dist/) runs here, in a job that cannot mint a publish credential. Those packages resolve
+  # from the lockfile today but are code from many authors, so they must never share a job with
+  # id-token: write. Same layout as python-sdk-release.yml.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: sdk/javascript
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Guards are textual and secret-free, so a misconfigured release fails BEFORE anything is built
+      # or published. Mirrors java-sdk-release.yml.
+      - name: Guard — ref must be a js-sdk-v* release tag
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          # workflow_dispatch can start this workflow on ANY ref; publishing an arbitrary branch or a
+          # monorepo app tag to npm must not be possible.
+          case "$REF" in
+            refs/tags/js-sdk-v*) ;;
+            *)
+              echo "::error::This workflow publishes to npm and must run from a js-sdk-v* tag (got '$REF'). For workflow_dispatch, select the release tag as the run ref."
+              exit 1
+              ;;
+          esac
+
+      - name: Guard — tag version matches package.json version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${REF_NAME#js-sdk-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag '$REF_NAME' (version '$TAG_VERSION') does not match package.json version '$PKG_VERSION'. Bump the package or fix the tag before releasing."
+            exit 1
+          fi
+          echo "Tag $REF_NAME matches package.json $PKG_VERSION"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          # '22' resolves to the latest 22.x. No registry-url/NODE_AUTH_TOKEN: nothing here publishes.
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: sdk/javascript/package-lock.json
+
+      # The audit ci.yml runs over this tree, so a tag cannot publish what main would refuse. `npm audit`
+      # reads the lockfile alone, so it runs before the install executes any of the toolchain. It has no
+      # skip path: an npm audit outage fails the publish, and a re-run clears it.
+      - run: npm audit --audit-level=high
+
+      # --engine-strict: the tests below must not run on a Node the locked toolchain does not support.
+      - run: npm ci --engine-strict
+
+      # Same gates as SDK CI, and for the same reason Java's release runs its tests: the artifact that
+      # reaches the registry must be the one that passed, not a rebuild nobody checked.
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run smoke # packaging plus request smoke; must run after build
+
+      # The tarball that passed the gates above is the one that ships: `npm pack` takes dist/ as built,
+      # and the publish job uploads these bytes without a checkout or an install of its own.
+      - name: Pack the package
+        run: npm pack
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: js-sdk-package
+          path: sdk/javascript/*.tgz
+          if-no-files-found: error
+
+  publish:
+    # Runs only after the guards, the audit, the tests and the pack above all passed.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Mints the OIDC token npm exchanges for its short-lived publish credential. Without this the
+      # publish falls back to looking for a token and fails: it is the whole mechanism. No checkout and
+      # no project install: this job only uploads the tarball the build job produced and tested.
+      id-token: write
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          # Trusted publishing needs Node >= 22.14.0; '22' resolves to the latest 22.x, which is well
+          # past that.
+          node-version: '22'
+
+      - name: Use an npm that supports trusted publishing
+        # The npm bundled with Node 22 predates OIDC publishing (needs >= 11.5.1), and it fails by
+        # looking for a token rather than by naming the missing support. Pinned to the exact release
+        # the Dockerfile uses: this npm runs while the job can mint a publish credential, so it must
+        # not float to whatever version is current when the tag is pushed.
+        run: |
+          npm install -g npm@12.2.1
+          npm_bundle_dir="$(npm root --global)/npm/node_modules"
+          node -e "if (require(process.argv[1]).version !== '6.29.0') throw new Error('Recheck npm Undici replacement');" "$npm_bundle_dir/undici/package.json"
+          npm_http_patch_dir=$(mktemp -d)
+          npm install --prefix "$npm_http_patch_dir" --no-save --package-lock=false --ignore-scripts --no-audit --fund=false undici@6.29.1
+          rm -rf "$npm_bundle_dir/undici"
+          mv "$npm_http_patch_dir/node_modules/undici" "$npm_bundle_dir/undici"
+          rm -rf "$npm_http_patch_dir"
+          npm --version
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: js-sdk-package
+          path: package/
+
+      - name: Publish to npm (trusted publishing, provenance automatic)
+        # No --provenance flag: npm attaches provenance on its own for a trusted-publisher release, and
+        # passing it is redundant. --access public is explicit because the package is scoped. The
+        # tarball is named by its absolute path because npm reads `package/file.tgz` as the GitHub
+        # shorthand user/repo, which the pinned npm refuses to fetch.
+        run: npm publish "$GITHUB_WORKSPACE"/package/*.tgz --access public --ignore-scripts

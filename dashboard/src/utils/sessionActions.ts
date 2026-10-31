@@ -1,0 +1,73 @@
+// Which lifecycle actions a session card offers, extracted for direct unit testing (dashboard tests
+// cover pure utils only).
+
+import type { Session } from '../services/api.ts';
+
+// Stop, Unlink and Force-Kill share one precondition: the gateway holds a live engine to act on.
+// Start has the exact complement — it answers 400 while one exists. So all four derive from the
+// gateway's own `engineLoaded`, which is read from the live engine map per request. Deriving them
+// from `status` cannot be made correct: `disconnected` covers BOTH a session mid automatic-reconnect
+// (engine registered, Start 400s) and one stopped through stop() (no engine, Start is the right
+// action), and those are the same status.
+//
+// The fallback below is for a dashboard talking to a gateway that predates the field. It reproduces
+// the old status set, whose known wrong answer is exactly that `disconnected` case — a stale
+// dashboard keeps the old behaviour instead of guessing differently.
+const STARTED_STATUSES_FALLBACK = new Set(['initializing', 'qr_ready', 'authenticating', 'ready', 'action_required']);
+
+export function isSessionStarted(session: Pick<Session, 'status' | 'engineLoaded'>): boolean {
+  return session.engineLoaded ?? STARTED_STATUSES_FALLBACK.has(session.status);
+}
+
+// Which body the session card gets: the pairing placeholder, or the session's identity rows.
+//
+// `qr_ready` always means a code is on offer, so it always gets the placeholder. `initializing` is the
+// ambiguous one: it covers a never-linked session walking up to its first QR, and it also covers a
+// LINKED session inside the engine's own reconnect backoff (Baileys drops to INITIALIZING on every
+// transient close). The second is still paired to a number, and showing it "Preparing QR code" reads
+// as an account that has been unlinked.
+//
+// `phone` is the discriminator because it tracks the link and nothing else: it is written by a
+// successful ready and cleared exactly when the link dies, on a WhatsApp-side unlink and on logout().
+// `connectedAt` is never cleared, so it would keep claiming "linked" for a session unlinked an hour
+// ago, and `engineLoaded` is dropped to undefined by the Sessions page on every websocket status push,
+// which is the very transition that lands a card here.
+export function awaitsPairing(session: Pick<Session, 'status' | 'phone'>): boolean {
+  return session.status === 'qr_ready' || (session.status === 'initializing' && !session.phone);
+}
+
+// Unlink calls POST /sessions/:id/logout, which needs a live engine to send the unlink through — the
+// same precondition as Stop, and what the API's own 400 tells the operator.
+export function canUnlinkSession(session: Pick<Session, 'status' | 'engineLoaded'>, canWrite: boolean): boolean {
+  return canWrite && isSessionStarted(session);
+}
+
+// Force-kill is the emergency hatch for a WEDGED engine, so it is offered exactly when a live engine
+// exists. That excludes FAILED: a terminal failure already evicted the engine, so there is nothing
+// left to kill — the card offers reconnect/manual start instead. It now INCLUDES a `disconnected`
+// session still holding an engine through its reconnect backoff, which is precisely the wedged case
+// the button exists for and which the status-only rule used to hide.
+export function canForceKillSession(session: Pick<Session, 'status' | 'engineLoaded'>, canWrite: boolean): boolean {
+  return canWrite && isSessionStarted(session);
+}
+
+// Replace the row matching `updated.id` with the EXACT authoritative response object. The original
+// defect was that the page discarded the API response and fabricated `{ status: 'disconnected' }`,
+// losing server-owned fields (phone:null, timestamps). Returning the exact object — never a merge —
+// is what keeps the local view byte-for-byte with the server's authoritative state.
+export function replaceSession(sessions: Session[], updated: Session): Session[] {
+  return sessions.map(s => (s.id === updated.id ? updated : s));
+}
+
+// The gateway's own stable code SESSION_LOGOUT_INCOMPLETE is the only signal that the session stopped
+// locally while the unlink operation stayed incomplete. A reverse-proxy 502 — bare or a JSON body
+// without that exact code — must stay generic: the request may never have reached the gateway, so
+// nothing was stopped and the "start and retry the logout" guidance would be actively wrong. The code
+// is carried on the thrown API error (see services/api.ts), not inferred from a message heuristic.
+// A 409 is the gateway's answer for a session with no linked device: there was nothing to unlink, the session was
+// stopped, and its message says what to do instead, which a retry of the unlink cannot change.
+export function classifyUnlinkError(err: unknown): 'incomplete' | 'notLinked' | 'generic' {
+  const e = err as { code?: string; status?: number } | null | undefined;
+  if (e?.code === 'SESSION_LOGOUT_INCOMPLETE') return 'incomplete';
+  return e?.status === 409 ? 'notLinked' : 'generic';
+}

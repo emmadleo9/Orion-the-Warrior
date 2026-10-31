@@ -1,0 +1,150 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import type { Session } from '../entities/session.entity';
+import { SessionStatus } from '../entities/session.entity';
+
+export class AccountRestrictionDto {
+  @ApiProperty({
+    enum: ['reachout_timelock', 'tos_block', 'proxy_block'],
+    description:
+      'What WhatsApp is restricting. `reachout_timelock` leaves the session connected and existing ' +
+      'chats working, blocking only the start of new conversations. `tos_block` and `proxy_block` ' +
+      'are connection-level refusals — the session cannot stay linked while one is in force, so ' +
+      'seeing either alongside a `ready` status is not possible.',
+    example: 'reachout_timelock',
+  })
+  kind!: 'reachout_timelock' | 'tos_block' | 'proxy_block';
+
+  @ApiProperty({
+    description:
+      "The engine's own token for the cause, passed through verbatim so it can be searched for and " +
+      'so a value newer than this gateway is still surfaced rather than flattened.',
+    example: 'BIZ_QUALITY',
+  })
+  code!: string;
+
+  @ApiPropertyOptional({
+    type: String,
+    format: 'date-time',
+    description:
+      'When enforcement ends, if the engine states it. Only reachout timelocks carry an expiry; ' +
+      'absent means the engine gave no end time, not that the restriction is permanent.',
+    example: '2026-08-04T09:00:00Z',
+    nullable: true,
+  })
+  expiresAt?: Date | null;
+}
+
+export class SessionResponseDto {
+  @ApiProperty({ example: '0a941dac-a965-45e7-b318-74ae8be134f0' })
+  id!: string;
+
+  @ApiProperty({ example: 'my-bot' })
+  name!: string;
+
+  @ApiProperty({ enum: SessionStatus, example: SessionStatus.READY })
+  status!: SessionStatus;
+
+  @ApiPropertyOptional({ type: String, example: '628123456789', nullable: true })
+  phone?: string | null;
+
+  @ApiPropertyOptional({ type: String, example: 'John Doe', nullable: true })
+  pushName?: string | null;
+
+  @ApiPropertyOptional({ type: String, format: 'date-time', example: '2025-02-02T10:00:00Z', nullable: true })
+  connectedAt?: Date | null;
+
+  @ApiPropertyOptional({ type: String, format: 'date-time', example: '2025-02-02T10:30:00Z', nullable: true })
+  lastActive?: Date | null;
+
+  @ApiProperty({ example: '2025-02-02T09:00:00Z' })
+  createdAt!: Date;
+
+  @ApiProperty({ example: '2025-02-02T10:00:00Z' })
+  updatedAt!: Date;
+
+  @ApiPropertyOptional({
+    type: String,
+    description:
+      'Human-readable reason carried while the status is FAILED (a terminal engine failure), ' +
+      'ACTION_REQUIRED (the engine is running but something needs a human), or INITIALIZING from the ' +
+      'fifth consecutive reconnect attempt of a session whose engine retries a dropped connection on its own, ' +
+      'until the session is ready or a QR arrives. A QR window that runs out unscanned is not an attempt. ' +
+      'INITIALIZING also carries it while a reconnect waits to retry after the engine failed to relaunch. ' +
+      'Held in memory by the process running the session. Cleared on any other status.',
+    example: 'Failed to launch the browser process: spawn /usr/bin/chromium ENOENT',
+    nullable: true,
+  })
+  lastError?: string | null;
+
+  @ApiPropertyOptional({
+    type: AccountRestrictionDto,
+    description:
+      "A restriction WhatsApp itself has placed on this session's account, or null when there is " +
+      'none. Distinct from `lastError`, which describes a fault on our side of the link. Derived ' +
+      'from live engine state, so it is never persisted: it is re-established on the next connect.',
+    nullable: true,
+  })
+  restriction?: AccountRestrictionDto | null;
+
+  @ApiProperty({
+    description:
+      'Whether the gateway currently holds a live engine for this session: an engine in the answering ' +
+      'process or, in a multi-node deployment, a live claim by the node running the session. `status` ' +
+      'alone does not imply it: a `disconnected` session keeps its engine for the duration of an automatic ' +
+      'reconnect backoff, while a session stopped through `POST /sessions/:sessionId/stop` carries the same ' +
+      'status with no engine. On the node running the session, `true` means `stop`, `logout` and ' +
+      '`force-kill` can act and `start` answers 400; `false` means the reverse. For a session another node ' +
+      'runs, request routing (NODE_URL set on every node) forwards the lifecycle routes to that node, where ' +
+      'they act; without routing, only that node can act on it, and any other node answers 409 to `start` ' +
+      'and `stop` and 400 to `logout` and `force-kill`. Derived per request from live state, so it is never ' +
+      'persisted and never historical.',
+    example: true,
+  })
+  engineLoaded!: boolean;
+
+  /**
+   * Map a Session entity to the public response shape, stripping sensitive
+   * engine config fields (`config`, `proxyUrl`, `proxyType`) that must not
+   * appear in any API response.
+   *
+   * `engineLoaded` is not on the entity — it is live state owned by the session service, so
+   * every caller must pass it in rather than letting it default. A required parameter is deliberate:
+   * a default of `false` would silently tell clients "no engine" for whole surfaces (the MCP tools,
+   * any future caller) and the dashboard would then offer Start to a running session.
+   */
+  static fromEntity(session: Session, engineLoaded: boolean): SessionResponseDto {
+    return {
+      id: session.id,
+      name: session.name,
+      status: session.status,
+      phone: session.phone,
+      pushName: session.pushName,
+      connectedAt: session.connectedAt,
+      lastActive: session.lastActiveAt,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      lastError: session.lastError ?? null,
+      restriction: session.restriction
+        ? {
+            kind: session.restriction.kind,
+            code: session.restriction.code,
+            // Held as epoch ms internally (what the engine gives us); served as a date-time like
+            // every other timestamp in this response.
+            expiresAt: session.restriction.expiresAt ? new Date(session.restriction.expiresAt) : null,
+          }
+        : null,
+      engineLoaded,
+    };
+  }
+}
+
+export class QRCodeResponseDto {
+  @ApiProperty({
+    description: 'QR code as data URL',
+    example: 'data:image/png;base64,...',
+  })
+  qrCode!: string;
+
+  @ApiProperty({ enum: SessionStatus, example: SessionStatus.QR_READY })
+  status!: SessionStatus;
+}
