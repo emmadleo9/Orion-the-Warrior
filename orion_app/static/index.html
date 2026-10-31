@@ -48,10 +48,6 @@
             <i data-lucide="activity" class="w-4 h-4"></i>
             <span>Tasks</span>
           </button>
-          <button class="nav" type="button" data-view="self-writer-view" aria-label="Self Writer">
-            <i data-lucide="code-2" class="w-4 h-4"></i>
-            <span>Self Writer</span>
-          </button>
         </nav>
 
         <section class="sidebar-diagnostics" aria-label="Diagnostics">
@@ -756,80 +752,6 @@
           </section>
         </section>
 
-        <!-- Self Writer -->
-        <section id="self-writer-view" class="app-view" hidden aria-labelledby="self-writer-title">
-          <header class="topbar">
-            <div>
-              <p class="eyebrow">Self-Rewriting Engine</p>
-              <h2 id="self-writer-title">Orion Self-Writer</h2>
-            </div>
-            <span id="self-writer-model-status" class="model-status">Checking...</span>
-          </header>
-          <p class="intro-text">Tell Orion what to build or change. 100% local — no paid API key required.</p>
-
-          <div class="grid grid-2col section-gap">
-            <article class="panel">
-              <div class="chat-heading">
-                <div>
-                  <p class="eyebrow">Admin Command</p>
-                  <h3>Tell Orion what to build</h3>
-                </div>
-              </div>
-              <form id="self-writer-form" class="simple-form">
-                <label for="self-writer-command">Command</label>
-                <textarea id="self-writer-command" rows="4" maxlength="4000" placeholder="e.g. add a dark mode toggle, create a login page" required></label>
-                <label for="self-writer-target">Target file (optional)</label>
-                <input id="self-writer-target" type="text" maxlength="200" placeholder="Leave blank to let Orion decide" />
-                <button id="self-writer-go-btn" class="btn-primary" type="submit">Make Orion Write It</button>
-                <span id="self-writer-status" class="hint" role="status"></span>
-              </form>
-            </article>
-
-            <article class="panel terminal-card">
-              <div class="chat-heading">
-                <div>
-                  <p class="eyebrow">Live Log</p>
-                  <h3>Orion is working</h3>
-                </div>
-              </div>
-              <div class="terminal-body" id="self-writer-log" role="log" aria-live="polite">
-                <div class="term-line system-msg">
-                  <span class="term-time">[ready]</span>
-                  <span class="term-text">Self-writer standing by.</span>
-                </div>
-              </div>
-            </article>
-          </div>
-
-          <section class="panel section-gap" id="self-writer-diff-section" hidden>
-            <div class="chat-heading">
-              <div>
-                <p class="eyebrow">Review Diff</p>
-                <h3>Proposed Changes</h3>
-              </div>
-              <span id="self-writer-diff-summary" class="hint" role="status"></span>
-            </div>
-            <pre id="self-writer-diff" class="diff-preview"></pre>
-            <div class="archer-controls">
-              <button id="self-writer-approve-btn" class="btn-primary" type="button">Approve & Apply</button>
-              <button id="self-writer-reject-btn" class="btn-ghost" type="button">Reject</button>
-              <button id="self-writer-copy-btn" class="btn-ghost" type="button">Copy Code</button>
-            </div>
-            <span id="self-writer-apply-status" class="hint" role="status"></span>
-          </section>
-
-          <section class="panel section-gap" id="self-writer-backups-section">
-            <div class="chat-heading">
-              <div>
-                <p class="eyebrow">Backups</p>
-                <h3>Rollback Safety</h3>
-              </div>
-              <button id="self-writer-refresh-backups" class="btn-ghost" type="button">Refresh</button>
-            </div>
-            <div id="self-writer-backups-list" class="gallery-grid">
-              <p class="hint">No backups yet.</p>
-            </div>
-          </section>
         </section>
       </main>
     </div>
