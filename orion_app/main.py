@@ -13,6 +13,8 @@ from .whatsapp_adapter import send_whatsapp_message
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 
@@ -75,6 +77,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+BASE_DIR = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 def run_tracked(title: str, category: str, operation: Callable[[], Result]) -> Result:
@@ -206,6 +212,16 @@ def read_static(filename: str) -> FileResponse:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "app": "Orion the Warrior", "assistant": assistant.name}
+
+
+@app.get("/api/models")
+def api_models() -> dict:
+    return {
+        "models": [
+            {"id": "leo-valdez", "name": "Leo Valdez", "status": "online", "type": "chat"},
+            {"id": "orion-1.0", "name": "ORION-1.0", "status": "online"},
+        ]
+    }
 
 
 @app.get("/api/diagnostics")
