@@ -1,0 +1,1352 @@
+import * as path from 'path';
+import * as fs from 'fs';
+import type { ClientRequest, IncomingMessage } from 'http';
+import type { Agent } from 'https';
+import type { Socket } from 'net';
+import * as qrcode from 'qrcode';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { type Dispatcher } from 'undici';
+import type * as BaileysLib from '@whiskeysockets/baileys';
+import type { WASocket } from '@whiskeysockets/baileys';
+import type { ILogger } from '@whiskeysockets/baileys/lib/Utils/logger.js';
+import { EngineEventCallbacks, EngineStatus } from '../interfaces/whatsapp-engine.interface';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { createProxyDispatcher, hasUnauthenticatableSocks4Credentials } from '../../common/security/proxy-dispatcher';
+import { type createLogger } from '../../common/services/logger.service';
+import { BaileysAdapterConfig } from '../types/baileys.types';
+import { useAtomicMultiFileAuthState } from './baileys-auth-store';
+import { createBaileysLogger } from './baileys-logger';
+import { GroupMetadataCache, groupMetadataCacheTtlMs } from './baileys-group-metadata-cache';
+import { BaileysVersionResolver } from './baileys-version-resolver';
+import { unappliedPatches, unappliedPatchesMessage } from './engine-patch-status';
+import {
+  ACCOUNT_REJECTED_REASON,
+  CONNECTION_REPLACED_REASON,
+  LOGOUT_CLEANUP_FAILED_REASON,
+} from '../terminal-engine-failure';
+import { differentWaIds, type BaileysEvents } from './baileys-events';
+import type { BaileysHistory } from './baileys-history';
+import type { BaileysSessionStore } from './baileys-session-store';
+import { chatKind, userPart } from '../identity/wa-id';
+
+/** Linked-device identity shown in WhatsApp (Settings → Linked Devices). The OS platform is
+ * operator-configurable via BAILEYS_BROWSER_NAME; defaults to 'Ubuntu' because some accounts reject a
+ * non-standard name on phone-number (pairing-code) linking. Only new pairings carry the name. */
+const BAILEYS_BROWSER: [string, string, string] = [
+  process.env.BAILEYS_BROWSER_NAME?.trim() || 'Ubuntu',
+  'Chrome',
+  '120.0.0',
+];
+
+/**
+ * How long logout() waits for WhatsApp to acknowledge the `remove-companion-device` IQ. Completion of
+ * an engine-native unlink requires a tagged IQ result from the server (NOT a WebSocket write flush),
+ * so this bound is the difference between a 502 (operation incomplete) and a 200 (unlink completed).
+ * Set above the typical round-trip but well under the service's 10s teardown deadline so a wedged
+ * transport surfaces as a retryable 502 instead of wedging the session.
+ */
+const BAILEYS_LOGOUT_ACK_TIMEOUT_MS = 8_000;
+
+/**
+ * Backstop for a socket whose WebSocket never leaves CONNECTING, which emits no open, error or close
+ * and so never reaches the reconnect path. Above Baileys' connectTimeoutMs (20 s by default), which
+ * ws already enforces on a handshake that gets no answer, and applied only while the WebSocket is
+ * still connecting, so it never cuts into a login or a socket waiting for its QR to be scanned.
+ */
+const BAILEYS_WS_CONNECTING_DEADLINE_MS = 60_000;
+
+/**
+ * How long a requested pairing code may wait to be entered before the session goes back to a fresh QR.
+ * Once a code is requested the patched library renders no further QR and never ends the registration
+ * itself (scripts/patch-baileys-pairing.js), so this is the only bound on that wait. WhatsApp's own
+ * validity for a code is not published; WhatsApp Web replaces its code every 3 minutes (the 180 s
+ * default of whatsapp-web.js requestPairingCode), so 5 minutes from the latest request does not cut off
+ * a code the phone can still accept.
+ */
+export const BAILEYS_PAIRING_CODE_WINDOW_MS = 5 * 60_000;
+
+/** The longest a Baileys QR ref lives (the first one; later ones live 20 s), after which its image cannot link. */
+const BAILEYS_QR_REF_MAX_LIFETIME_MS = 60_000;
+
+/** Baileys' close error when an unscanned registration runs out of refs; matched by message only. */
+const QR_REFS_ENDED = 'QR refs attempts ended';
+/** The close this lifecycle raises when a requested pairing code was not entered in time. */
+const PAIRING_CODE_NOT_ENTERED = 'Pairing code was not entered in time';
+
+/** Bound on an HTTP(S) proxy's CONNECT reply, matching Baileys' default connectTimeoutMs. */
+const PROXY_CONNECT_TIMEOUT_MS = 20_000;
+
+/**
+ * HttpsProxyAgent whose proxy socket cannot outlive the request that asked for it. The library awaits
+ * the CONNECT reply with no abort hook or timeout, so a proxy that accepts TCP and never answers kept
+ * its socket open after ws abandoned the handshake: one more open connection per reconnect attempt.
+ * The socket is destroyed when the request is aborted (what ws does) or when the reply is overdue (a
+ * request destroyed before it has a socket emits nothing). The signal has to be in connectOpts while
+ * super.connect() runs synchronously, which is where the socket is opened; it is restored right after
+ * so concurrent requests on the agent keep their own.
+ */
+class AbortableHttpsProxyAgent extends HttpsProxyAgent<string> {
+  constructor(
+    proxyUrl: string,
+    private readonly connectTimeoutMs: number,
+  ) {
+    super(proxyUrl);
+  }
+
+  override async connect(req: ClientRequest, opts: Parameters<HttpsProxyAgent<string>['connect']>[1]): Promise<Socket> {
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    req.once('abort', abort);
+    const timer = setTimeout(abort, this.connectTimeoutMs);
+    timer.unref();
+    const connectOpts = this.connectOpts;
+    this.connectOpts = { ...connectOpts, signal: controller.signal };
+    const pending = super.connect(req, opts);
+    this.connectOpts = connectOpts;
+    try {
+      return await pending;
+    } finally {
+      clearTimeout(timer);
+      req.off('abort', abort);
+    }
+  }
+}
+
+/**
+ * Build the Node-layer agent for a session egress proxy (#859). The WhatsApp WebSocket (`agent`) and
+ * media uploads (`fetchAgent`) ride it; downloads and the version lookup go through global fetch,
+ * which needs {@link createProxyDispatcher} instead. Credentials stay in the URL and are
+ * authenticated on the socket itself, so none of the Chromium CDP auth timing the wwjs engine is
+ * exposed to applies here. The scheme set matches the create-session DTO validator; anything else
+ * (a pre-validation DB row) throws, failing the session closed rather than silently going direct.
+ */
+export function createProxyAgent(proxyUrl: string, connectTimeoutMs = PROXY_CONNECT_TIMEOUT_MS): Agent {
+  const { protocol } = new URL(proxyUrl);
+  if (protocol === 'http:' || protocol === 'https:') {
+    return new AbortableHttpsProxyAgent(proxyUrl, connectTimeoutMs);
+  }
+  if (protocol === 'socks4:' || protocol === 'socks5:') {
+    const agent = new SocksProxyAgent(proxyUrl);
+    // The library passes URL.hostname through, so an IPv6 literal keeps its brackets and fails as a
+    // DNS lookup of "[::1]". Mutated in place: userId and password are non-enumerable on this object.
+    agent.proxy.host = agent.proxy.host?.replace(/^\[|\]$/g, '');
+    return agent;
+  }
+  throw new Error(`Unsupported proxy protocol for the baileys engine: ${protocol}`);
+}
+
+/**
+ * Connection lifecycle extracted from BaileysAdapter: connect/reconnect with capped backoff, QR
+ * rendering, logout with the remove-companion-device ACK, terminal-close handling, and the state
+ * behind them (sock, status, reconnect counters, the lazily-loaded library). The adapter keeps the
+ * public IWhatsAppEngine members as thin forwarders and injects this narrow host surface via
+ * closures, so the delegate never touches adapter state directly; the two state fields the rest of
+ * the adapter reads live (`sock`) are public here and aliased by adapter accessors.
+ */
+export interface BaileysLifecycleHost {
+  readonly logger: ReturnType<typeof createLogger>;
+  /** This session's multi-file auth dir (authDir/sessionId) — wiped by clearAuthState on terminal logout. */
+  readonly authPath: string;
+  /** Adapter config, passed through: proxyUrl/sessionId in connectInner, messageStore/dbSessionId in
+   *  the retry-getMessage path and logout's session cleanup. */
+  readonly config: BaileysAdapterConfig;
+  /** Live-call cache handle — the map is owned by the events delegate (call events + rejectCall);
+   *  lifecycle teardown clears it so a late rejectCall() reports not-found on a dead socket. */
+  readonly liveCalls: Map<string, { callFrom: string; expiresAt: number }>;
+  /** `628999:12@s.whatsapp.net` / `628999@s.whatsapp.net` -> `628999`. */
+  extractPhone(id: string | undefined): string | null;
+  toNeutralJid(jid: string): string;
+  /** Persist contact records pushed by the socket (contacts.upsert/update, messaging-history.set). */
+  upsertContacts: BaileysSessionStore['upsertContacts'];
+  /** Persist chat records pushed by the socket (chats.upsert/update, messaging-history.set). */
+  upsertChats: BaileysSessionStore['upsertChats'];
+  /** Drop chats the socket reports deleted (chats.delete). */
+  removeChats: BaileysSessionStore['removeChats'];
+  /** Learn lid<->phone mappings pushed by the socket (messaging-history.set, lid-mapping.update). */
+  addLidMappings: BaileysSessionStore['addLidMappings'];
+  handleMessagesUpsert: BaileysEvents['handleMessagesUpsert'];
+  handleMessagesUpdate: BaileysEvents['handleMessagesUpdate'];
+  handleMessageReceiptUpdate: BaileysEvents['handleMessageReceiptUpdate'];
+  logContactEvent: BaileysEvents['logContactEvent'];
+  handleGroupParticipantsUpdate: BaileysEvents['handleGroupParticipantsUpdate'];
+  handleGroupsUpdate: BaileysEvents['handleGroupsUpdate'];
+  handleGroupsUpsert: BaileysEvents['handleGroupsUpsert'];
+  handleGroupJoinRequest: BaileysEvents['handleGroupJoinRequest'];
+  handleCallEvents: BaileysEvents['handleCallEvents'];
+  handlePresenceUpdate: BaileysEvents['handlePresenceUpdate'];
+  /** Drop the store writes of messages still being processed; called before an unlink wipes the store. */
+  fenceStoredWrites: BaileysEvents['fenceStoredWrites'];
+  captureHistoryMessages: BaileysHistory['captureHistoryMessages'];
+  /** Backfill names the initial sync skipped (runs on connection 'open'). */
+  hydrateNames: BaileysHistory['hydrateNames'];
+  /** Pull the saved address book from a snapshot (a first link's pull, once its history sync is quiet). */
+  restoreAddressbookSnapshot: BaileysHistory['restoreAddressbookSnapshot'];
+  /** The currently-registered onQRCode callback, if any (assigned at initialize()). */
+  getOnQRCode(): EngineEventCallbacks['onQRCode'];
+  /** The currently-registered onReady callback, if any (assigned at initialize()). */
+  getOnReady(): EngineEventCallbacks['onReady'];
+  /** The currently-registered onPushNameChanged callback, if any (assigned at initialize()). */
+  getOnPushNameChanged(): EngineEventCallbacks['onPushNameChanged'];
+  /** The currently-registered onDisconnected callback, if any (assigned at initialize()). */
+  getOnDisconnected(): EngineEventCallbacks['onDisconnected'];
+  /** The currently-registered onReconnecting callback, if any (assigned at initialize()). */
+  getOnReconnecting(): EngineEventCallbacks['onReconnecting'];
+  /** The currently-registered onError callback, if any (assigned at initialize()). */
+  getOnError(): EngineEventCallbacks['onError'];
+  /** The currently-registered onStateChanged callback, if any (assigned at initialize()). */
+  getOnStateChanged(): EngineEventCallbacks['onStateChanged'];
+  /** The currently-registered onCredentialTeardownStarted callback, if any (assigned at initialize()). */
+  getOnCredentialTeardownStarted(): EngineEventCallbacks['onCredentialTeardownStarted'];
+  /** The currently-registered onAccountRestriction callback, if any (assigned at initialize()). */
+  getOnAccountRestriction(): EngineEventCallbacks['onAccountRestriction'];
+}
+
+export class BaileysLifecycle {
+  /** A close more than this long after the previous close restarts the backoff counter from scratch
+   *  instead of inheriting an old incident's attempts. The backoff wait counts toward the gap. */
+  private static readonly RECONNECT_STABILITY_RESET_MS = 5 * 60_000;
+  /** How long a first link's history sync must stay silent before the address-book pull runs. */
+  private static readonly ADDRESSBOOK_QUIET_MS = 20_000;
+
+  /** Live Baileys socket, null when disconnected. Public so the adapter's `sock` accessor can alias
+   *  it (an unmodified spec pokes `adapter.sock` through a cast; delegate hosts read it live). */
+  sock: WASocket | null = null;
+  private status: EngineStatus = EngineStatus.DISCONNECTED;
+  private qrCode: string | null = null;
+  private qrRenderSequence = 0;
+  private phoneNumber: string | null = null;
+  private pushName: string | null = null;
+  /** Aborted by disconnect()/logout()/destroy(); the adapter is single-use from then on. */
+  private readonly teardown = new AbortController();
+  private get intentionalClose(): boolean {
+    return this.teardown.signal.aborted;
+  }
+  private readonly versionResolver: BaileysVersionResolver;
+  private connecting = false;
+  private reconnectAttempts = 0;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  /** The current socket's BAILEYS_WS_CONNECTING_DEADLINE_MS backstop. */
+  private connectingTimer?: ReturnType<typeof setTimeout>;
+  /** A first link's pending address-book pull (see scheduleAddressbookRestore). */
+  private addressbookTimer?: ReturnType<typeof setTimeout>;
+  /** A requested pairing code's timers: dropping the superseded QR, then ending the wait (see requestPairingCode). */
+  private pairingTimers: ReturnType<typeof setTimeout>[] = [];
+  /** Date.now() of the last close that scheduled a reconnect — input to the stability reset. */
+  private lastConnectionCloseAt = 0;
+  /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
+  private lib?: typeof BaileysLib;
+  /** The session proxy's fetch dispatcher, built on first use and closed at teardown. */
+  private dispatcher?: Dispatcher;
+  /**
+   * The participant lists Baileys reuses for group sends instead of querying one per message. Kept up to
+   * date by the group events registered below, dropped with every socket (see dropConnectionState).
+   * Public so the groups delegate can forget a group right after it changes its membership.
+   */
+  readonly groupMetadata = new GroupMetadataCache(groupMetadataCacheTtlMs());
+
+  constructor(private readonly host: BaileysLifecycleHost) {
+    this.versionResolver = new BaileysVersionResolver({
+      authDir: this.host.config.authDir || path.dirname(this.host.authPath),
+      sessionId: this.host.config.sessionId,
+      logger: this.host.logger,
+    });
+  }
+
+  /** The module once {@link loadLib} has loaded it, which happens before any socket exists. */
+  get loadedLib(): typeof BaileysLib | undefined {
+    return this.lib;
+  }
+
+  /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
+  async loadLib(): Promise<typeof BaileysLib> {
+    return (this.lib ??= await import('@whiskeysockets/baileys'));
+  }
+
+  /** Dispatcher for Baileys' global-fetch calls: undefined without a proxy (direct). */
+  fetchDispatcher(): Dispatcher | undefined {
+    const { proxyUrl } = this.host.config;
+    if (!proxyUrl) {
+      return undefined;
+    }
+    return (this.dispatcher ??= createProxyDispatcher(proxyUrl));
+  }
+
+  /**
+   * Drop the proxy's pooled tunnels at teardown instead of leaving them to idle out. close(), not
+   * destroy(): a request already in progress finishes. A later fetch builds a fresh dispatcher.
+   */
+  private closeFetchDispatcher(): void {
+    const dispatcher = this.dispatcher;
+    this.dispatcher = undefined;
+    void dispatcher?.close().catch(() => undefined);
+  }
+
+  async initialize(): Promise<void> {
+    // Single-use after teardown: disconnect()/destroy()/forceDestroy()/logout() set this latch, and
+    // it must NOT be re-armed here. A retired adapter (e.g. one whose session was stopped/deleted
+    // during the service's pre-initialize window) would otherwise open a fresh socket no caller is
+    // tracking. A new adapter starts with the latch false, so the first initialize() proceeds; a
+    // later teardown leaves it true for the adapter's lifetime. connectInner() re-checks the latch
+    // after its auth/version awaits as a fence against teardown during those I/O steps.
+    if (this.intentionalClose) {
+      return;
+    }
+    const chatStateStore = this.host.config.chatStateStore;
+    if (chatStateStore) {
+      await chatStateStore.refreshSession(this.host.config.sessionId).catch(() => undefined);
+      // A teardown during that read must still keep this adapter from opening a socket.
+      if (this.intentionalClose) {
+        return;
+      }
+    }
+
+    // An install that skipped a Baileys patch fails later with errors that name no cause: an
+    // app-state resync that never terminates, a newsletter create that cannot parse its reply.
+    // Say so here instead, while the operator is still looking at the startup logs.
+    const unapplied = unappliedPatches('baileys');
+    if (unapplied.length) {
+      this.host.logger.error(unappliedPatchesMessage('baileys', unapplied));
+    }
+
+    try {
+      await this.connect();
+    } catch (err) {
+      this.setStatus(EngineStatus.FAILED);
+      this.host.getOnError()?.(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  }
+
+  private async connect(): Promise<void> {
+    // I4: in-flight guard — skip if a connect() is already in progress.
+    if (this.connecting) {
+      return;
+    }
+    this.connecting = true;
+    try {
+      await this.connectInner();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private async connectInner(): Promise<void> {
+    this.setStatus(EngineStatus.INITIALIZING);
+    // Build the egress proxy agent BEFORE any auth-state I/O so an unusable proxy value fails the
+    // session (engine_error) instead of silently connecting direct (#859).
+    let proxyAgent: Agent | undefined;
+    if (this.host.config.proxyUrl) {
+      proxyAgent = createProxyAgent(this.host.config.proxyUrl);
+      const { protocol, host } = new URL(this.host.config.proxyUrl);
+      // Credential-stripped, matching the wwjs adapter's log line (#628).
+      this.host.logger.log(`Using proxy: ${protocol}//${host}`, { sessionId: this.host.config.sessionId });
+      if (hasUnauthenticatableSocks4Credentials(this.host.config.proxyUrl)) {
+        this.host.logger.warn(
+          `Proxy for session ${this.host.config.sessionId} has credentials on a SOCKS4 proxy, which has no ` +
+            `authentication step: the user name is sent as the connect request's user id and the password is ` +
+            `dropped. Use a socks5, http or https proxy, or an IP-authorized one.`,
+        );
+      }
+    }
+    const b = await this.loadLib();
+    // The first load of the library takes a while; a stop meanwhile must not have the auth dir created for it.
+    if (this.intentionalClose) {
+      return;
+    }
+    const { state, saveCreds } = await useAtomicMultiFileAuthState(this.host.authPath, b, this.host.logger);
+    // A teardown during those loads already closed the dispatcher: the lookup would build a new one
+    // that nothing closes and send the stopped session's requests through its proxy. One during the
+    // lookup aborts it, and the latch check below bails.
+    if (this.intentionalClose) {
+      return;
+    }
+    // A pairing-code request writes creds.me before the code is entered, and only a completed pairing
+    // writes creds.account. Baileys logs in whenever creds.me is set, so a code that was never entered
+    // would turn every later connect into a login for a device that does not exist, and no QR could follow.
+    if (state.creds.me && !state.creds.account) {
+      this.host.logger.warn('Discarding a pairing code that was never entered; the session shows a new QR', {
+        sessionId: this.host.config.sessionId,
+      });
+      delete state.creds.me;
+      delete state.creds.pairingCode;
+      // Dropped in memory either way: a failed save only means the next connect drops it again.
+      await saveCreds().catch(err =>
+        this.host.logger.warn('Could not save the credentials after discarding an unfinished pairing', {
+          sessionId: this.host.config.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      if (this.intentionalClose) {
+        return;
+      }
+    }
+    const version = await this.versionResolver.resolve(b, {
+      dispatcher: this.fetchDispatcher(),
+      signal: this.teardown.signal,
+    });
+    // BaileysLogger matches ILogger exactly; cast needed because the module resolves the type
+    // through a deep import path that TypeScript does not auto-unify here. Shared by the key
+    // store wrapper below and the socket itself, rather than constructing two instances.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+    const baileysLogger = createBaileysLogger() as unknown as ILogger;
+
+    // Wrap the raw file-backed signal key store with Baileys' own official caching layer.
+    // Without it, every session read/write hits disk directly with no protection against a
+    // write-then-immediate-read race — observed here as a freshly-established Signal session
+    // appearing "missing" moments later, forcing Baileys to discard it and start a brand new
+    // PreKey handshake on the very next send (visible as repeated "Closing session" log spam and
+    // the recipient stuck on "waiting for this message" until a slow WhatsApp-side retry rescues
+    // it). makeCacheableSignalKeyStore keeps the just-written state visible in memory immediately,
+    // regardless of disk I/O timing.
+    state.keys = b.makeCacheableSignalKeyStore(state.keys, baileysLogger);
+
+    // C2: resurrect-after-stop guard — if disconnect/logout/destroy ran during the awaits above,
+    // bail now so we don't create a live socket for a session that was intentionally stopped.
+    if (this.intentionalClose) {
+      return;
+    }
+
+    // An internal reconnect (transient drop) overwrites this.sock WITHOUT going through
+    // disconnect/logout/destroy, so the previous socket's WebSocket and the 18 ev listeners we
+    // register below would leak on every reconnect. Tear the prior socket down first. Detach OUR
+    // connection.update listener BEFORE end(): Baileys' own end() synchronously emits a synthetic
+    // connection.update {connection:'close'}, which — if still wired — would re-enter
+    // handleConnectionUpdate and schedule a spurious second reconnect.
+    const previous = this.sock;
+    if (previous) {
+      try {
+        previous.ev.removeAllListeners('connection.update');
+        previous.ev.removeAllListeners('creds.update');
+        previous.ev.removeAllListeners('messages.upsert');
+        previous.ev.removeAllListeners('messages.update');
+        previous.ev.removeAllListeners('message-receipt.update');
+        previous.ev.removeAllListeners('contacts.upsert');
+        previous.ev.removeAllListeners('contacts.update');
+        previous.ev.removeAllListeners('chats.upsert');
+        previous.ev.removeAllListeners('chats.update');
+        previous.ev.removeAllListeners('chats.delete');
+        previous.ev.removeAllListeners('messaging-history.set');
+        previous.ev.removeAllListeners('lid-mapping.update');
+        previous.ev.removeAllListeners('group-participants.update');
+        previous.ev.removeAllListeners('groups.update');
+        previous.ev.removeAllListeners('groups.upsert');
+        previous.ev.removeAllListeners('group.join-request');
+        previous.ev.removeAllListeners('call');
+        previous.ev.removeAllListeners('presence.update');
+        void previous.end(undefined);
+      } catch {
+        // end() may already have run from Baileys' own close handler — a safe no-op.
+      }
+    }
+
+    // Group changes made while the previous socket was down never reached it, so nothing it cached is
+    // trusted by the next one.
+    this.groupMetadata.clear();
+    this.cancelPairingWindow();
+
+    const fetchDispatcher = this.fetchDispatcher();
+    const sock: WASocket = b.default({
+      auth: state,
+      version,
+      browser: BAILEYS_BROWSER,
+      printQRInTerminal: false,
+      // Session egress proxy (#859): the WS and media uploads share one agent; undefined = direct.
+      // Media downloads use fetchDispatcher() instead, since Baileys fetches them with global fetch.
+      agent: proxyAgent,
+      fetchAgent: proxyAgent,
+      // The same dispatcher for the fetches Baileys runs off this config itself: the history-sync
+      // payload, the app-state external blobs, and a URL handed to a send (a product card image).
+      // Without it they leave direct from the host IP even on a proxied session. `{}` is Baileys' own
+      // default for the key, and is what an unproxied session gets.
+      options: (fetchDispatcher ? { dispatcher: fetchDispatcher } : {}) as RequestInit,
+      // Enable the initial sync. Baileys defaults `shouldSyncHistoryMessage` to `() => !!syncFullHistory`,
+      // so leaving both unset disables ALL history + app-state sync - no contacts, chats, recent history,
+      // or lid->phone mappings ever arrive (the address-book app-state sync only runs once history sync is
+      // enabled; see WhiskeySockets/Baileys Socket/index.js + Socket/chats.js). Returning true enables it
+      // while keeping the full-archive download opt-in: with syncFullHistory false WhatsApp sends the
+      // RECENT window + the full contact/app-state snapshot, not the entire message history.
+      shouldSyncHistoryMessage: () => true,
+      syncFullHistory: process.env.BAILEYS_SYNC_FULL_HISTORY === 'true',
+      // Baileys defaults markOnlineOnConnect to true: every (re)connect broadcasts `available`,
+      // and WhatsApp suppresses the paired phone's push notifications while any linked device is
+      // online — a 24/7 gateway then permanently silences the phone (#871). Set
+      // BAILEYS_MARK_ONLINE_ON_CONNECT=false to stay invisible; the default preserves prior
+      // behavior. Note this only gates the on-connect presence: the typing / chat-state API still
+      // sends per-chat presence for that call regardless.
+      markOnlineOnConnect: process.env.BAILEYS_MARK_ONLINE_ON_CONNECT !== 'false',
+      // Baileys defaults this to `async () => undefined` (Defaults/index.js). Without a real
+      // implementation, WhatsApp's message-retry protocol — triggered whenever a recipient's client
+      // fails to decrypt on the first attempt — has nothing to resend, so the recipient is stuck on
+      // "waiting for this message" indefinitely instead of the retry resolving it within seconds.
+      // Backed by the same messageStore used for reply/forward/react/delete-by-id. Baileys relays the
+      // answer to key.remoteJid, and a retry receipt names its message by id alone, so a stored message
+      // from a provably different chat is refused: a forged receipt must not pull it into this one.
+      getMessage: async key => {
+        if (!key.id) {
+          return undefined;
+        }
+        const stored = await this.host.config.messageStore?.getMessage(this.host.config.dbSessionId, key.id);
+        if (!stored) {
+          return undefined;
+        }
+        // An RSVP to an event this account posted in a 1:1 chat names the event by its key as the guest
+        // sees it, so its remoteJid is this account. Baileys rewrites reaction and poll keys to our side
+        // but not event keys, so our own 1:1 message asked for under our own jid is that same chat.
+        const bare = (jid: string): string => `${userPart(jid)}@${jid.split('@')[1]}`;
+        const asked = key.remoteJid ? bare(key.remoteJid) : undefined;
+        const me = this.sock?.user;
+        const askedByGuest =
+          !!asked &&
+          stored.key.fromMe === true &&
+          chatKind(stored.key.remoteJid ?? '') === 'individual' &&
+          [me?.id, me?.lid].some(own => !!own && bare(own) === asked);
+        if (askedByGuest) {
+          return stored.message ?? undefined;
+        }
+        const neutral = (jid: string): string => this.host.toNeutralJid(jid);
+        const chat = [stored.key.remoteJid, stored.key.remoteJidAlt];
+        if (differentWaIds(chat, [key.remoteJid], neutral)) {
+          return undefined;
+        }
+        // A lid the session cannot map cannot be compared with a phone-number chat, so ask Baileys'
+        // own mapping (a local store read) for its phone number too. When neither knows it, the retry
+        // is still answered: refusing then would leave a real recipient waiting for good.
+        const lid = key.remoteJid;
+        if (lid?.endsWith('@lid') && neutral(lid).endsWith('@lid')) {
+          const pn = await this.sock?.signalRepository?.lidMapping?.getPNForLID(lid).catch(() => null);
+          if (pn && differentWaIds(chat, [pn], neutral)) {
+            return undefined;
+          }
+        }
+        return stored.message ?? undefined;
+      },
+      // Every group send needs the group's participant list, and without this Baileys queries it for each
+      // message. Read through the cache, on a miss with the same query Baileys would have made; a failure
+      // surfaces as the send's own, exactly as before. 0 in BAILEYS_GROUP_METADATA_CACHE_TTL_MS switches it
+      // off, and Baileys then queries on its own.
+      cachedGroupMetadata: jid => this.groupMetadata.read(jid, () => sock.groupMetadata(jid)),
+      logger: baileysLogger,
+    });
+    this.sock = sock;
+
+    // Baileys re-emits ws's 'unexpected-response', and any listener there stops ws from aborting the
+    // handshake itself: an upgrade answered with anything but 101 (a 503 from WhatsApp's edge or from a
+    // session proxy) leaves the socket CONNECTING for good, and the session at INITIALIZING with no
+    // retry (#1546). Ending it emits the close that handleConnectionUpdate logs, backs off and retries.
+    // A plain Error on purpose: a Boom carrying the HTTP status would turn a 401, 403 or 440 upgrade
+    // response into the terminal close of the same code.
+    sock.ws.on('unexpected-response', (_req: ClientRequest, res: IncomingMessage) => {
+      void sock.end(new Error(`WebSocket upgrade refused (HTTP ${res.statusCode})`));
+    });
+    this.connectingTimer = setTimeout(() => {
+      if (this.sock === sock && sock.ws.isConnecting) {
+        void sock.end(new Error(`WebSocket still connecting after ${BAILEYS_WS_CONNECTING_DEADLINE_MS} ms`));
+      }
+    }, BAILEYS_WS_CONNECTING_DEADLINE_MS);
+    this.connectingTimer.unref();
+
+    // Baileys raises the counter above 0 once, when a first link's initial sync ends (or times out).
+    // Whole-creds emits carry the field too, so only that transition on a first link arms the pull.
+    let awaitingFirstSync = !((state.creds.accountSyncCounter ?? 0) > 0);
+    sock.ev.on('creds.update', update => {
+      void saveCreds().catch(err => {
+        this.host.logger.warn('Baileys creds.update save failed', {
+          sessionId: this.host.config.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      if (awaitingFirstSync && (update.accountSyncCounter ?? 0) > 0) {
+        awaitingFirstSync = false;
+        this.scheduleAddressbookRestore(sock);
+      }
+      // A newly linked account's name syncs only after the connection opened (an app-state push name or an
+      // own message), so the one read at open was empty. Before READY the open branch reads it live anyway.
+      const name = update.me?.name;
+      if (name && name !== this.pushName && this.sock === sock && this.status === EngineStatus.READY) {
+        this.pushName = name;
+        this.host.getOnPushNameChanged()?.(name);
+      }
+    });
+    sock.ev.on('connection.update', update => this.handleConnectionUpdate(update));
+    sock.ev.on('messages.upsert', event => this.host.handleMessagesUpsert(event));
+    sock.ev.on('messages.update', updates => this.host.handleMessagesUpdate(updates));
+    sock.ev.on('message-receipt.update', updates => this.host.handleMessageReceiptUpdate(updates));
+    sock.ev.on('contacts.upsert', contacts => {
+      this.host.logContactEvent('contacts.upsert', contacts);
+      this.host.upsertContacts(contacts);
+    });
+    sock.ev.on('contacts.update', updates => {
+      this.host.logContactEvent('contacts.update', updates);
+      this.host.upsertContacts(updates);
+    });
+    sock.ev.on('chats.upsert', chats => {
+      this.host.logger.debug('Baileys chats event', {
+        action: 'baileys_chats',
+        event: 'upsert',
+        count: chats?.length ?? 0,
+      });
+      this.host.upsertChats(chats);
+    });
+    sock.ev.on('chats.update', updates => {
+      this.host.logger.debug('Baileys chats event', {
+        action: 'baileys_chats',
+        event: 'update',
+        count: updates?.length ?? 0,
+      });
+      // A disappearing-messages timer changed on the phone (or turned off, which reads null) reaches us as a
+      // chat update only, and the cached list's timer is what a group send stamps on its stanza. The same
+      // own key makes upsertChats take the new timer.
+      for (const update of updates ?? []) {
+        if (Object.hasOwn(update, 'ephemeralExpiration')) this.groupMetadata.invalidate(update.id);
+      }
+      this.host.upsertChats(updates);
+    });
+    sock.ev.on('chats.delete', ids => {
+      this.host.logger.debug('Baileys chats event', {
+        action: 'baileys_chats',
+        event: 'delete',
+        count: ids?.length ?? 0,
+      });
+      this.host.removeChats(ids);
+    });
+    // The same events keep the group metadata cache honest: a membership change, a (re)join, a settings
+    // change or a whole-metadata snapshot drops that group, so the next send reads it again.
+    sock.ev.on('group-participants.update', event => {
+      this.groupMetadata.invalidate(event.id);
+      this.host.handleGroupParticipantsUpdate(event);
+    });
+    sock.ev.on('groups.update', updates => {
+      this.groupMetadata.applyUpdates(updates);
+      this.host.handleGroupsUpdate(updates);
+    });
+    sock.ev.on('groups.upsert', groups => {
+      for (const group of groups) this.groupMetadata.invalidate(group.id);
+      this.host.handleGroupsUpsert(groups);
+    });
+    sock.ev.on('group.join-request', event => this.host.handleGroupJoinRequest(event));
+    sock.ev.on('messaging-history.set', history => {
+      // A chunk still arriving means the pull could be absorbed into the next one: wait again.
+      if (this.addressbookTimer) {
+        this.scheduleAddressbookRestore(sock);
+      }
+      // History sync copies conversation.displayName into `name`, which is a chat title, not the
+      // address-book saved name (that arrives via contacts.upsert from app-state contactAction).
+      // Fold the title into notify so chat-name fallback still works, and leave `name` unset so
+      // GET /contacts stays the agenda rather than every 1:1 the account has ever opened.
+      this.host.upsertContacts(
+        (history.contacts ?? []).map(c => ({
+          ...c,
+          notify: c.notify ?? c.name,
+          name: undefined,
+        })),
+      );
+      this.host.upsertChats(history.chats);
+      this.host.addLidMappings(history.lidPnMappings ?? []);
+      void this.host
+        .captureHistoryMessages(history.messages ?? [])
+        .catch(error => this.host.logger.warn('Failed to capture history messages', { error: String(error) }));
+      this.host.logger.debug('History sync received', {
+        action: 'baileys_history_set',
+        sessionId: this.host.config.sessionId,
+        syncType: history.syncType,
+        isLatest: history.isLatest,
+        progress: history.progress,
+        chats: history.chats?.length ?? 0,
+        messages: history.messages?.length ?? 0,
+        contacts: history.contacts?.length ?? 0,
+        namedContacts: history.contacts?.filter(c => c.name || c.notify).length ?? 0,
+        lidContacts: history.contacts?.filter(c => c.lid).length ?? 0,
+        lidPnMappings: history.lidPnMappings?.length ?? 0,
+      });
+    });
+    // WhatsApp pushes this when a lid<->phone mapping is learned (renamed from the pre-v7
+    // 'chats.phoneNumberShare' event, whose { lid, jid } payload this shape directly replaces).
+    sock.ev.on('lid-mapping.update', ({ lid, pn }) => this.host.addLidMappings([{ lid, pn }]));
+    sock.ev.on('call', calls => this.host.handleCallEvents(calls));
+    sock.ev.on('presence.update', update => this.host.handlePresenceUpdate(update));
+  }
+
+  /**
+   * Pull the address book once a first link's history sync has gone quiet. During the initial sync
+   * Baileys folds saved names into the history batch, where they are stripped as chat titles (see
+   * BaileysHistory.hydrateNames), and that run opens with accountSyncCounter 0, so the pull on
+   * 'open' skips it. Pulling straight away would share the event buffer with the next history chunk
+   * and be absorbed the same way, so every chunk pushes the pull back by the quiet window.
+   */
+  private scheduleAddressbookRestore(sock: WASocket): void {
+    this.cancelAddressbookRestore();
+    this.addressbookTimer = setTimeout(() => {
+      this.addressbookTimer = undefined;
+      if (this.sock !== sock) {
+        return;
+      }
+      this.host.restoreAddressbookSnapshot().catch(err => {
+        this.host.logger.warn('Address-book restore after the initial sync failed', {
+          sessionId: this.host.config.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, BaileysLifecycle.ADDRESSBOOK_QUIET_MS);
+    this.addressbookTimer.unref();
+  }
+
+  private cancelAddressbookRestore(): void {
+    clearTimeout(this.addressbookTimer);
+    this.addressbookTimer = undefined;
+  }
+
+  /**
+   * Bound the wait for a pairing code requested on `sock`. Past the longest QR ref lifetime the image
+   * rendered before the request cannot link any more and nothing replaces it, so it is no longer served;
+   * past BAILEYS_PAIRING_CODE_WINDOW_MS the socket ends like an unscanned QR window, and the reconnect
+   * registers again (connectInner drops the unfinished pairing) with a new QR. A repeat request starts
+   * the wait over; a link, any close and every teardown cancel it.
+   */
+  private armPairingWindow(sock: WASocket): void {
+    this.cancelPairingWindow();
+    const waiting = (): boolean => this.sock === sock && this.status === EngineStatus.QR_READY;
+    const dropQr = setTimeout(() => {
+      if (waiting()) this.qrCode = null;
+    }, BAILEYS_QR_REF_MAX_LIFETIME_MS);
+    const end = setTimeout(() => {
+      if (!waiting()) return;
+      this.host.logger.log('Pairing code was not entered in time; starting a new registration', {
+        sessionId: this.host.config.sessionId,
+        action: 'baileys_pairing_code_expired',
+      });
+      void sock.end(new Error(PAIRING_CODE_NOT_ENTERED));
+    }, BAILEYS_PAIRING_CODE_WINDOW_MS);
+    dropQr.unref();
+    end.unref();
+    this.pairingTimers = [dropQr, end];
+  }
+
+  private cancelPairingWindow(): void {
+    for (const timer of this.pairingTimers) clearTimeout(timer);
+    this.pairingTimers = [];
+  }
+
+  private handleConnectionUpdate(update: {
+    connection?: string;
+    qr?: string;
+    isNewLogin?: boolean;
+    lastDisconnect?: { error?: unknown };
+    reachoutTimeLock?: { isActive?: boolean; timeEnforcementEnds?: Date; enforcementType?: string };
+  }): void {
+    const { connection, qr, isNewLogin, lastDisconnect, reachoutTimeLock } = update;
+
+    // Arrives on its own update (no `connection` key) both when WhatsApp pushes a change and when
+    // probeAccountRestriction() pulls the current state — Baileys routes its own query result back
+    // through this same event, so one handler covers both channels.
+    if (reachoutTimeLock) {
+      this.reportReachoutTimelock(reachoutTimeLock);
+    }
+
+    // Baileys keeps rotating the QR (every 20-60 s) until the socket ends, including after the link
+    // was accepted; a refresh in that window must not put the session back at QR_READY.
+    if (qr && this.status !== EngineStatus.AUTHENTICATING) {
+      // Baileys hands us the raw QR ref string; render it to a PNG data URL so the stored
+      // value matches the whatsapp-web.js engine's contract (the dashboard does <img src={qrCode}>).
+      void this.handleQrCode(qr);
+    }
+
+    if (isNewLogin) {
+      // WhatsApp accepted the QR scan or pairing code. It asks for a restart next (a 515 close, which
+      // the branch below turns into INITIALIZING) and the reconnect opens READY. Left at QR_READY, a
+      // repeat pairing request in that window would pass the guard and overwrite the just-linked
+      // creds.me. AUTHENTICATING is what whatsapp-web.js reports at the same point. The link worked, so
+      // that restart is attempt 1 whatever failed before the scan.
+      this.qrCode = null;
+      this.reconnectAttempts = 0;
+      this.cancelPairingWindow();
+      this.setStatus(EngineStatus.AUTHENTICATING);
+    }
+
+    if (connection === 'connecting') {
+      this.setStatus(EngineStatus.INITIALIZING);
+    }
+
+    if (connection === 'open') {
+      clearTimeout(this.connectingTimer);
+      this.cancelPairingWindow();
+      this.qrCode = null;
+      this.phoneNumber = this.host.extractPhone(this.sock?.user?.id);
+      // The live credentials: sock.user is the copy of creds.me made when the socket was built.
+      this.pushName = this.sock?.authState?.creds?.me?.name ?? null;
+      // The account's own lid<->phone pair. Baileys stores it in its own mapping without emitting
+      // lid-mapping.update, and an account whose only traffic is API sends never sees it on a message
+      // key either, so a lid-addressed group's `<lid>@lid` row for the account stayed unresolved and
+      // every self-admin check read it as somebody else.
+      const me = this.sock?.user;
+      if (me?.id && me.lid) {
+        this.host.addLidMappings([{ lid: `${userPart(me.lid)}@lid`, pn: `${userPart(me.id)}@s.whatsapp.net` }]);
+      }
+      // The reconnect counter is not reset here: a connection that drops seconds after the handshake
+      // would otherwise redial at attempt 1 forever. The close branch resets it once more than the
+      // stability window passes between drops.
+      this.setStatus(EngineStatus.READY);
+      this.host.getOnReady()?.(this.phoneNumber ?? '', this.pushName ?? '');
+      // WhatsApp only PUSHES a timelock when it changes, so a gateway that starts (or reconnects)
+      // while the account is already restricted would never hear about it. Ask once per connection.
+      void this.probeAccountRestriction();
+      // Backfill names the initial sync skipped (see BaileysHistory.hydrateNames).
+      void this.host.hydrateNames();
+    }
+
+    if (connection === 'close') {
+      clearTimeout(this.connectingTimer);
+      this.cancelAddressbookRestore();
+      this.cancelPairingWindow();
+      const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output
+        ?.statusCode;
+
+      if (this.intentionalClose) {
+        this.setStatus(EngineStatus.DISCONNECTED);
+        return;
+      }
+
+      if (statusCode === this.lib?.DisconnectReason.loggedOut) {
+        // Credentials invalidated — terminal. Re-linking requires a fresh QR/pairing, so the now-dead
+        // multi-file auth dir MUST be wiped: otherwise the next connect() reloads the stale creds and
+        // Baileys silently retries them instead of emitting a new QR, leaving the session stuck (no QR).
+        void this.handleRemoteLoggedOut();
+        return;
+      }
+
+      if (statusCode === (this.lib?.DisconnectReason.connectionReplaced ?? 440)) {
+        // Another live instance took over this account. Reconnecting
+        // would fight it — two instances endlessly replacing each other — so this is terminal:
+        // the operator stops the other instance, then starts this session again (onError = terminal
+        // + evict in the session service). Auth state is NOT cleared: the link itself is still valid.
+        this.setStatus(EngineStatus.FAILED);
+        this.dropConnectionState(); // terminal close: dead call handles, like the loggedOut branch above
+        this.host.getOnError()?.(
+          `${CONNECTION_REPLACED_REASON} — stop the other instance, then start this session again`,
+        );
+        return;
+      }
+
+      if (statusCode === (this.lib?.DisconnectReason.forbidden ?? 403)) {
+        // The account itself was rejected by WhatsApp (banned/blocked — an authorization-level
+        // refusal that must not be retried). Retrying forever is pointless and risks worsening
+        // the account's standing, so this is terminal like 440. Auth state is NOT cleared (unlike
+        // 401): this is an account-level refusal, not dead credentials — the operator keeps the auth
+        // files for inspection and can retry manually once the account issue is resolved.
+        this.setStatus(EngineStatus.FAILED);
+        this.dropConnectionState(); // terminal close: dead call handles, like the loggedOut branch above
+        this.host.getOnError()?.(
+          `${ACCOUNT_REJECTED_REASON} — the number is likely banned or blocked; reconnecting will not help`,
+        );
+        return;
+      }
+
+      // Every other close (408/411/428/500/503/515/undefined) is transient: reconnect with capped
+      // backoff and NO attempt ceiling — a long network outage must
+      // not kill the session. The counter resets on a scan, when a QR window runs out, and via the
+      // stability window below.
+      // Do NOT fire onDisconnected here; this is a transient drop, not a terminal disconnect.
+      this.host.logger.log('Baileys connection dropped; reconnecting', {
+        sessionId: this.host.config.sessionId,
+        statusCode,
+        reason: (lastDisconnect?.error as Error | undefined)?.message,
+        action: 'baileys_connection_dropped',
+      });
+
+      // Baileys ends an unscanned socket with a 408 once its QR refs run out, the same code as a lost
+      // connection, so only its message tells them apart. Every other close while a QR waits (503, 500,
+      // 428, a lost connection) is a failure like any other. Should Baileys reword the message, the
+      // expiry counts too, which backs off rather than loops. A pairing code nobody entered ends the
+      // same kind of window (armPairingWindow).
+      const closeMessage = (lastDisconnect?.error as Error | undefined)?.message;
+      const qrWindowEnded = closeMessage === QR_REFS_ENDED || closeMessage === PAIRING_CODE_NOT_ENTERED;
+
+      // The socket is dead NOW, but the reconnect attempt only runs after the backoff delay below
+      // (up to 60 s + jitter; connectInner's own setStatus(INITIALIZING) fires just before the new
+      // socket is created). Staying READY across that window makes probeLiveness() report a live
+      // session and lets sends fail against the dead socket, so drop to INITIALIZING here — the
+      // 'open' branch restores READY. setStatus no-ops on an unchanged status, so the duplicate
+      // closes Baileys can emit per drop do not flap onStateChanged.
+      this.setStatus(EngineStatus.INITIALIZING);
+
+      // Duplicate close while a reconnect timer is already pending — ignore it WITHOUT burning an
+      // attempt (Baileys can emit more than one close per drop; the increment must come after this).
+      if (this.reconnectTimer) {
+        return;
+      }
+
+      // Stability reset: a close more than 5 minutes after the previous one starts the backoff fresh
+      // instead of inheriting the old counter. The gap runs close to close, so the backoff wait counts
+      // toward it. A drop sooner than that keeps climbing it, so a link that fails right after each
+      // handshake backs off instead of redialing every second or two.
+      // A QR window that ran out resets it too: WhatsApp answered, and a QR left unscanned for hours
+      // must not add up to a reconnect loop.
+      const now = Date.now();
+      if (qrWindowEnded || now - this.lastConnectionCloseAt > BaileysLifecycle.RECONNECT_STABILITY_RESET_MS) {
+        this.reconnectAttempts = 0;
+      }
+      this.lastConnectionCloseAt = now;
+      this.scheduleReconnect(!qrWindowEnded);
+    }
+  }
+
+  /**
+   * Translate Baileys' reachout-timelock state into the neutral restriction signal. Baileys reports
+   * this first-class — it is not inferred from failures — and it reports the lift as well as the
+   * onset, so `isActive: false` is a positive "no restriction" and is forwarded as `null`.
+   *
+   * A timelock does NOT close the connection: the account stays linked and existing chats keep
+   * working, only starting new conversations is blocked. Nothing here touches status or reconnects.
+   */
+  private reportReachoutTimelock(state: {
+    isActive?: boolean;
+    timeEnforcementEnds?: Date;
+    enforcementType?: string;
+  }): void {
+    const report = this.host.getOnAccountRestriction();
+    if (!report) return;
+
+    if (!state.isActive) {
+      report(null);
+      return;
+    }
+
+    // `time_enforcement_ends` is a server-supplied string Baileys parses with parseInt, so a
+    // malformed value yields an Invalid Date whose getTime() is NaN — which would serialize to null
+    // and read as "no expiry known". Same outcome, but reached deliberately rather than by accident.
+    const endsAt = state.timeEnforcementEnds?.getTime();
+    report({
+      kind: 'reachout_timelock',
+      // DEFAULT is Baileys' own "no specific enforcement type" value, not a placeholder of ours.
+      code: state.enforcementType ?? 'DEFAULT',
+      expiresAt: typeof endsAt === 'number' && Number.isFinite(endsAt) ? endsAt : undefined,
+    });
+  }
+
+  /**
+   * Ask WhatsApp for the account's current restriction standing. The answer is not used here:
+   * Baileys emits its own `connection.update { reachoutTimeLock }` with the result, so it arrives
+   * through the same path as a pushed change.
+   *
+   * Best-effort by design — an account or server that does not answer this query must not turn a
+   * healthy connection into a logged failure, so it stays at debug level.
+   */
+  private async probeAccountRestriction(): Promise<void> {
+    try {
+      await this.sock?.fetchAccountReachoutTimelock();
+    } catch (error) {
+      this.host.logger.debug('Could not read the account restriction state', {
+        action: 'baileys_restriction_probe_failed',
+        sessionId: this.host.config.sessionId,
+        error: String(error),
+      });
+    }
+  }
+
+  /**
+   * Schedule the next reconnect attempt with capped exponential backoff (1 s doubling up to a 60 s
+   * cap, plus up to 1 s jitter). Deliberately NO attempt ceiling: transient drops retry forever —
+   * only loggedOut (401), forbidden (403), and connectionReplaced (440) are terminal. A connect()
+   * failure inside the attempt is just a failed attempt: warn and schedule the next one.
+   *
+   * `countAttempt` false is only the close that ends an unscanned QR window: the connection worked,
+   * so the reconnect is neither an attempt nor reported, and after the reset it waits the first step.
+   */
+  private scheduleReconnect(countAttempt = true): void {
+    if (this.intentionalClose || this.reconnectTimer) {
+      return;
+    }
+    if (countAttempt) {
+      this.reconnectAttempts += 1;
+    }
+    const step = Math.max(this.reconnectAttempts - 1, 0);
+    const delay = Math.min(60_000, 1_000 * 2 ** step) + Math.floor(Math.random() * 1000);
+    // The consumer is never told about this drop through onDisconnected (deliberately: the session is
+    // still linked), and the status it does see is INITIALIZING for the whole episode. So this is the
+    // only signal that a retry loop is running. Fired here rather than in the close handler because
+    // this is the one place every scheduled attempt passes through, including the reschedule from the
+    // failed-attempt catch below, and it is already past the duplicate-close guard above.
+    if (countAttempt) {
+      this.host.getOnReconnecting()?.(this.reconnectAttempts, delay);
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.intentionalClose) {
+        return; // stopped while waiting — abort
+      }
+      void this.connect().catch(err => {
+        // A failed attempt is NOT terminal: the outage may outlast any fixed attempt budget, so
+        // schedule the following attempt.
+        this.host.logger.warn('Baileys reconnect attempt failed; will retry', {
+          attempt: this.reconnectAttempts,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  /** Render the raw Baileys QR ref to a PNG data URL, then publish it (mirrors the whatsapp-web.js engine). */
+  private async handleQrCode(qr: string): Promise<void> {
+    const sock = this.sock;
+    const sequence = ++this.qrRenderSequence;
+    // A registration refresh retires the previous secret before PNG rendering finishes.
+    this.qrCode = null;
+    try {
+      const rendered = await qrcode.toDataURL(qr);
+      // The socket can drop, or the link be accepted, while the QR renders. The handler has already
+      // moved the status on, and publishing now would stamp QR_READY on a dead socket until the
+      // backoff reconnect, or reopen the pairing guard on a socket that is committed to a restart.
+      if (
+        sequence !== this.qrRenderSequence ||
+        this.sock !== sock ||
+        !sock?.ws.isOpen ||
+        this.status === EngineStatus.AUTHENTICATING ||
+        this.status === EngineStatus.READY ||
+        sock.user?.id
+      ) {
+        return;
+      }
+      this.qrCode = rendered;
+      this.setStatus(EngineStatus.QR_READY);
+      this.host.getOnQRCode()?.(this.qrCode);
+    } catch (error) {
+      this.host.logger.error('Error generating QR code', String(error));
+    }
+  }
+
+  /**
+   * What lives and dies with a connection: the cached call handles, which a later rejectCall() must
+   * report as not-found rather than act on a dead socket, and the group metadata, whose changes the
+   * socket stops reporting once it is gone.
+   */
+  private dropConnectionState(): void {
+    this.host.liveCalls.clear();
+    this.groupMetadata.clear();
+  }
+
+  disconnect(): Promise<void> {
+    this.teardown.abort();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    clearTimeout(this.connectingTimer);
+    this.cancelAddressbookRestore();
+    this.cancelPairingWindow();
+    void this.sock?.end(undefined);
+    this.sock = null;
+    this.closeFetchDispatcher();
+    // Cached call handles die with the socket — drop them so a later rejectCall() reports
+    // not-found instead of acting on a closed connection.
+    this.dropConnectionState();
+    this.setStatus(EngineStatus.DISCONNECTED);
+    return Promise.resolve();
+  }
+
+  async logout(): Promise<void> {
+    this.teardown.abort();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    // Capture the exact live socket. Without one the unlink cannot be sent, and an optional-chained
+    // send would resolve as though it had been — reporting a confirmed unlink, writing the audit row,
+    // and then wiping the on-disk credentials, leaving the device linked server-side with nothing
+    // left to retry with. Reachable: a WhatsApp-side logout nulls the socket while the engine stays
+    // registered for the whole reconnect backoff.
+    const sourceSock = this.sock;
+    if (!sourceSock) {
+      throw new Error('No live WhatsApp socket — the unlink was not sent');
+    }
+
+    try {
+      // Completion of an engine-native unlink requires a tagged IQ result from WhatsApp — Baileys'
+      // own sock.logout() resolves on a WebSocket write flush (NOT an IQ ack) and transmits nothing
+      // at all when creds.me is unset, so a resolved promise proves nothing about the unlink. Use
+      // the public query() surface against the pinned `remove-companion-device` node instead.
+      const b = await this.loadLib();
+      // The live credentials, not sock.user: that is a copy of creds.me made when the socket was built, still
+      // unset on a socket that has just paired and is waiting for its restart.
+      const jid = sourceSock.authState?.creds?.me?.id;
+      // creds.me alone names no device: a pairing-code request writes it before the code is entered, and only
+      // a completed link writes creds.account, which every linked session holds (Baileys attaches it to
+      // each prekey message).
+      if (!jid || !sourceSock.authState?.creds?.account) {
+        // No linked device, so WhatsApp lists none to remove and the 502 that reports the unlink as
+        // incomplete would send the operator back to retry it forever. Unless the auth dir holds credentials
+        // moved aside as unreadable, whose device may well still be linked.
+        if (!(await this.keepsQuarantinedCredentials())) {
+          throw new EngineNotReadyError(
+            'This session has no linked WhatsApp device, so there is nothing to unlink. It was stopped; start it to link a device, or delete it.',
+          );
+        }
+        // The companion identity is required to address the unlink; without it nothing is sent.
+        throw new Error('No linked companion identity — the unlink was not sent');
+      }
+      const response: unknown = await sourceSock.query(
+        {
+          tag: 'iq',
+          attrs: { to: b.S_WHATSAPP_NET, type: 'set', id: sourceSock.generateMessageTag(), xmlns: 'md' },
+          content: [{ tag: 'remove-companion-device', attrs: { jid, reason: 'user_initiated' } }],
+        },
+        BAILEYS_LOGOUT_ACK_TIMEOUT_MS,
+      );
+      if (!response) {
+        // query() resolved without a result — WhatsApp did not acknowledge the unlink request.
+        throw new Error('WhatsApp did not acknowledge the unlink request');
+      }
+
+      // Acknowledged. End/null the captured socket, clear live call handles, and drop to
+      // DISCONNECTED before the awaited cleanup so no send/path observes a half-torn-down socket.
+      this.localSocketShutdown(sourceSock);
+      this.host.fenceStoredWrites();
+      await this.clearStoredAccountState();
+      // Wipe the multi-file auth dir so a fresh link starts clean — stale creds would otherwise be
+      // reloaded on the next connect() and block re-linking (Baileys retries them, no QR emitted).
+      // A removal failure propagates: completion requires cleanup, so the operation is incomplete.
+      await this.clearAuthState();
+    } catch (err) {
+      // EVERY failure exit (missing identity, query rejection/timeout, empty response, OR a later
+      // auth removal failure) still stops sourceSock locally so no engine/socket orphan is left in
+      // the service map after it evicts the engine on 502. Failure before acknowledgement must NOT
+      // remove auth state — the link may still be valid server-side, and the creds are needed to
+      // retry. localSocketShutdown is identity-safe: it only nulls this.sock if it still points at
+      // sourceSock (a concurrent reconnect may have already swapped in a fresh socket).
+      this.localSocketShutdown(sourceSock);
+      throw err;
+    }
+  }
+
+  /**
+   * Whether the auth dir keeps credentials the auth store moved aside because creds.json could not be
+   * parsed (`corrupt-*`, see useAtomicMultiFileAuthState). The device they belong to may still be linked.
+   * A dir that cannot be listed is answered yes: nothing then proves the session has no linked device.
+   */
+  private async keepsQuarantinedCredentials(): Promise<boolean> {
+    try {
+      return (await fs.promises.readdir(this.host.authPath)).some(entry => entry.startsWith('corrupt-'));
+    } catch (err) {
+      return (err as NodeJS.ErrnoException | null)?.code !== 'ENOENT';
+    }
+  }
+
+  /**
+   * Identity-safe local shutdown of a captured socket: clears the reconnect timer, ends the socket,
+   * clears cached live call handles, drops to DISCONNECTED, and nulls `this.sock` ONLY if it still
+   * points at the same object (a concurrent reconnect could have swapped in a fresh one). Called at
+   * every logout exit so the service's 502 genuinely means "stopped locally, operation incomplete".
+   */
+  private localSocketShutdown(sourceSock: WASocket): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    clearTimeout(this.connectingTimer);
+    this.cancelAddressbookRestore();
+    this.cancelPairingWindow();
+    try {
+      void sourceSock.end(undefined);
+    } catch {
+      // end() may already have run from Baileys' own close handler — a safe no-op.
+    }
+    this.closeFetchDispatcher();
+    // Cached call handles die with the connection — drop them so a later rejectCall() reports
+    // not-found (404) instead of acting on a dead socket (mirrors disconnect/destroy).
+    this.dropConnectionState();
+    if (this.sock === sourceSock) {
+      this.sock = null;
+    }
+    this.setStatus(EngineStatus.DISCONNECTED);
+  }
+
+  /**
+   * Handle a WhatsApp-originated `loggedOut` (401) close: the credentials were invalidated server-side
+   * and re-linking requires a fresh QR/pairing, so the now-dead multi-file auth dir MUST be wiped —
+   * otherwise the next connect() reloads the stale creds and Baileys silently retries them instead of
+   * emitting a QR, leaving the session stuck (no QR).
+   *
+   * The status/socket/live-call teardown happens SYNCHRONOUSLY before any await so the session
+   * watchdog never processes a READY socket that is already dead. The strict auth removal is then
+   * awaited as a tracked cleanup (onCredentialTeardownStarted registers it under the session NAME). On success the engine reports DISCONNECTED + onDisconnected('logged out'); on failure it
+   * reports FAILED + onError (terminal — a reconnect with known-invalid auth would loop forever).
+   */
+  private async handleRemoteLoggedOut(): Promise<void> {
+    // Synchronous teardown BEFORE any await.
+    this.setStatus(EngineStatus.DISCONNECTED);
+    const dead = this.sock;
+    this.sock = null;
+    // Cached call handles die with the connection — drop them so a later rejectCall() reports
+    // not-found (404) instead of acting on a dead socket (mirrors disconnect/logout/destroy).
+    this.dropConnectionState();
+    // A message still being processed must not recreate a row of the unlinked account after the wipe below.
+    this.host.fenceStoredWrites();
+    void dead?.end(undefined);
+    this.closeFetchDispatcher();
+
+    const cleanup = (async (): Promise<void> => {
+      try {
+        // The unlinked account's messages and chat states go with it, as they do on an API logout: the
+        // next account to link this session must not reply to, forward or retry them, nor inherit its
+        // muted, archived and pinned chats.
+        await this.clearStoredAccountState();
+        await this.clearAuthState();
+      } catch (err) {
+        // A failed credential removal is terminal: report FAILED + onError instead of looking like a
+        // clean disconnect (the credentials did not actually get wiped).
+        this.setStatus(EngineStatus.FAILED);
+        this.host.getOnError()?.(
+          `${LOGOUT_CLEANUP_FAILED_REASON}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+      this.host.getOnDisconnected()?.('logged out');
+    })();
+    // Register the destructive promise the instant it begins (NOT guarded on this engine still being
+    // live): the rm targets the session NAME's auth dir and would race a (re)created session under
+    // that same name. tracked under the captured name, settled regardless of the outcome.
+    this.host.getOnCredentialTeardownStarted()?.(cleanup);
+    await cleanup;
+  }
+
+  /**
+   * Drop the stored messages and chat states of the account being unlinked. A failure does not fail the
+   * unlink, whose completion is the credential removal that follows, but it is logged: the rows that
+   * survive resurface under the next account to link this session (its chat list picks up the old
+   * account's pin, mute and archive flags), and nothing else says why.
+   */
+  private async clearStoredAccountState(): Promise<void> {
+    const { messageStore, chatStateStore, dbSessionId, sessionId } = this.host.config;
+    const warn =
+      (what: string) =>
+      (err: unknown): void =>
+        this.host.logger.warn(`Failed to clear the stored ${what} of an unlinked account`, {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+    await messageStore?.clearSession(dbSessionId).catch(warn('messages'));
+    await chatStateStore?.clearSession(sessionId).catch(warn('chat states'));
+  }
+
+  /**
+   * Delete this session's on-disk multi-file auth state (`authDir/sessionId`). Required after a terminal
+   * logout: Baileys would otherwise reload the now-invalid creds on the next connect() and retry them
+   * instead of emitting a fresh QR, leaving re-linking stuck. `force` makes a missing dir a no-op.
+   * Logs the outcome and RETHROWS on failure: completion of an engine-native unlink (logout 200) AND
+   * the loggedOut close path both require cleanup, so a removal failure must propagate (the operation
+   * is incomplete), not be swallowed.
+   */
+  private async clearAuthState(): Promise<void> {
+    try {
+      await fs.promises.rm(this.host.authPath, { recursive: true, force: true });
+      this.host.logger.log('Cleared Baileys auth state', { authPath: this.host.authPath });
+    } catch (err) {
+      this.host.logger.warn('Failed to clear Baileys auth state', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  }
+
+  destroy(): Promise<void> {
+    this.teardown.abort();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    clearTimeout(this.connectingTimer);
+    this.cancelAddressbookRestore();
+    this.cancelPairingWindow();
+    void this.sock?.end(undefined);
+    this.sock = null;
+    this.closeFetchDispatcher();
+    this.dropConnectionState();
+    this.setStatus(EngineStatus.DISCONNECTED);
+    return Promise.resolve();
+  }
+
+  // Baileys has no separate Chromium process to SIGKILL (destroy() already ends the socket
+  // synchronously), so a force-destroy is just a destroy.
+  forceDestroy(): Promise<void> {
+    return this.destroy();
+  }
+
+  getStatus(): EngineStatus {
+    return this.status;
+  }
+
+  /**
+   * Cheap local liveness check for the session watchdog. Genuine dead-connection detection is owned
+   * by Baileys' built-in keepalive, which surfaces a close event (408) within ~35 s of a silent
+   * drop — and the close handler above then drops the status to INITIALIZING for the whole reconnect
+   * backoff, so READY + a live socket is sufficient here. Note the status trails the dead transport:
+   * Baileys emits that close only after `await ws.close()` resolves, which on a black-holed socket
+   * waits out ws's 30 s close timeout, so this reports live for that window too. Acceptable for the
+   * watchdog, whose next interval catches it; NOT sufficient for a request guard, which is why
+   * requestPairingCode below also tests `ws.isOpen`.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async probeLiveness(): Promise<boolean> {
+    return this.status === EngineStatus.READY && this.sock != null;
+  }
+
+  getQRCode(): string | null {
+    return this.qrCode;
+  }
+
+  /**
+   * Gated on QR_READY AND a live WebSocket, not on the socket merely existing: `this.sock` is assigned the
+   * moment makeWASocket returns, before the WebSocket is open, and Baileys' sendNode throws a raw Boom 428
+   * until it is. QR_READY is set from the post-handshake `connection.update { qr }` event, so it opens the
+   * window; it does not close it promptly, which is why the status alone is not enough. Baileys emits its
+   * `connection.update { connection: 'close' }` only after `await ws.close()` resolves, and `ws` leaves a
+   * black-holed socket in CLOSING for its 30 s close timeout, so the status keeps reading QR_READY for up to
+   * half a minute after the connection stopped carrying anything. `ws.isOpen` is the same predicate Baileys'
+   * own sendRawMessage tests and the same liveness check handleQrCode makes before publishing. It matters
+   * beyond the status code here: requestPairingCode writes `creds.me` and emits `creds.update`, which we
+   * persist, BEFORE it sends, so a request in that window leaves the next connect trying to log in as a
+   * device that was never registered. The whatsapp-web.js engine needs no equivalent operand: its page and
+   * browser death listeners fire handlePuppeteerDeath, which drops the status in the same tick, so there
+   * the status is not the stale value it is here.
+   */
+  async requestPairingCode(phoneNumber: string): Promise<string> {
+    if (!this.sock?.ws.isOpen || this.status !== EngineStatus.QR_READY) {
+      throw new EngineNotReadyError('Session is not waiting to be linked. Start it and wait for the QR stage.');
+    }
+    const sock = this.sock;
+    const code = await sock.requestPairingCode(phoneNumber);
+    this.armPairingWindow(sock);
+    return code;
+  }
+
+  getPhoneNumber(): string | null {
+    return this.phoneNumber;
+  }
+
+  getPushName(): string | null {
+    return this.pushName;
+  }
+
+  ensureReady(): void {
+    if (this.status !== EngineStatus.READY || !this.sock) {
+      throw new EngineNotReadyError();
+    }
+  }
+
+  private setStatus(status: EngineStatus): void {
+    if (this.status === status) {
+      return;
+    }
+    // The cached QR belongs to the socket that produced it, so it dies with the QR_READY window.
+    // Enforced in the funnel rather than at each exit: every close sub-branch (intentional, 401, 440,
+    // 403, transient), the accepted link and every teardown route through here, and the exits that
+    // did not clear it by hand kept serving a dead QR over GET /qr for the whole reconnect backoff.
+    // Safe after the no-op guard above: a non-null qrCode implies QR_READY, so an unchanged status
+    // that is not QR_READY already has a null cache.
+    if (status !== EngineStatus.QR_READY) {
+      this.qrCode = null;
+    }
+    this.status = status;
+    this.host.getOnStateChanged()?.(status);
+  }
+}

@@ -1,0 +1,317 @@
+# 27 - Writing a Search-Provider Plugin
+
+> **Status:** The host→plugin search RPC shipped in v0.8.14 (PR #674). A sandboxed plugin can now register
+> as a `SearchProvider` and answer `GET /api/search` queries from its own backend (Meilisearch,
+> Elasticsearch, Typesense, OpenSearch, …) while the core stays backend-agnostic. This guide is the
+> plugin-author's contract.
+
+## 27.1 What it is
+
+A **search-provider plugin** owns a search backend. It does two things:
+
+1. **Indexes** messages — via the `message:persisted` hook (the plugin stays in sync with live traffic).
+2. **Answers queries** — via `ctx.registerSearchProvider(handler)`. The host routes `GET /api/search` to
+   the plugin over a correlated `search` / `search-result` wire protocol and returns the plugin's
+   `SearchResults` to the caller.
+
+The core never talks to the search backend directly — all vendor-specific logic (the query builder, the
+API client, the index schema) lives in the plugin. Swapping backends is a config change
+(`SEARCH_PROVIDER`), not a code change. See [26 - Global Search](./26-global-search.md) for the
+user-facing feature and the built-in DB-FTS default.
+
+## 27.2 The contract
+
+### Declare the permission
+
+The manifest must declare `search:provide`:
+
+```json
+{
+  "id": "meili",
+  "name": "Meilisearch",
+  "version": "1.0.0",
+  "type": "extension",
+  "main": "index.cjs",
+  "permissions": ["search:provide"]
+}
+```
+
+Without it the host ignores the registration and logs one warning
+(`sandbox_search_provider_denied`); the plugin keeps running and the active provider is unchanged.
+The permission is required because under the default `SEARCH_PROVIDER=auto` a registered provider is
+also made **active**, so it sees every query `GET /api/search` serves.
+
+### Register the handler
+
+In `onEnable`, call `ctx.registerSearchProvider(handler)` with a function that takes a `SearchQuery` and
+returns a `SearchResults`:
+
+```ts
+ctx.registerSearchProvider(async (query) => {
+  // query: SearchQuery, { q, match?, sessionIds?, sessionId?, chatId?, direction?, type?, from?, dateFrom?, dateTo?, limit?, offset? }
+  // Run your backend's query here (e.g. a Meilisearch /search call).
+  return {
+    hits: [...],   // SearchHit[] — see below
+    total: 123,    // bounded exact count for pagination
+    tookMs: 7,     // your query time in ms
+    provider: `plugin:${ctx.pluginId}`,  // your provider id (the host derives `plugin:<id>` automatically)
+  };
+});
+```
+
+`match` is `'word'` (also when absent) or `'contains'` (any part of a word, ignoring case and accents);
+treat it as your backend allows. `SEARCH_CONTAINS_ENABLED` only gates the built-in provider's trigram
+index, so a plugin receives `contains` whatever that setting says.
+
+A plugin may register **one** search handler (calling `registerSearchProvider` again replaces it; the
+host is notified once). If `onEnable` throws after registering, the host cleans up (the provider is
+unregistered).
+
+### The `SearchHit` shape
+
+Each hit must carry every field below — the dashboard + the SDKs consume them directly:
+
+```ts
+{
+  messageId: string;      // your stable id for the message (the core Message PK is the convention)
+  waMessageId: string;    // the WhatsApp message id (empty string if unknown)
+  sessionId: string;
+  chatId: string;
+  body: string;           // the full message body (the dashboard may truncate for display)
+  snippet: string;        // excerpt with <mark>…</mark> around the matched term(s) — render as TEXT, never HTML
+  timestamp: number;      // epoch-seconds (matches the core messages.timestamp column)
+  type: string;           // the MessageType ('text', 'image', …)
+  direction: string;      // 'incoming' | 'outgoing'
+  from: string;           // sender jid / phone
+  score?: number;         // optional relevance score (backend-specific)
+}
+```
+
+The `<mark>` snippet markers are the **only** highlight convention — the dashboard renders the snippet as
+text (escape-then-highlight), never as HTML. Do not inject HTML.
+
+## 27.3 Indexing via the `message:persisted` hook
+
+The core fires `message:persisted` for every live message (outbound on send, inbound on receive, and again
+when a stored message is edited or revoked) — never for history backfill. Register a handler to keep your index in
+sync:
+
+```ts
+ctx.registerHook('message:persisted', async hookCtx => {
+  const { sessionId, message } = hookCtx.data;
+  // message carries: id, waMessageId, sessionId, chatId, body, from, to, type, direction, timestamp, …
+  await myBackend.index(message); // fire-and-forget is fine; an error here doesn't break the send/receive
+});
+```
+
+**Outbound rows are re-emitted on every state transition.** An API-originated send first emits the row
+as `PENDING` (usually with `waMessageId` still null), then emits it **again** with the same `id` once it
+reaches its terminal state (`SENT` with the engine id, or `FAILED`). Key your documents by the row `id`
+and treat every emission as an upsert, and your index always converges to the finalized state.
+
+**A revoke re-emits the row too.** When a message of either direction is revoked (an engine
+`message.revoked`, or `POST /messages/delete`, whether or not `forEveryone` is set), the core clears the
+stored row and emits `message:persisted` again with the same `id`, an empty `body`, `type: 'revoked'` and
+null `metadata`. An upsert keyed by `id` therefore drops the deleted content from your index; do not count
+the emission as a new message.
+
+**An edit re-emits the row too.** When an edit changes a stored message's text (an engine edit, or
+`POST /messages/edit`), the core emits `message:persisted` again with the same `id`, the new `body` and
+`metadata.edited: true`. An edit that repeats the stored text, or names a message of another chat, emits
+nothing. Upsert by `id` as for every other emission.
+
+One race remains visible by design: when the engine's own-send echo wins, the redundant PENDING row is
+merged into the echo's row and then dropped. The core emits `message:persisted` for the surviving row
+(upsert it) followed by `message:deleted` for the dropped one — delete that document by its `id`:
+
+```ts
+ctx.registerHook('message:deleted', async hookCtx => {
+  const { message } = hookCtx.data;
+  await myBackend.delete(message.id);
+});
+```
+
+Clearing a chat's messages (`DELETE /api/sessions/:sessionId/chats/:chatId/messages`) or deleting a chat
+(`POST /api/sessions/:sessionId/chats/delete`) also emits `message:deleted` for every stored row it removes, so
+the same handler keeps your index in step.
+Rows removed in bulk emit no `message:deleted`: deleting a session and message retention (`MESSAGE_RETENTION_DAYS`) leave the plugin's copies in its index until the plugin removes them itself.
+
+**Backfill is the plugin's responsibility.** The hook fires only for live traffic. A plugin installed on
+a deployment with existing message history must perform its own one-time backfill. The only sanctioned
+path is `ctx.engine.getChats(sessionId)` followed by `ctx.engine.getChatHistory(sessionId, chatId, limit)`,
+which needs the `engine:read` permission and a session in the plugin's scope. It reads live from WhatsApp,
+not from the core `messages` table, and returns at most the 100 most recent messages per chat.
+
+`getChatHistory` exists only on the whatsapp-web.js engine. On Baileys it rejects with
+`EngineNotSupportedError` (see [29 - Engine Capability Matrix](./29-engine-capability-matrix.md)), so a
+Baileys deployment has no backfill path and a provider there indexes live `message:persisted` traffic
+only. A sandboxed plugin receives that rejection as a plain `Error` (its class and name do not cross the
+worker boundary) whose message starts with `Operation not supported by the active engine`. Match on that
+prefix on the first chat and skip the backfill rather than retrying it chat after chat.
+
+There is no capability that reads the `messages` table. Reading the database directly bypasses the
+capability model and is unsupported; see [30 - Plugin Sandboxing](./30-plugin-sandboxing.md) for what a
+loaded plugin can still reach.
+
+Backfilled items carry only the WhatsApp id (`id` there is the WhatsApp message id), not the core row PK.
+Keep a `waMessageId` lookup too, and when a later `message:persisted` arrives for a message you already
+backfilled, upsert onto that document instead of adding a second one.
+
+Start the backfill per session from a `ctx.registerHook('session:ready', ...)` handler (the session is
+`hookCtx.sessionId`), without awaiting it: a sandboxed hook is cut off after 5 s and a lifecycle call
+after 30 s, and walking every chat's history takes longer on a real deployment. Do not rely on `onEnable`
+alone: it also runs at boot, when the host re-enables the plugin before any session engine is up, so an
+engine read there fails (no active engine, or one still initializing) and a session linked later is never
+covered. No `ctx` capability lists sessions or reports their status, so in `onEnable` try only the
+session ids the plugin already knows (its `manifest.sessions` list or its own config) and leave any whose
+engine read fails (no active engine, or one not yet ready) to its `session:ready` hook.
+Record a per-session marker in `ctx.storage` (which needs the `storage:use` permission) when that
+session's backfill finishes, and skip a session whose marker is set, so a restart resumes an interrupted
+backfill and does not repeat a finished one. Keep an in-memory set of sessions whose backfill is running
+too, so a repeated `session:ready` (a reconnect) does not start a second walk alongside the first. The
+built-in DB-FTS provider is unaffected (its index is DB-synced via triggers on every insert, including
+backfill).
+
+## 27.4 Host-side guarantees (the plugin author doesn't handle these)
+
+The host enforces these before/after the RPC, so the plugin doesn't have to:
+
+- **Pagination cap.** `limit` is clamped to `SEARCH_LIMIT_MAX` (default 100) and `offset` to
+  `SEARCH_OFFSET_MAX` before the query reaches the plugin. The plugin still receives the bounded values;
+  honor them.
+- **Session-scope re-filter.** The host re-filters the plugin's returned hits against the caller's
+  `allowedSessions` (defense-in-depth — the plugin is trusted to scope, but the host verifies). A scoped
+  key never sees an out-of-scope hit even if the plugin leaks one.
+- **Timeout.** The plugin's `search()` handler must answer within **10 seconds** (`SANDBOX_SEARCH_TIMEOUT_MS`).
+  A slow/wedged handler resolves `ok:false` → the caller sees `503 Service Unavailable`. Fail fast.
+- **Health.** The search provider's health reuses the plugin's general `healthCheck()` (the `health`
+  lifecycle method), but search-provider health is not yet exposed on any route. `healthCheck()` still
+  feeds the plugin health check (`GET /api/plugins/:id/health`); implement it to report your backend's
+  reachability.
+- **Selection.** When `SEARCH_PROVIDER=auto` (the default), the plugin supersedes the built-in
+  `builtin-fts` on enable. Set `SEARCH_PROVIDER=builtin-fts` to keep the built-in active. Selection is
+  not health-gated: the plugin stays active while its `healthCheck()` reports unhealthy.
+
+## 27.5 A minimal full example
+
+```
+plugins/my-search/
+├── manifest.json
+└── index.js
+```
+
+**manifest.json:**
+
+```json
+{
+  "id": "my-search",
+  "name": "My Search Backend",
+  "version": "1.0.0",
+  "type": "extension",
+  "main": "index.js",
+  "permissions": ["search:provide"]
+}
+```
+
+**index.js:**
+
+```js
+module.exports = class MySearchPlugin {
+  async onEnable(ctx) {
+    // 1. Index every persisted message (live traffic only — backfill separately, see 27.3).
+    ctx.registerHook('message:persisted', async hookCtx => {
+      const { message } = hookCtx.data;
+      await this._index(ctx, message);
+    });
+
+    // 2. Answer search queries.
+    ctx.registerSearchProvider(async query => {
+      const start = Date.now();
+      const results = await this._search(ctx, query); // your backend's query
+      return {
+        hits: results.rows.map(r => ({
+          messageId: String(r.id),
+          waMessageId: r.waMessageId ?? '',
+          sessionId: r.sessionId,
+          chatId: r.chatId,
+          body: r.body,
+          snippet: this._highlight(r.body, query.q), // wrap the match in <mark>…</mark>
+          timestamp: r.timestamp,
+          type: r.type,
+          direction: r.direction,
+          from: r.from,
+          score: r.score,
+        })),
+        total: results.total,
+        tookMs: Date.now() - start,
+        provider: `plugin:${ctx.pluginId}`,
+      };
+    });
+  }
+
+  // Your backend-specific methods:
+  async _index(ctx, message) {
+    /* upsert into your index */
+  }
+  async _search(ctx, query) {
+    /* run your backend's query, honoring query.q + filters + limit/offset */ return { rows: [], total: 0 };
+  }
+  _highlight(body, term) {
+    // Escape the query so `c++` or `(` matches literally instead of throwing a SyntaxError.
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return body.replace(new RegExp(escaped, 'gi'), '<mark>$&</mark>');
+  }
+  async _pingBackend() {
+    /* ping your backend */ return true;
+  }
+
+  // Optional: report backend health to the plugin health check.
+  async healthCheck() {
+    const ok = await this._pingBackend();
+    return { healthy: ok, message: ok ? undefined : 'backend unreachable' };
+  }
+};
+```
+
+## 27.6 TypeScript plugin authors
+
+The contract types are exported from the core:
+
+```ts
+import type { SearchQuery, SearchResults, SearchHit } from '../../modules/search/search.types';
+```
+
+(Add the OpenWA repo as a devDependency or reference the types via a `paths` mapping. A standalone
+`@openwa/plugin-types` package is planned.)
+
+The worker context a sandboxed plugin receives exposes: `pluginId`, `config` (per-session-resolved),
+`logger`, the capability bridge (`messages`, `engine`, `storage`, `net`, …), `registerHook`,
+`registerWebhook`, and `registerSearchProvider`. (A formal `@openwa/plugin-types` package with the full
+ctx interface is planned; for now the search contract types above are the stable surface.)
+
+## 27.7 Gotchas
+
+- **`timestamp` is epoch-seconds**, not epoch-ms (matches the core `messages.timestamp` column). The
+  `dateFrom`/`dateTo` in the query are epoch-ms; convert if your backend uses ms.
+- **The provider id is `plugin:<manifest.id>`** — the host derives it; your `SearchResults.provider`
+  should match (`plugin:${ctx.pluginId}`).
+- **The 10s timeout is hard.** A backend that's slow under load returns 503 (the host fails fast, never
+  hangs the `/search` request). Use a backend-side query timeout shorter than 10s.
+- **Session scope is authoritative.** The caller's `allowedSessions` is injected by the host into
+  `query.sessionIds` — the plugin should honor it (filter by `sessionIds` in the backend query) for
+  correct results + performance. The host re-filters as defense-in-depth, but a plugin that ignores
+  `sessionIds` returns more rows than needed (wasteful) and relies on the host to strip them.
+- **Chat-restricted keys require the built-in provider.** Plugin search returns `403` before invoking
+  the worker for these keys. Filtering a plugin's returned page cannot enforce scoped offsets or
+  counts. Use `SEARCH_PROVIDER=builtin-fts` to enable search for chat-restricted keys. A compiled
+  chat scope with no valid ids returns no hits and a zero total without invoking the worker.
+- **`message:persisted` is fire-and-forget.** An error in the indexing handler is swallowed (it must not
+  break the send/receive pipeline). Log errors via `ctx.logger` and retry/mirror in your backend's own
+  retry queue if you need stronger delivery guarantees.
+
+---
+
+> See also: [26 - Global Search](./26-global-search.md) (the feature + the built-in provider),
+> [19 - Plugin Architecture](./19-plugin-architecture.md),
+> [30 - Plugin Sandboxing](./30-plugin-sandboxing.md),
+> [06 - API Specification](./06-api-specification.md) §6.4.12 Search.

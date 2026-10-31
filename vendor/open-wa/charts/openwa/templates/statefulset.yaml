@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "openwa.fullname" . }}
+  labels:
+    {{- include "openwa.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "openwa.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "openwa.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      # envFrom is read once, when the container is created — Kubernetes never updates it in a
+      # running container. Without something config-derived here, a `helm upgrade` that changes only
+      # env/secretEnv renders an identical pod template, so no rollout happens and the process keeps
+      # its old values while the release reports success. Hashing the RENDERED objects rather than
+      # `.Values` on purpose: a change to the template itself — a new key, a changed quoting rule —
+      # alters the ConfigMap without altering the values it was built from.
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "openwa.selectorLabels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      serviceAccountName: {{ include "openwa.serviceAccountName" . }}
+      # The app never calls the Kubernetes API — don't mount a token it can't use.
+      automountServiceAccountToken: false
+      # The app reads no Docker-link variables, and a Service named redis or database in the namespace
+      # would otherwise set REDIS_PORT or DATABASE_PORT to tcp://<ip>:<port> and fail boot validation.
+      enableServiceLinks: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 2785
+          envFrom:
+            - configMapRef:
+                name: {{ include "openwa.fullname" . }}
+            - secretRef:
+                name: {{ include "openwa.secretName" . }}
+          # The port is bound only after Nest has run every bootstrap hook — migrations, the database
+          # connect retry (up to 10 attempts, 3s apart), plugin load and the backfills — so during
+          # boot the endpoint is not unhealthy, it is closed, and every probe is a connection
+          # refusal. Without a startupProbe the liveness block below governs that window and allows
+          # 30s + 10s x (6-1) = 80s before the kubelet restarts the container, which the connect
+          # retry plus migrations can consume.
+          #
+          # Budget here is periodSeconds x (failureThreshold - 1) = 5s x (60-1) = 295s — the same
+          # arithmetic as the 80s above, because the first probe fires at initialDelaySeconds and the
+          # verdict lands on the Nth consecutive failure, not one period after it. The Kubernetes
+          # docs' shorthand (period x threshold) would say 300s; it is one period long, and applying
+          # it to the liveness probe above would give 90s rather than the 80s stated there. Do not
+          # "correct" this back without changing that one too. The point of either figure is that it
+          # converts "killed at 80s by default" into "killed at a budget we chose": a large
+          # improvement, and not a guarantee for a boot that is genuinely unbounded.
+          #
+          # initialDelaySeconds is deliberately left at its default of 0: the first probe fires
+          # immediately, so a fast boot is recognised in ~5s instead of waiting out a fixed delay.
+          # The pod therefore becomes live SOONER than it does today, not later.
+          #
+          # periodSeconds and failureThreshold come from the startupProbe values (5 and 60 by default); an
+          # operator whose first boot after an upgrade builds indexes on a large table raises the threshold.
+          #
+          # Kubernetes suspends the liveness and readiness probes until a startupProbe succeeds, so
+          # the values below keep their meaning for steady state and stop governing boot. (That
+          # suspension is documented kubelet behaviour, not something this chart's tests observe —
+          # rendering a manifest cannot demonstrate a runtime scheduling rule.)
+          #
+          # timeoutSeconds is explicit on every probe. The kubelet default of 1s is missed by a
+          # CPU-throttled pod (the limit is shared with every Chromium) even on the static /live route,
+          # and by /ready by design: it bounds each database probe at READINESS_PROBE_TIMEOUT_MS
+          # (3000 ms, src/modules/health/health.controller.ts) so it can answer its own 503 first.
+          startupProbe:
+            httpGet:
+              path: /api/health/live
+              port: http
+            periodSeconds: {{ (.Values.startupProbe | default dict).periodSeconds | default 5 }}
+            timeoutSeconds: 5
+            failureThreshold: {{ (.Values.startupProbe | default dict).failureThreshold | default 60 }}
+          livenessProbe:
+            httpGet:
+              path: /api/health/live
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    # volumeClaimTemplates is immutable in the StatefulSet API — only ever put
+    # immutable labels here (selectorLabels), never the chart/app-version labels.
+    - metadata:
+        name: data
+        labels:
+          {{- include "openwa.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

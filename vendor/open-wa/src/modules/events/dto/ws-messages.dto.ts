@@ -1,0 +1,107 @@
+// src/modules/events/dto/ws-messages.dto.ts
+
+/**
+ * WebSocket message types for subscription protocol
+ */
+
+// Valid event types that can be subscribed to over the socket. Every entry here MUST have a
+// matching EventsGateway.emit* producer — the drift guard in events.gateway.spec asserts this.
+export const SUBSCRIBABLE_EVENTS = [
+  'message.received',
+  'message.sent',
+  'message.ack',
+  'message.receipt',
+  'message.revoked',
+  'message.reaction',
+  'message.edited',
+  'session.status',
+  'session.qr',
+  'session.authenticated',
+  'session.disconnected',
+  'session.restriction',
+  'group.join',
+  'group.leave',
+  'group.update',
+  'group.join_request',
+  'call.received',
+  'status.received',
+  'presence.update',
+  'event.response',
+  'poll.vote',
+  'call.accepted',
+  'call.rejected',
+  'call.missed',
+] as const;
+
+// Client -> Server: Subscribe request
+export interface WSSubscribeRequest {
+  type: 'subscribe';
+  sessionId: string; // Session ID or '*' for all
+  events: string[]; // Event types or ['*'] for all
+  requestId?: string;
+}
+
+// Client -> Server: Unsubscribe request
+export interface WSUnsubscribeRequest {
+  type: 'unsubscribe';
+  sessionId: string;
+  requestId?: string;
+}
+
+// Client -> Server: Ping
+export interface WSPingRequest {
+  type: 'ping';
+  requestId?: string;
+}
+
+// Union type for all client messages
+export type WSClientMessage = WSSubscribeRequest | WSUnsubscribeRequest | WSPingRequest;
+
+// Server -> Client: Subscription confirmed
+export interface WSSubscribedResponse {
+  type: 'subscribed';
+  sessionId: string;
+  events: string[];
+  requestId?: string;
+  timestamp: string;
+}
+
+// Server -> Client: Unsubscription confirmed
+export interface WSUnsubscribedResponse {
+  type: 'unsubscribed';
+  sessionId: string;
+  requestId?: string;
+  timestamp: string;
+}
+
+// Server -> Client: Event payload
+export interface WSEventMessage {
+  type: 'event';
+  payload: {
+    event: string;
+    sessionId: string;
+    data: unknown;
+  };
+  timestamp: string;
+}
+
+// Server -> Client: Error
+export interface WSErrorResponse {
+  type: 'error';
+  code: string;
+  message: string;
+  requestId?: string;
+  timestamp: string;
+}
+
+// Server -> Client: Pong
+export interface WSPongResponse {
+  type: 'pong';
+  requestId?: string;
+  timestamp: string;
+}
+
+// Room name builder
+export function buildRoomName(sessionId: string, event: string): string {
+  return `session:${sessionId}:${event}`;
+}

@@ -1,0 +1,48 @@
+package com.rmyndharis.openwa.model;
+
+import java.util.List;
+
+/** Request body for posting a text status. Optional fields are omitted from the payload when {@code null}. */
+public record SendTextStatusRequest(String text, List<String> recipients, String backgroundColor, Integer font) {
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static final class Builder {
+        private String text;
+        private List<String> recipients;
+        private String backgroundColor;
+        private Integer font;
+
+        /** The status text. */
+        public Builder text(String v) {
+            this.text = v;
+            return this;
+        }
+
+        /** Recipient JIDs. Required on the Baileys engine (absent/empty → 400); omit on whatsapp-web.js, which broadcasts instead. */
+        public Builder recipients(List<String> v) {
+            this.recipients = v;
+            return this;
+        }
+
+        /** Hex background color, e.g. {@code #25D366}. */
+        public Builder backgroundColor(String v) {
+            this.backgroundColor = v;
+            return this;
+        }
+
+        /**
+         * Font index supported by WhatsApp status: 0 (default), 1, 2, 6 (bold), 7, 8, 9 or 10.
+         * whatsapp-web.js honors only 0 to 7 and posts 8, 9 and 10 in the default font.
+         */
+        public Builder font(Integer v) {
+            this.font = v;
+            return this;
+        }
+
+        public SendTextStatusRequest build() {
+            return new SendTextStatusRequest(text, recipients, backgroundColor, font);
+        }
+    }
+}

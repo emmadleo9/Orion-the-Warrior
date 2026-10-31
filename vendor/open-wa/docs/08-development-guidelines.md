@@ -1,0 +1,1141 @@
+# 08 - Development Guidelines
+
+## 8.1 Project Structure
+
+```
+openwa/
+├── src/
+│   ├── main.ts                    # Application entry
+│   ├── app.module.ts              # Root module
+│   ├── common/                    # Shared cache, security, storage, errors, utils
+│   ├── config/                    # Runtime config, env validation, bootstrap security, Swagger
+│   ├── core/                      # Hook and plugin framework
+│   ├── database/                  # TypeORM data sources and migrations
+│   ├── engine/                    # WhatsApp engine abstraction, adapters, identity mapping,
+│   │                              # and the built-in engine plugins (engine/builtin/)
+│   ├── modules/                   # API feature modules
+├── test/                          # E2E smoke tests and mocks
+├── dashboard/                     # React/Vite dashboard
+├── sdk/                           # Client SDKs: go, java, javascript, php, python
+├── docs/                          # Documentation
+├── scripts/                       # Utility scripts
+├── .github/workflows/             # CI and release workflows
+├── package.json
+├── tsconfig.json
+├── nest-cli.json
+├── eslint.config.mjs
+├── docker-compose.yml
+├── docker-compose.dev.yml
+├── Dockerfile
+└── README.md
+```
+
+## 8.2 Coding Standards
+
+### TypeScript Configuration
+
+```json
+// tsconfig.json (abridged — see the file for the commented rationale)
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "esModuleInterop": true,
+    "target": "ES2023",
+    "rootDir": ".",
+    "outDir": "./dist",
+    "types": ["node", "jest"],
+    "declaration": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src", "test"],
+  "exclude": ["node_modules", "dist", "dashboard"]
+}
+```
+
+There are **no path aliases** — no `baseUrl`, no `paths`. Import with relative paths
+(`../common/services/logger.service`), not `@/…`. The whole strict family is on, with no opt-outs,
+so entity and DTO properties the framework populates carry a definite-assignment `!`
+(`name!: string;`), since no constructor assigns them. `types` must be
+listed explicitly because TypeScript 6 no longer auto-includes every `@types` package.
+
+### ESLint Configuration
+
+The backend uses ESLint flat config in `eslint.config.mjs` with type-aware TypeScript rules,
+Prettier integration, and an architecture guard for controllers. HTTP controllers must call
+capability services; they must not import `IWhatsAppEngine` or `EngineRegistry`, call `getEngine()`,
+or resolve an engine via `engines.require()` / `engines.get()`.
+
+```bash
+npm run lint
+npm run lint:fix
+```
+
+The dashboard has its own package scripts:
+
+```bash
+cd dashboard
+npm run lint
+```
+
+### Naming Conventions
+
+```typescript
+// Files: kebab-case
+session.controller.ts
+send-message.dto.ts
+api-key.guard.ts
+
+// Classes: PascalCase
+class SessionController {}
+class SendMessageDto {}
+class ApiKeyGuard {}
+
+// Interfaces: PascalCase with 'I' prefix (optional)
+interface ISessionConfig {}
+interface SessionConfig {} // Also acceptable
+
+// Functions/Methods: camelCase
+function createSession() {}
+async sendMessage() {}
+
+// Variables: camelCase
+const sessionId = 'abc';
+let messageCount = 0;
+
+// Constants: UPPER_SNAKE_CASE
+const MAX_RETRY_COUNT = 3;
+const DEFAULT_TIMEOUT = 30000;
+
+// Enums: PascalCase name with UPPER_SNAKE_CASE values
+enum SessionStatus {
+  CREATED = 'created',
+  READY = 'ready',
+  DISCONNECTED = 'disconnected',
+}
+```
+
+## 8.3 Module Structure
+
+### Standard Module Template
+
+```typescript
+// modules/example/example.module.ts
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { ExampleController } from './example.controller';
+import { ExampleService } from './example.service';
+import { ExampleRepository } from './example.repository';
+import { Example } from './entities/example.entity';
+
+@Module({
+  imports: [TypeOrmModule.forFeature([Example], 'data')],
+  controllers: [ExampleController],
+  providers: [ExampleService, ExampleRepository],
+  exports: [ExampleService],
+})
+export class ExampleModule {}
+```
+
+### Controller Template
+
+```typescript
+// modules/example/example.controller.ts
+import { Controller, Get, Post, Body, Param, Delete, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ExampleService } from './example.service';
+import { CreateExampleDto } from './dto/create-example.dto';
+import { ExampleResponseDto } from './dto/example-response.dto';
+
+@ApiTags('examples')
+@Controller('examples')
+export class ExampleController {
+  constructor(private readonly exampleService: ExampleService) {}
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Create example' })
+  @ApiResponse({ status: 201, type: ExampleResponseDto })
+  async create(@Body() dto: CreateExampleDto): Promise<ExampleResponseDto> {
+    return this.exampleService.create(dto);
+  }
+
+  @Get(':id')
+  @ApiOperation({ summary: 'Get example by ID' })
+  @ApiResponse({ status: 200, type: ExampleResponseDto })
+  async findOne(@Param('id') id: string): Promise<ExampleResponseDto> {
+    return this.exampleService.findOne(id);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete example' })
+  async remove(@Param('id') id: string): Promise<void> {
+    return this.exampleService.remove(id);
+  }
+}
+```
+
+Controllers are protected by the global API key guard unless marked with `@Public()`. Keep
+controllers thin: validate transport input through DTOs, delegate behavior to services, and never
+resolve an engine directly from a controller. Engine-specific details belong behind capability
+services and engine adapters.
+
+A capability service reaches the live engine through `EngineRegistry`, the narrow port exported by
+the (global) `EngineModule` — not through `SessionService`, which drives the session _lifecycle_
+(start/stop/delete/reconnect, owned by `SessionEngineLifecycle`) and should only be injected by code
+that actually drives it:
+
+```typescript
+@Injectable()
+export class ExampleService {
+  constructor(private readonly engines: EngineRegistry) {}
+
+  // require() throws 400 "Session is not started" by default; pass a factory to keep an
+  // endpoint's own documented status/message.
+  private getEngine(sessionId: string): IWhatsAppEngine {
+    return this.engines.require(sessionId);
+  }
+}
+```
+
+### Service Template
+
+```typescript
+// modules/example/example.service.ts
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { createLogger } from '../../common/services/logger.service';
+import { ExampleRepository } from './example.repository';
+import { CreateExampleDto } from './dto/create-example.dto';
+import { Example } from './entities/example.entity';
+
+@Injectable()
+export class ExampleService {
+  private readonly logger = createLogger('ExampleService');
+
+  constructor(private readonly repository: ExampleRepository) {}
+
+  async create(dto: CreateExampleDto): Promise<Example> {
+    this.logger.log(`Creating example: ${dto.name}`);
+
+    const example = this.repository.create(dto);
+    return this.repository.save(example);
+  }
+
+  async findOne(id: string): Promise<Example> {
+    const example = await this.repository.findOne({ where: { id } });
+
+    if (!example) {
+      throw new NotFoundException(`Example with ID ${id} not found`);
+    }
+
+    return example;
+  }
+
+  async remove(id: string): Promise<void> {
+    const example = await this.findOne(id);
+    await this.repository.remove(example);
+
+    this.logger.log(`Deleted example: ${id}`);
+  }
+}
+```
+
+### DTO Template
+
+```typescript
+// modules/example/dto/create-example.dto.ts
+import { IsString, IsOptional, MaxLength, IsUrl } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+export class CreateExampleDto {
+  @ApiProperty({ description: 'Example name', example: 'My Example' })
+  @IsString()
+  @MaxLength(100)
+  name!: string;
+
+  @ApiPropertyOptional({ description: 'Optional description' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  description?: string;
+
+  @ApiPropertyOptional({ description: 'Callback URL' })
+  @IsOptional()
+  @IsUrl({ protocols: ['https'] })
+  callbackUrl?: string;
+}
+```
+
+### Global modules — the fixed set
+
+`@Global()` makes a module's exported providers injectable everywhere without an import, which is
+convenient exactly until two modules both assume they own a name and the injector silently picks
+one. The sanctioned set is therefore frozen at these ten — every one of them a cross-cutting
+concern that nearly every module would otherwise have to import:
+
+| Module             | Path                                         | Why it is global                                      |
+| ------------------ | -------------------------------------------- | ----------------------------------------------------- |
+| `AuthModule`       | `src/modules/auth/auth.module.ts`            | API-key guard + role checks run on nearly every route |
+| `AuditModule`      | `src/modules/audit/audit.module.ts`          | Every mutation surface writes audit entries           |
+| `EventsModule`     | `src/modules/events/events.module.ts`        | The event bus fans out from every module              |
+| `EngineModule`     | `src/engine/engine.module.ts`                | `EngineRegistry`, the narrow port to the live engines |
+| `PluginsModule`    | `src/core/plugins/plugins.module.ts`         | Plugin services are consumed across modules           |
+| `HooksModule`      | `src/core/hooks/hooks.module.ts`             | `HookManager` is invoked from unrelated modules       |
+| `CacheModule`      | `src/common/cache/cache.module.ts`           | Shared cache service                                  |
+| `StorageModule`    | `src/common/storage/storage.module.ts`       | File/media storage used across modules                |
+| `LoggerModule`     | `src/common/services/logger.module.ts`       | The logger is needed literally everywhere             |
+| `AgentToolsModule` | `src/core/agent-tools/agent-tools.module.ts` | The tool registry is shared by MCP and the REST layer |
+
+Do not add an eleventh. A new global needs an ADR-level justification — written down and reviewed
+with the same weight as an architecture decision record — because the cost (implicit coupling,
+order-dependent provider resolution, tests that pass only because the whole app booted) is paid by
+every future module, not by the one that opts out of an explicit `imports` entry. The default for a
+new module is the standard template above: declare `exports` and let consumers `imports` you.
+
+## 8.4 Git Workflow
+
+### Branch Strategy
+
+`main` is the only long-lived branch. Each change is made on a short-lived branch cut from `main`,
+opened as a pull request against `main`, and merged with a merge commit once CI passes. Releases are
+tagged from `main`; see [15.7 Cutting a Release](./15-project-roadmap.md#157-cutting-a-release).
+
+### Branch Naming
+
+```
+fix/*       # Bug fixes
+feat/*      # New features
+docs/*      # Documentation only
+chore/*     # Tooling, dependencies, release housekeeping
+refactor/*  # Restructuring without a behavior change
+test/*      # Tests only
+
+Examples:
+fix/qr-code-timeout
+feat/webhook-retry
+docs/update-api-reference
+```
+
+### Commit Message Convention
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+
+Types:
+- feat:     New feature
+- fix:      Bug fix
+- docs:     Documentation
+- style:    Formatting (no code change)
+- refactor: Code refactoring
+- test:     Adding tests
+- chore:    Maintenance
+
+Examples:
+feat(session): add multi-session support
+
+- Implement session manager for multiple sessions
+- Add session limit configuration
+- Update documentation
+
+Closes #123
+
+fix(webhook): handle timeout errors gracefully
+
+Previously, webhook timeouts would crash the worker.
+Now they are caught and logged properly.
+
+Fixes #456
+```
+
+### Pull Request Template
+
+```markdown
+## Description
+
+Brief description of changes
+
+## Type of Change
+
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+- [ ] Documentation update
+
+## Checklist
+
+- [ ] Tests added/updated
+- [ ] Documentation updated
+- [ ] Lint passes
+- [ ] Self-reviewed
+
+## Screenshots (if applicable)
+
+## Related Issues
+
+Closes #
+```
+
+## 8.5 Testing Guidelines
+
+### Test Structure
+
+Unit tests live next to source files as `*.spec.ts`. E2E smoke tests live in `test/`.
+
+```
+src/
+├── common/security/ssrf-guard.spec.ts
+├── engine/adapters/baileys.adapter.spec.ts
+├── modules/session/session.service.spec.ts
+└── modules/webhook/webhook.service.spec.ts
+
+test/
+├── app.e2e-spec.ts
+├── baileys-engine.e2e-spec.ts
+├── serve-static.e2e-spec.ts
+├── jest-e2e.json
+└── setup-e2e.ts
+```
+
+### Unit Test Example
+
+```typescript
+// src/modules/session/reconnect-config.spec.ts
+import { resolveReconnectConfig } from './session-engine-lifecycle.service';
+
+describe('resolveReconnectConfig', () => {
+  it('keeps reconnect settings finite and bounded', () => {
+    // Invalid maxReconnectAttempts falls back to the default: unlimited retries (the backoff
+    // parks at the 5-minute cap); an invalid baseDelay is clamped up to the 1s minimum.
+    expect(resolveReconnectConfig({ maxReconnectAttempts: 'bad', reconnectBaseDelay: -1 })).toEqual({
+      maxAttempts: Number.POSITIVE_INFINITY,
+      baseDelay: 1000,
+    });
+  });
+});
+```
+
+### E2E Test Example
+
+```typescript
+// test/app.e2e-spec.ts
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication } from '@nestjs/common';
+import request from 'supertest';
+import { AppModule } from '../src/app.module';
+import { applyGlobalValidation } from '../src/config/app-validation';
+
+describe('App (e2e)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleFixture.createNestApplication();
+    applyGlobalValidation(app);
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  describe('GET /api/health', () => {
+    it('returns health status without an API key', () => {
+      return request(app.getHttpServer())
+        .get('/api/health')
+        .expect(200)
+        .expect(res => {
+          expect(res.body.status).toBe('ok');
+        });
+    });
+  });
+});
+```
+
+### Test Coverage Requirements
+
+Run the normal backend checks before opening a PR:
+
+```bash
+npm test -- --runInBand
+npm run test:e2e -- --runInBand
+npm run lint
+```
+
+Coverage thresholds are enforced by Jest in `package.json`. Security-sensitive code under
+`src/common/security/` has stricter thresholds than the global baseline.
+
+## 8.6 Documentation Standards
+
+### Code Documentation
+
+````typescript
+/**
+ * Session service handles all session-related operations.
+ *
+ * @example
+ * ```typescript
+ * const session = await sessionService.create({ name: 'my-bot' });
+ * console.log(session.id);
+ * ```
+ */
+@Injectable()
+export class SessionService {
+  /**
+   * Creates a new WhatsApp session.
+   *
+   * @param dto - Session creation parameters
+   * @returns The created session with QR code if applicable
+   * @throws {ConflictException} If session name already exists
+   * @throws {ServiceUnavailableException} If max sessions reached
+   */
+  async create(dto: CreateSessionDto): Promise<Session> {
+    // Implementation
+  }
+}
+````
+
+### API Documentation (Swagger)
+
+```typescript
+@ApiTags('sessions')
+@Controller('sessions')
+export class SessionController {
+  @Post()
+  @ApiOperation({
+    summary: 'Create a new session',
+    description: 'Creates a new WhatsApp session and returns QR code for authentication',
+  })
+  @ApiBody({ type: CreateSessionDto })
+  @ApiResponse({
+    status: 201,
+    description: 'Session created successfully',
+    type: SessionResponseDto,
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Session name already exists',
+  })
+  async create(@Body() dto: CreateSessionDto): Promise<SessionResponseDto> {
+    // Implementation
+  }
+}
+```
+
+## 8.7 Error Handling
+
+There is **no custom exception base class and no global exception filter**. Handlers throw NestJS's
+built-in HTTP exceptions and NestJS's own `BaseExceptionFilter` renders them, so responses carry the
+framework default shape `{ statusCode, message, error }`.
+
+```typescript
+throw new BadRequestException('Session is not started');
+throw new NotFoundException(`Contact ${contactId} not found`);
+```
+
+### Domain errors extend a built-in exception
+
+Where a failure mode recurs across engines, `src/common/errors/` defines a named error that extends
+the NestJS exception carrying the right status, so throwing it from an adapter maps to the intended
+HTTP code with no filter involved:
+
+| Error                                                                                        | Extends                        | Status |
+| -------------------------------------------------------------------------------------------- | ------------------------------ | ------ |
+| `EngineNotSupportedError`                                                                    | `NotImplementedException`      | 501    |
+| `ChannelMediaNotSupportedError`                                                              | `NotImplementedException`      | 501    |
+| `EngineNotReadyError`                                                                        | `ConflictException`            | 409    |
+| `EngineRefusedError`                                                                         | `ForbiddenException`           | 403    |
+| `EngineTransportError`                                                                       | `ServiceUnavailableException`  | 503    |
+| `ChatLabelsUnsupportedError`                                                                 | `UnprocessableEntityException` | 422    |
+| `CallNotFoundError` / `ChannelNotFoundError` / `GroupNotFoundError` / `MessageNotFoundError` | `NotFoundException`            | 404    |
+
+Add a new one only when the condition is engine-agnostic and recurs; a one-off stays an inline
+`throw new BadRequestException(...)`.
+
+> Do not introduce a response envelope. A `ResponseInterceptor`/`HttpExceptionFilter` pair that
+> wrapped every payload in `{ success, data, meta }` was written once, never registered, and has
+> since been deleted — `dashboard/src/services/api.ts` reads the raw payload.
+
+---
+
+## 8.8 Environment Setup
+
+### Prerequisites
+
+```bash
+# Required
+- Node.js 22.19 or newer (22 LTS)
+- npm 10+
+- Docker & Docker Compose
+- Git
+
+# Optional (for development)
+- VS Code with extensions
+- Postman or Insomnia
+- pgAdmin or DBeaver
+```
+
+> Dependency installation patches whatsapp-web.js for the WhatsApp Web 2.3000.x message-id rename.
+> It applies the patch with GNU `patch`, falling back to `git apply` — so Git alone is enough,
+> including on Windows outside Git Bash. With neither available the install still succeeds, but the
+> whatsapp-web.js engine then fails on every send; see `docs/12-troubleshooting-faq.md`.
+>
+> The committed lockfile resolves dependencies from the npm registry and works with npm 12's default
+> Git-dependency block. Do not work around `EALLOWGIT` by changing npm or Git configuration globally;
+> update to a current lockfile instead.
+
+### Quick Start
+
+```bash
+# 1. Clone repository
+git clone https://github.com/rmyndharis/OpenWA.git
+cd OpenWA
+
+# 2. Install the locked dependencies (also installs dashboard dependencies)
+npm ci
+
+# 3. Start API + dashboard in development mode
+npm run dev
+```
+
+Use `npm install` only when intentionally changing dependencies and updating the lockfile.
+
+On first boot the API creates `data/.env.generated` with a minimal SQLite/local-storage
+configuration. A project-level `.env` is optional; real process environment variables take precedence
+over `.env`, which takes precedence over `data/.env.generated`.
+
+For a production-image local smoke test:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+For production compose:
+
+```bash
+docker compose up -d
+docker compose --profile postgres up -d
+docker compose --profile full up -d
+```
+
+A profile only starts the extra containers. Point OpenWA at them first, from Dashboard >
+Infrastructure or with the `.env` variables listed under Production Deployment in the README;
+otherwise it stays on SQLite and local storage. The dashboard's built-in storage option creates its
+own `openwa-minio` container, so do not also start the `minio` or `full` profile for it. The same goes
+for built-in PostgreSQL and Redis: each built-in option creates its own container, and the compose
+profiles are for the manual `.env` route. The compose `minio` service starts only once
+`S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` are set in the `.env` next to `docker-compose.yml`; if it
+was already started without them, run `docker rm -f openwa-minio` before you enable built-in storage.
+
+### VS Code Extensions
+
+```json
+// .vscode/extensions.json
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "ms-azuretools.vscode-docker",
+    "humao.rest-client",
+    "bradlc.vscode-tailwindcss",
+    "orta.vscode-jest"
+  ]
+}
+```
+
+### VS Code Settings
+
+```json
+// .vscode/settings.json
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": true
+  },
+  "typescript.preferences.importModuleSpecifier": "relative",
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/dist": true
+  }
+}
+```
+
+### Environment Variables
+
+OpenWA supports multiple infrastructure configurations. Choose based on your needs:
+
+#### Minimal Profile (Development / Single Session)
+
+```bash
+# Keys the dashboard manages (Dashboard > Infrastructure) are commented out with their defaults:
+# an uncommented key in .env pins that value over the one the dashboard saves (see the header of
+# `.env.example`). Uncomment only what you intend to manage by hand.
+
+# Application
+NODE_ENV=development
+PORT=2785
+LOG_LEVEL=debug
+
+# Database: SQLite (zero config)
+# DATABASE_TYPE=sqlite
+# DATABASE_NAME=./data/openwa.sqlite
+# SQLite runs migrations by default. DATABASE_SYNCHRONIZE=true is SQLite-only: PostgreSQL refuses it
+# at boot, so an uncommented true here stops a later switch to PostgreSQL in the dashboard from booting.
+# DATABASE_SYNCHRONIZE=false
+
+# Storage: Local filesystem
+# STORAGE_TYPE=local
+# STORAGE_LOCAL_PATH=./data/media
+
+# Redis and queue disabled by default
+# REDIS_ENABLED=false
+# QUEUE_ENABLED=false
+
+# Optional: seed a known admin key. If omitted, OpenWA generates a random key and writes data/.api-key.
+API_MASTER_KEY=
+
+# Session
+# SESSION_DATA_PATH=./data/sessions
+
+# Engine: whatsapp-web.js = Chromium-based; baileys = browser-free WebSocket
+# ENGINE_TYPE=whatsapp-web.js
+# PUPPETEER_HEADLESS=true
+
+# Swagger defaults ON outside production and OFF under NODE_ENV=production.
+# Set it explicitly to force either way.
+ENABLE_SWAGGER=true
+```
+
+#### Standard Profile (Production / Multi-Session)
+
+```bash
+# Keys the dashboard manages (Dashboard > Infrastructure) are commented out with the values this
+# profile uses; set the ones that differ from the defaults (PostgreSQL, Redis, the queue, /app/data
+# paths) there. An uncommented key in .env pins that value over the one the dashboard saves (see the
+# header of `.env.example`). Uncomment only what you intend to manage by hand.
+
+# Application
+NODE_ENV=production
+PORT=2785
+LOG_LEVEL=info
+
+# Database: PostgreSQL
+# DATABASE_TYPE=postgres
+# DATABASE_HOST=postgres
+# DATABASE_PORT=5432
+# DATABASE_USERNAME=openwa
+# DATABASE_PASSWORD=<set-a-strong-password>
+# DATABASE_NAME=openwa
+DATABASE_SYNCHRONIZE=false
+# DATABASE_POOL_SIZE=10
+
+# Storage: Local filesystem
+# STORAGE_TYPE=local
+# STORAGE_LOCAL_PATH=/app/data/media
+
+# Cache: Redis
+# REDIS_ENABLED=true
+# REDIS_HOST=redis
+# REDIS_PORT=6379
+# QUEUE_ENABLED=true
+
+# Security
+# First-boot seed for the initial ADMIN key, ignored once any key exists. Leave it unset to
+# generate a random key into data/.api-key, or set one generated with: openssl rand -base64 32
+# API_MASTER_KEY=
+# Optional HMAC pepper so a DB leak alone can't precompute key hashes. Generate a random value
+# (openssl rand -base64 32); setting or changing it invalidates every API key issued before.
+# API_KEY_PEPPER=
+CORS_ORIGINS=https://dashboard.example.com
+
+# Session
+# SESSION_DATA_PATH=/app/data/sessions
+
+# Engine
+# ENGINE_TYPE=whatsapp-web.js
+# PUPPETEER_HEADLESS=true
+# PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu
+ENABLE_SWAGGER=false
+```
+
+> [!TIP]
+> For development, use the minimal profile with SQLite. PostgreSQL, Redis, and S3/MinIO are optional.
+
+## 8.9 Debugging Guide
+
+### NestJS Debugging
+
+```json
+// .vscode/launch.json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug NestJS",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start:debug"],
+      "console": "integratedTerminal",
+      "restart": true,
+      "autoAttachChildProcesses": true
+    },
+    {
+      "name": "Debug Tests",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "test:debug"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
+```
+
+### Logging Best Practices
+
+```typescript
+// Use createLogger from the shared LoggerService, not console.*
+import { Injectable } from '@nestjs/common';
+import { createLogger } from '../common/services/logger.service';
+
+@Injectable()
+export class MyService {
+  private readonly logger = createLogger('MyService');
+
+  async doSomething(id: string): Promise<void> {
+    this.logger.log('Processing item', { id });
+
+    try {
+      await this.process(id);
+      this.logger.log('Item processed successfully', { id });
+    } catch (error) {
+      // Log error with full stack
+      this.logger.error('Failed to process item', error instanceof Error ? error.stack : String(error), { id });
+      throw error;
+    }
+  }
+}
+```
+
+> [!NOTE]
+> LoggerService stamps the request ID on every log line on its own (it reads it through `getRequestId()`). Do
+> not pass `X-Request-ID` from controller to service, and do not make a provider request-scoped to reach it;
+> call `getRequestId()` from `common/services/request-context` when code needs the value.
+
+### Request ID
+
+`requestContextMiddleware` (`src/common/middleware/request-context.middleware.ts`, registered in
+`src/configure-app.ts`) gives every request an ID. It keeps a client `X-Request-ID` only when it matches
+`^[A-Za-z0-9-]{1,128}$` and otherwise generates a UUID, echoes it on the `X-Request-ID` response header,
+and runs the request inside AsyncLocalStorage (`runWithRequestId`), so `getRequestId()`, every log line
+and every audit row carry it. There is no request-ID interceptor.
+
+### Debug WhatsApp Engine
+
+```typescript
+// Enable verbose logging for whatsapp-web.js
+const client = new Client({
+  puppeteer: {
+    headless: false, // See browser window
+    devtools: true, // Open DevTools automatically
+  },
+});
+
+// Log all events for debugging
+const events = ['qr', 'ready', 'authenticated', 'disconnected', 'message'];
+events.forEach(event => {
+  client.on(event, (...args) => {
+    console.log(`[WA Event: ${event}]`, JSON.stringify(args, null, 2));
+  });
+});
+```
+
+### Common Debugging Commands
+
+```bash
+# Run single test file
+npm test -- session.service.spec.ts
+
+# Run tests with verbose output
+npm test -- --verbose
+
+# Check for TypeScript errors without emitting (the Nest CLI has no --noEmit; call tsc directly).
+# Use the root tsconfig, not tsconfig.build.json — it is the only one that also type-checks the
+# colocated *.spec.ts files, which is what CI gates on.
+npx tsc --noEmit -p tsconfig.json
+
+# Lint with auto-fix
+npm run lint -- --fix
+
+# Debug database queries (TypeORM) — add to .env:
+# DATABASE_LOGGING=true
+# (there is no DEBUG=typeorm:query switch; both connections read DATABASE_LOGGING)
+# PII warning: this logs full queries WITH bound parameters — message bodies and phone
+# numbers end up in the application log. Use on a local/debug data set only, never in production.
+
+# View Docker logs (service is `openwa-api` in docker-compose.yml, `openwa` in
+# docker-compose.dev.yml — there is no service named `app`)
+docker compose logs -f openwa-api
+```
+
+## 8.10 Performance Best Practices
+
+### Database Queries
+
+```typescript
+// ❌ Bad: N+1 query problem
+const sessions = await sessionRepo.find();
+for (const session of sessions) {
+  session.webhooks = await webhookRepo.find({ where: { sessionId: session.id } });
+}
+
+// ✅ Good: Use relations
+const sessions = await sessionRepo.find({
+  relations: ['webhooks'],
+});
+
+// ✅ Good: Use QueryBuilder for complex queries
+const sessions = await sessionRepo
+  .createQueryBuilder('session')
+  .leftJoinAndSelect('session.webhooks', 'webhook')
+  .where('session.status = :status', { status: 'ready' })
+  .orderBy('session.createdAt', 'DESC')
+  .take(10)
+  .getMany();
+```
+
+### Caching Strategy
+
+Memoize a hot, expensive read in-process with a TTL, as `StatsService` does for its aggregate
+responses (`STATS_CACHE_TTL_MS`, default 30000; `0` disables the memo). Each finished computation also drops the entries that have expired, including those of deleted sessions nobody asks for again. `CacheService` is an optional
+Redis client that stores no values and only answers `isAvailable()` for the infra status probe, so no
+request path reads from it (see [3.13.3 Cache Service](./03-system-architecture.md#3133-cache-service)).
+
+### Async Operations
+
+```typescript
+// ❌ Bad: Sequential execution
+const contact1 = await getContact('id1');
+const contact2 = await getContact('id2');
+const contact3 = await getContact('id3');
+
+// ✅ Good: Parallel execution
+const [contact1, contact2, contact3] = await Promise.all([getContact('id1'), getContact('id2'), getContact('id3')]);
+
+// ✅ Good: Batch processing with concurrency limit
+import pLimit from 'p-limit';
+
+const limit = pLimit(5); // Max 5 concurrent
+const results = await Promise.all(chatIds.map(id => limit(() => sendMessage(id, text))));
+```
+
+### Memory Management
+
+```typescript
+// Bound teardown so one stuck browser/socket cannot block shutdown.
+@Injectable()
+export class EngineTeardownService {
+  private readonly logger = createLogger('EngineTeardownService');
+
+  async destroyWithTimeout(sessionId: string, engine: IWhatsAppEngine): Promise<void> {
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('engine.destroy() timed out')), 10_000);
+    });
+
+    try {
+      await Promise.race([engine.destroy(), timeout]);
+    } catch (error) {
+      this.logger.warn(`Engine teardown failed for ${sessionId}: ${String(error)}`);
+    }
+  }
+}
+```
+
+## 8.11 Common Gotchas & Troubleshooting
+
+### WhatsApp Engine Issues
+
+#### QR Code Not Generated
+
+**Symptom:** Session stuck in 'initializing' status
+
+**Causes & Solutions:**
+
+1. **Chrome/Puppeteer issue**
+   - Ensure Chrome for Testing is installed: `ls /usr/local/bin/puppeteer-chrome`
+   - Check Puppeteer args (`PUPPETEER_ARGS`); the default is `--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu`
+
+2. **Previous session data corrupted**
+   - Clear the stored auth/session data for the session under `data/sessions`
+   - For Baileys, also check `BAILEYS_AUTH_DIR` (default `./data/baileys`)
+
+3. **WhatsApp rate limit**
+   - Wait 5-10 minutes before retrying
+
+#### Session Disconnects Randomly
+
+**Causes & Solutions:**
+
+1. **Memory pressure**
+   - Monitor memory: `docker stats`
+   - Increase container memory limit
+
+2. **Network issues**
+   - Check WebSocket connection stability
+   - Implement auto-reconnect logic
+
+3. **WhatsApp detected automation**
+   - Add random delays between messages
+   - Avoid sending too many messages quickly
+
+### Database Issues
+
+#### Connection Pool Exhausted
+
+**Symptom:** "too many clients already" error
+
+**Solution:**
+
+Set `DATABASE_POOL_SIZE` in `.env` (default 10). It becomes the pool `max` of the PostgreSQL data
+connection, both in the app and in the migration CLI. Keep the pool size times the number of
+replicas below the server's `max_connections`. See
+[12 - Troubleshooting](./12-troubleshooting-faq.md#issue-slow-api-response) for the related
+timeouts.
+
+#### Migration Fails
+
+**Symptom:** "relation already exists" error
+
+**Solution:**
+
+```bash
+# Check migration status: the failed migration is still listed as pending
+npm run migration:show
+```
+
+A failed migration is not recorded: the run executes in one transaction on SQLite and PostgreSQL, so
+the failure rolls back that migration and the rest of the same run, and there is nothing to revert.
+Do not run `migration:revert` for it: that runs the `down()` of the newest migration that succeeded,
+a downgrade step ([14.6](./14-migration-guide.md#146-rollback-procedures)) that can delete data.
+Fix the failing migration by hand so it skips what already exists, as the idempotent migrations
+in `src/database/migrations/` do, and run `npm run migration:run` again. Do not regenerate it with
+`migration:generate`: on PostgreSQL the command stops before it writes anything (the generated
+`messages.body_ts` column sends TypeORM to a `typeorm_metadata` table no migration creates), and on
+SQLite it writes the known table-rebuild drift pinned in `migration-drift.spec.ts`, in SQLite DDL
+that the PostgreSQL boot would then run.
+
+### TypeScript/NestJS Issues
+
+#### Circular Dependency
+
+**Symptom:** "Nest can't resolve dependencies" or an undefined injected provider at startup
+
+**Solution:** this codebase does not use `forwardRef`. Break the cycle by moving the shared piece into
+a lower module that both sides import (for example the global `EngineModule`'s `EngineRegistry`), or
+by one-directional delegation, as `SessionService` does to `SessionEngineLifecycle` (see the class
+comment on `SessionService` in `src/modules/session/session.service.ts`).
+
+#### DI Token Not Found
+
+**Symptom:** "Nest can't resolve dependencies"
+
+**Solution:**
+
+- Ensure provider is exported from its module
+- Check if module is imported where needed
+- Use @Injectable() decorator on services
+
+### Docker Issues
+
+#### Container Keeps Restarting
+
+**Check logs:**
+
+```bash
+docker compose logs openwa-api --tail 100
+```
+
+**Common causes:**
+
+1. Missing environment variables
+2. Database not ready (use depends_on + healthcheck)
+3. Port already in use
+
+#### Chrome Crashes in Docker
+
+**Solution:**
+
+```dockerfile
+# Add shared memory size
+docker run --shm-size=2gb openwa
+```
+
+Or in docker-compose.yml:
+
+```yaml
+services:
+  openwa-api:
+    shm_size: '2gb'
+```
+
+## 8.12 Contributing Guide
+
+### Getting Started
+
+```markdown
+1. Fork the repository
+2. Create feature branch: `git checkout -b feat/amazing-feature`
+3. Make changes following our coding standards
+4. Write/update tests
+5. Run linter: `npm run lint`
+6. Run tests: `npm test`
+7. Commit: `git commit -m 'feat(scope): add amazing feature'`
+8. Push: `git push origin feat/amazing-feature`
+9. Open Pull Request
+```
+
+### Code Review Checklist
+
+```markdown
+- [ ] Code follows project style guide
+- [ ] Tests are included and passing
+- [ ] Documentation is updated
+- [ ] No console.log statements
+- [ ] Error handling is proper
+- [ ] No hardcoded values
+- [ ] Security considerations addressed
+- [ ] Performance impact considered
+```
+
+### Issue Reporting
+
+```markdown
+**Bug Report Template:**
+
+- **Description:** Clear description of the bug
+- **Steps to Reproduce:** Numbered steps
+- **Expected Behavior:** What should happen
+- **Actual Behavior:** What actually happens
+- **Environment:** Node version, OS, Docker version
+- **Logs:** Relevant error logs
+```
+
+---
+
+<div align="center">
+
+[← 07 - API Collection](./07-api-collection.md) · [Documentation Index](./README.md) · [Next: 09 - Testing Strategy →](./09-testing-strategy.md)
+
+</div>

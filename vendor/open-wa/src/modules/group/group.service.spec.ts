@@ -1,0 +1,729 @@
+import { BadRequestException, HttpException, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
+import { GroupService } from './group.service';
+import { EngineRegistry } from '../../engine/engine-registry.service';
+import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
+import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
+import { SendPacingService } from '../message/send-pacing.service';
+
+/** Pacing is off by default; its own spec covers the governor, so here it must simply not refuse. */
+const inertPacing = (): SendPacingService =>
+  ({
+    assertReachoutAllowed: jest.fn().mockResolvedValue({ coldCount: 0, dayStartMs: 0 }),
+    refundGroupReachouts: jest.fn(),
+  }) as unknown as SendPacingService;
+
+describe('GroupService', () => {
+  const makeService = (engine: Partial<IWhatsAppEngine> | undefined, pacing: SendPacingService = inertPacing()) => {
+    const engines = new EngineRegistry();
+    if (engine) engines.set('s1', engine as IWhatsAppEngine);
+    return new GroupService(engines, pacing);
+  };
+
+  const makeServiceWithPacing = (
+    engine: Partial<IWhatsAppEngine>,
+    pacing: Record<string, jest.Mock>,
+  ): { svc: GroupService; pacing: Record<string, jest.Mock> } => {
+    const engines = new EngineRegistry();
+    engines.set('s1', engine as IWhatsAppEngine);
+    return { svc: new GroupService(engines, pacing as unknown as SendPacingService), pacing };
+  };
+
+  // On Baileys the id reaches sock.updateProfilePicture/removeProfilePicture verbatim, and Baileys
+  // omits the `target` attribute whenever the jid is the account's own — so a 1:1 id passed where a
+  // group id belongs replaced or PERMANENTLY DELETED the account's own profile picture and answered
+  // 200. whatsapp-web.js refused the same input via requireGroupChat, so the two engines disagreed
+  // destructively on a documented route. Guarded in the service so both agree, and so the id never
+  // reaches an engine at all.
+  describe('group-picture routes reject an id that does not name a group', () => {
+    const engine = () => ({
+      setGroupPicture: jest.fn().mockResolvedValue(undefined),
+      deleteGroupPicture: jest.fn().mockResolvedValue(undefined),
+      getProfilePicture: jest.fn().mockResolvedValue('https://cdn/x.jpg'),
+    });
+
+    it.each([
+      ["the account's own 1:1 jid", '628123456789@c.us'],
+      ['a lid', '99887766@lid'],
+      ['a channel', '120363000000000000@newsletter'],
+      ['a 1:1 jid with a group domain appended', '628123456789@c.us@g.us'],
+      ['a device jid with a group domain appended', '628123456789:5@c.us@g.us'],
+    ])('refuses %s', (_label, id) => {
+      const e = engine();
+      const svc = makeService(e);
+
+      // Thrown synchronously, matching this service's existing guards; the controller methods are
+      // async, so it still surfaces as a 400 at the HTTP layer.
+      expect(() => svc.setGroupPicture('s1', id, { base64: 'AAA=', mimetype: 'image/jpeg' })).toThrow(
+        BadRequestException,
+      );
+      expect(() => svc.deleteGroupPicture('s1', id)).toThrow(BadRequestException);
+      expect(() => svc.getGroupPicture('s1', id)).toThrow(BadRequestException);
+
+      expect(e.setGroupPicture).not.toHaveBeenCalled();
+      expect(e.deleteGroupPicture).not.toHaveBeenCalled();
+      expect(e.getProfilePicture).not.toHaveBeenCalled();
+    });
+
+    // Negative twin: the guard must not refuse the ids the routes exist to serve.
+    it('still forwards a real group id', async () => {
+      const e = engine();
+      const svc = makeService(e);
+
+      await svc.deleteGroupPicture('s1', '123456789-987654321@g.us');
+      await svc.getGroupPicture('s1', '123456789-987654321@g.us');
+
+      expect(e.deleteGroupPicture).toHaveBeenCalledWith('123456789-987654321@g.us');
+      expect(e.getProfilePicture).toHaveBeenCalledWith('123456789-987654321@g.us');
+    });
+  });
+
+  // Baileys relays the label as a message to whatever jid it is handed, so a 1:1 id would put a group
+  // protocol message in a person's chat.
+  describe('setGroupMemberLabel', () => {
+    it.each([
+      ['a 1:1 jid', '628123456789@c.us'],
+      ['a lid', '99887766@lid'],
+      ['a channel', '120363000000000000@newsletter'],
+      // Baileys reads the domain after the first `@`, so a second one is refused wherever it sits.
+      ['a 1:1 jid with a group domain appended', '628123456789@c.us@g.us'],
+      ['a protocol-dialect jid with a group domain appended', '628123456789@s.whatsapp.net@g.us'],
+      ['a device jid with a group domain appended', '628123456789:5@c.us@g.us'],
+    ])('refuses %s before it reaches the engine', (_label, id) => {
+      const setGroupMemberLabel = jest.fn().mockResolvedValue(undefined);
+      const svc = makeService({ setGroupMemberLabel });
+
+      expect(() => svc.setGroupMemberLabel('s1', id, 'Site A')).toThrow(BadRequestException);
+      expect(setGroupMemberLabel).not.toHaveBeenCalled();
+    });
+
+    it('forwards a group id and the label, an empty one included', async () => {
+      const setGroupMemberLabel = jest.fn().mockResolvedValue(undefined);
+      const svc = makeService({ setGroupMemberLabel });
+
+      await svc.setGroupMemberLabel('s1', '120363000000000001@g.us', 'Site A Management');
+      await svc.setGroupMemberLabel('s1', '120363000000000001@g.us', '');
+
+      expect(setGroupMemberLabel).toHaveBeenNthCalledWith(1, '120363000000000001@g.us', 'Site A Management');
+      expect(setGroupMemberLabel).toHaveBeenNthCalledWith(2, '120363000000000001@g.us', '');
+    });
+
+    it.each(['120363000000000001@G.US', ' 120363000000000001@g.us ', '120363000000000001:5@g.us'])(
+      'hands the engine the group id %j in the form Baileys relays to a group',
+      async id => {
+        const setGroupMemberLabel = jest.fn().mockResolvedValue(undefined);
+        const svc = makeService({ setGroupMemberLabel });
+
+        await svc.setGroupMemberLabel('s1', id, 'Site A');
+
+        expect(setGroupMemberLabel).toHaveBeenCalledWith('120363000000000001@g.us', 'Site A');
+      },
+    );
+
+    it('lets the whatsapp-web.js 501 through', async () => {
+      const svc = makeService({
+        setGroupMemberLabel: jest.fn().mockRejectedValue(new EngineNotSupportedError('setGroupMemberLabel')),
+      });
+
+      await expect(svc.setGroupMemberLabel('s1', '120363000000000001@g.us', 'Site A')).rejects.toBeInstanceOf(
+        EngineNotSupportedError,
+      );
+    });
+  });
+
+  // The service is the only enforcer of these body rules: SetGroupPictureDto.mimetype is optional, and a
+  // plugin send or a hook rewrite reaches the service without the DTO's url check.
+  describe('setGroupPicture checks its media body', () => {
+    const GROUP = '123456789-987654321@g.us';
+    const origCap = process.env.MEDIA_DOWNLOAD_MAX_BYTES;
+    afterEach(() => {
+      if (origCap === undefined) delete process.env.MEDIA_DOWNLOAD_MAX_BYTES;
+      else process.env.MEDIA_DOWNLOAD_MAX_BYTES = origCap;
+    });
+
+    it.each([
+      ['neither url nor base64', {}, 'Either url or base64 must be provided'],
+      ['base64 without a mimetype', { base64: 'QUJD' }, 'mimetype is required when using base64 data'],
+      [
+        'a url that is not an absolute http(s) URL',
+        { url: 'ftp://example.com/g.jpg' },
+        'url must be an absolute http(s) URL',
+      ],
+    ])('refuses %s with 400 and never reaches the engine', (_label, dto, message) => {
+      const setGroupPicture = jest.fn();
+      const svc = makeService({ setGroupPicture });
+
+      expect(() => svc.setGroupPicture('s1', GROUP, dto)).toThrow(BadRequestException);
+      expect(() => svc.setGroupPicture('s1', GROUP, dto)).toThrow(message);
+      expect(setGroupPicture).not.toHaveBeenCalled();
+    });
+
+    it('refuses base64 over MEDIA_DOWNLOAD_MAX_BYTES with 413', () => {
+      process.env.MEDIA_DOWNLOAD_MAX_BYTES = '1024';
+      const setGroupPicture = jest.fn();
+      const dto = { base64: Buffer.alloc(1025).toString('base64'), mimetype: 'image/jpeg' };
+
+      expect(() => makeService({ setGroupPicture }).setGroupPicture('s1', GROUP, dto)).toThrow(
+        PayloadTooLargeException,
+      );
+      expect(setGroupPicture).not.toHaveBeenCalled();
+    });
+
+    it('types a url body image/jpeg and keeps the mimetype a base64 body names', async () => {
+      const setGroupPicture = jest.fn().mockResolvedValue(undefined);
+      const svc = makeService({ setGroupPicture });
+
+      await svc.setGroupPicture('s1', GROUP, { url: 'https://example.com/g.jpg' });
+      await svc.setGroupPicture('s1', GROUP, { base64: 'QUJD', mimetype: 'image/png' });
+
+      expect(setGroupPicture).toHaveBeenNthCalledWith(1, GROUP, {
+        mimetype: 'image/jpeg',
+        data: 'https://example.com/g.jpg',
+      });
+      expect(setGroupPicture).toHaveBeenNthCalledWith(2, GROUP, { mimetype: 'image/png', data: 'QUJD' });
+    });
+  });
+
+  it('throws 400 "Session is not started" when the engine is missing (guard preserved)', () => {
+    // The guard throws synchronously; the controller methods are `async`, so this still surfaces
+    // as a rejected promise → 400 at the HTTP layer.
+    const svc = makeService(undefined);
+    expect(() => svc.getGroups('s1')).toThrow(BadRequestException);
+    expect(() => svc.getGroups('s1')).toThrow('Session is not started');
+  });
+
+  it('delegates getGroups to the engine when the session is started', async () => {
+    const getGroups = jest.fn().mockResolvedValue([{ id: 'g1' }]);
+    const svc = makeService({ getGroups });
+    await expect(svc.getGroups('s1')).resolves.toEqual([{ id: 'g1' }]);
+    expect(getGroups).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps an unbounded groups list at the default limit (1000)', async () => {
+    const big = Array.from({ length: 1500 }, (_, i) => ({ id: `g${i}` }));
+    const svc = makeService({ getGroups: jest.fn().mockResolvedValue(big) });
+    await expect(svc.getGroups('s1')).resolves.toHaveLength(1000);
+  });
+
+  it('applies limit/offset to the groups list', async () => {
+    const big = Array.from({ length: 50 }, (_, i) => ({ id: `g${i}` }));
+    const page = (await makeService({ getGroups: jest.fn().mockResolvedValue(big) }).getGroups('s1', {
+      limit: 5,
+      offset: 10,
+    })) as { id: string }[];
+    expect(page).toHaveLength(5);
+    expect(page[0].id).toBe('g10');
+  });
+
+  it('maps a missing group to 404 (business rule lives in the service)', async () => {
+    const svc = makeService({ getGroupInfo: jest.fn().mockResolvedValue(null) });
+    await expect(svc.getGroupInfo('s1', 'g404')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('returns the group when found', async () => {
+    const svc = makeService({ getGroupInfo: jest.fn().mockResolvedValue({ id: 'g1', name: 'G' }) });
+    await expect(svc.getGroupInfo('s1', 'g1')).resolves.toEqual({ id: 'g1', name: 'G' });
+  });
+
+  it('keeps the reserved cold-reachout budget when the engine call resolves', async () => {
+    const addParticipants = jest.fn().mockResolvedValue(undefined);
+    const { svc, pacing } = makeServiceWithPacing(
+      { addParticipants },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue({ coldCount: 3, dayStartMs: 1 }),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await svc.addParticipants('s1', 'g1', ['628111111@c.us']);
+    expect(pacing.refundGroupReachouts).not.toHaveBeenCalled();
+  });
+
+  it('refunds the reservation when the engine refuses the add (the participants were never contacted)', async () => {
+    const addParticipants = jest.fn().mockRejectedValue(new EngineRefusedError('no admin rights'));
+    const reservation = { coldCount: 3, dayStartMs: 1 };
+    const { svc, pacing } = makeServiceWithPacing(
+      { addParticipants },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue(reservation),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await expect(svc.addParticipants('s1', 'g1', ['628111111@c.us'])).rejects.toThrow('no admin rights');
+    expect(pacing.refundGroupReachouts).toHaveBeenCalledWith('s1', reservation);
+  });
+
+  it('refunds the reservation when createGroup fails (whatsapp-web.js always 501s)', async () => {
+    const createGroup = jest.fn().mockRejectedValue(new EngineNotSupportedError('createGroup'));
+    const reservation = { coldCount: 2, dayStartMs: 1 };
+    const { svc, pacing } = makeServiceWithPacing(
+      { createGroup },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue(reservation),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await expect(svc.createGroup('s1', 'G', ['628111111@c.us', '628222222@c.us'])).rejects.toThrow();
+    expect(pacing.refundGroupReachouts).toHaveBeenCalledWith('s1', reservation);
+  });
+
+  // WhatsApp turned a throttled request away before it ran, so the batch contacted nobody.
+  it.each([
+    ['createGroup', (svc: GroupService) => svc.createGroup('s1', 'G', ['628111111@c.us'])],
+    ['addParticipants', (svc: GroupService) => svc.addParticipants('s1', 'g1', ['628111111@c.us'])],
+  ])('refunds the reservation when WhatsApp rate-limits %s', async (_label, call) => {
+    const error = new EngineThrottledError('rate-limited (code 429)');
+    const reservation = { coldCount: 1, dayStartMs: 1 };
+    const { svc, pacing } = makeServiceWithPacing(
+      { createGroup: jest.fn().mockRejectedValue(error), addParticipants: jest.fn().mockRejectedValue(error) },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue(reservation),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await expect(call(svc)).rejects.toBe(error);
+    expect(pacing.refundGroupReachouts).toHaveBeenCalledWith('s1', reservation);
+  });
+
+  it.each([
+    ['a timed-out add (WhatsApp may still apply it)', new EngineTransportError('did not answer in time')],
+    ['a raw socket error', new Error('Connection Closed')],
+  ])('keeps the reservation charged after %s: the outcome is unknown', async (_label, error) => {
+    const addParticipants = jest.fn().mockRejectedValue(error);
+    const createGroup = jest.fn().mockRejectedValue(error);
+    const { svc, pacing } = makeServiceWithPacing(
+      { addParticipants, createGroup },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue({ coldCount: 3, dayStartMs: 1 }),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await expect(svc.addParticipants('s1', 'g1', ['628111111@c.us'])).rejects.toBe(error);
+    await expect(svc.createGroup('s1', 'G', ['628111111@c.us'])).rejects.toBe(error);
+    expect(pacing.refundGroupReachouts).not.toHaveBeenCalled();
+  });
+
+  it('passes participant lists straight through to the engine', async () => {
+    const addParticipants = jest.fn().mockResolvedValue(undefined);
+    const svc = makeService({ addParticipants });
+    // Real-shaped ids: the participant guard requires a numeric user-part, so `a@c.us` would now
+    // fail validation and this would stop testing the pass-through it is named for.
+    await svc.addParticipants('s1', 'g1', ['628111111@c.us', '628222222@c.us']);
+    expect(addParticipants).toHaveBeenCalledWith('g1', ['628111111@c.us', '628222222@c.us']);
+  });
+
+  it('joinGroupViaInviteCode delegates and returns the group id', async () => {
+    const joinGroupViaInviteCode = jest.fn().mockResolvedValue('120363000@g.us');
+    const svc = makeService({ joinGroupViaInviteCode });
+    await expect(svc.joinGroupViaInviteCode('s1', 'CODE123')).resolves.toBe('120363000@g.us');
+    expect(joinGroupViaInviteCode).toHaveBeenCalledWith('CODE123');
+  });
+
+  // Same rule as the join-info preview, so a code that previews also joins.
+  it('joinGroupViaInviteCode sends the trimmed code and refuses a blank one locally', () => {
+    const joinGroupViaInviteCode = jest.fn().mockResolvedValue('120363000@g.us');
+    const svc = makeService({ joinGroupViaInviteCode });
+    void svc.joinGroupViaInviteCode('s1', ' CODE123 ');
+    expect(joinGroupViaInviteCode).toHaveBeenCalledWith('CODE123');
+    expect(() => svc.joinGroupViaInviteCode('s1', '   ')).toThrow(BadRequestException);
+    expect(joinGroupViaInviteCode).toHaveBeenCalledTimes(1);
+  });
+
+  describe('getGroupSettings', () => {
+    it('maps the settings fields from getGroupInfo', async () => {
+      const svc = makeService({
+        getGroupInfo: jest.fn().mockResolvedValue({ id: 'g1', announce: true, locked: false, ephemeralSeconds: 86400 }),
+      });
+      await expect(svc.getGroupSettings('s1', 'g1')).resolves.toEqual({
+        announce: true,
+        locked: false,
+        ephemeralSeconds: 86400,
+      });
+    });
+
+    it('omits ephemeralSeconds when the engine does not report one', async () => {
+      const svc = makeService({
+        getGroupInfo: jest.fn().mockResolvedValue({ id: 'g1', announce: true, locked: true }),
+      });
+      const settings = (await svc.getGroupSettings('s1', 'g1')) as Record<string, unknown>;
+      expect(settings).toEqual({ announce: true, locked: true });
+      expect('ephemeralSeconds' in settings).toBe(false);
+    });
+
+    it('maps an unknown group to 404 (same rule as getGroupInfo)', async () => {
+      const svc = makeService({ getGroupInfo: jest.fn().mockResolvedValue(null) });
+      await expect(svc.getGroupSettings('s1', 'g404')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('updateGroupSettings', () => {
+    it('rejects an empty patch with 400 (at least one setting required)', async () => {
+      const svc = makeService({});
+      await expect(svc.updateGroupSettings('s1', 'g1', {})).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('invokes only the engine methods for the fields present', async () => {
+      const engine = {
+        setGroupMessagesAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupInfoAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupEphemeral: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService(engine);
+      await svc.updateGroupSettings('s1', 'g1', { announce: true });
+      expect(engine.setGroupMessagesAdminsOnly).toHaveBeenCalledWith('g1', true);
+      expect(engine.setGroupInfoAdminsOnly).not.toHaveBeenCalled();
+      expect(engine.setGroupEphemeral).not.toHaveBeenCalled();
+    });
+
+    it('applies all three fields when all are present (incl. ephemeral 0 = disable)', async () => {
+      const engine = {
+        setGroupMessagesAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupInfoAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupEphemeral: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService(engine);
+      await svc.updateGroupSettings('s1', 'g1', { announce: false, locked: true, ephemeralSeconds: 0 });
+      expect(engine.setGroupMessagesAdminsOnly).toHaveBeenCalledWith('g1', false);
+      expect(engine.setGroupInfoAdminsOnly).toHaveBeenCalledWith('g1', true);
+      expect(engine.setGroupEphemeral).toHaveBeenCalledWith('g1', 0);
+    });
+
+    it('lets EngineNotSupportedError propagate (→ 501)', async () => {
+      const engine = {
+        setGroupEphemeral: jest.fn().mockRejectedValue(new EngineNotSupportedError('setGroupEphemeral')),
+      };
+      const svc = makeService(engine);
+      await expect(svc.updateGroupSettings('s1', 'g1', { ephemeralSeconds: 3600 })).rejects.toBeInstanceOf(
+        EngineNotSupportedError,
+      );
+    });
+
+    it('applies ephemeralSeconds FIRST so a 501 cannot leave announce/locked half-applied (wwjs case)', async () => {
+      // wwjs always 501s setGroupEphemeral: a {announce, ephemeralSeconds} patch must fail BEFORE
+      // touching announce/locked, not after a silent partial application.
+      const engine = {
+        setGroupMessagesAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupInfoAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupEphemeral: jest.fn().mockRejectedValue(new EngineNotSupportedError('setGroupEphemeral')),
+      };
+      const svc = makeService(engine);
+      await expect(
+        svc.updateGroupSettings('s1', 'g1', { announce: true, locked: true, ephemeralSeconds: 86400 }),
+      ).rejects.toBeInstanceOf(EngineNotSupportedError);
+      expect(engine.setGroupMessagesAdminsOnly).not.toHaveBeenCalled();
+      expect(engine.setGroupInfoAdminsOnly).not.toHaveBeenCalled();
+    });
+
+    it('keeps memberAddMode BEHIND ephemeralSeconds, so the deterministic 501 still fails first', async () => {
+      // memberAddMode is supported on both engines and therefore has no deterministic refusal.
+      // Ordering it ahead of ephemeralSeconds would reintroduce exactly the half-applied patch the
+      // rule above exists to prevent: the mode would land, then the ephemeral call would 501.
+      const engine = {
+        setGroupMemberAddMode: jest.fn().mockResolvedValue(undefined),
+        setGroupMessagesAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupInfoAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupEphemeral: jest.fn().mockRejectedValue(new EngineNotSupportedError('setGroupEphemeral')),
+      };
+      const svc = makeService(engine);
+      await expect(
+        svc.updateGroupSettings('s1', 'g1', { memberAddMode: 'admins', ephemeralSeconds: 86400 }),
+      ).rejects.toBeInstanceOf(EngineNotSupportedError);
+      expect(engine.setGroupMemberAddMode).not.toHaveBeenCalled();
+    });
+
+    it('applies memberAddMode when it is the only field in the patch', async () => {
+      const engine = { setGroupMemberAddMode: jest.fn().mockResolvedValue(undefined) };
+      const svc = makeService(engine);
+      await svc.updateGroupSettings('s1', 'g1', { memberAddMode: 'all' });
+      expect(engine.setGroupMemberAddMode).toHaveBeenCalledWith('g1', 'all');
+    });
+
+    it('names the failed field AND the applied ones when a patch partially applies', async () => {
+      // ephemeralSeconds applied, then announce failed: the client must learn the group is now in a
+      // mixed state (and which subset took effect), not receive a bare engine error.
+      const engine = {
+        setGroupEphemeral: jest.fn().mockResolvedValue(undefined),
+        setGroupMessagesAdminsOnly: jest.fn().mockRejectedValue(new EngineRefusedError('not a group admin')),
+        setGroupInfoAdminsOnly: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService(engine);
+      const error = await svc
+        .updateGroupSettings('s1', 'g1', { announce: true, locked: true, ephemeralSeconds: 86400 })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(HttpException);
+      expect((error as HttpException).getStatus()).toBe(403); // the underlying refusal's status survives
+      expect((error as HttpException).message).toContain("'announce' failed");
+      expect((error as HttpException).message).toContain('ephemeralSeconds');
+      // The patch stops at the failure: locked is never attempted.
+      expect(engine.setGroupInfoAdminsOnly).not.toHaveBeenCalled();
+    });
+
+    // The SDKs tell a caller that a throttle 503 applied nothing except on this route, where it can
+    // follow a field that was applied and the message lists that field.
+    it('answers a throttle on a later field with 503 and the fields already applied', async () => {
+      const engine = {
+        setGroupEphemeral: jest.fn().mockResolvedValue(undefined),
+        setGroupMessagesAdminsOnly: jest
+          .fn()
+          .mockRejectedValue(new EngineThrottledError('Updating the group was rate-limited by WhatsApp (code 429)')),
+      };
+      const error = await makeService(engine)
+        .updateGroupSettings('s1', 'g1', { announce: true, ephemeralSeconds: 86400 })
+        .catch((e: unknown) => e);
+      expect((error as HttpException).getStatus()).toBe(503);
+      expect((error as HttpException).message).toContain('(code 429)');
+      expect((error as HttpException).message).toContain('already applied: ephemeralSeconds');
+    });
+
+    it('propagates a first-field failure unchanged (nothing applied → no partial state to report)', async () => {
+      const engine = {
+        setGroupEphemeral: jest.fn().mockRejectedValue(new EngineRefusedError('not a group admin')),
+        setGroupMessagesAdminsOnly: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService(engine);
+      await expect(
+        svc.updateGroupSettings('s1', 'g1', { announce: true, ephemeralSeconds: 86400 }),
+      ).rejects.toBeInstanceOf(EngineRefusedError);
+      expect(engine.setGroupMessagesAdminsOnly).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an Error', new Error('Protocol error (Runtime.callFunctionOn): Target closed at /srv/app/page.js')],
+      ['a non-Error value', 'raw-engine-text'],
+    ])('reports a partial apply after %s as an internal error without its text', async (_label, raw) => {
+      const engine = {
+        setGroupEphemeral: jest.fn().mockResolvedValue(undefined),
+        setGroupMessagesAdminsOnly: jest.fn().mockRejectedValue(raw),
+      };
+      const svc = makeService(engine);
+      const error = await svc
+        .updateGroupSettings('s1', 'g1', { announce: true, ephemeralSeconds: 86400 })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(HttpException);
+      const { message } = error as HttpException;
+      expect((error as HttpException).getStatus()).toBe(500);
+      expect(message).toContain("'announce' failed (internal error)");
+      expect(message).toContain('already applied: ephemeralSeconds');
+      expect(message).not.toMatch(/Protocol error|\/srv\/app|raw-engine-text/);
+    });
+  });
+});
+
+// A preview must never look like membership: it reports a count, never a participant list, and it
+// changes nothing about the account.
+describe('GroupService join-info preview', () => {
+  const makeService = (engine: Partial<IWhatsAppEngine>) => {
+    const engines = new EngineRegistry();
+    engines.set('s1', engine as IWhatsAppEngine);
+    return new GroupService(engines, inertPacing());
+  };
+
+  it('delegates the trimmed code to the engine', async () => {
+    const getGroupJoinInfo = jest.fn().mockResolvedValue({ id: 'g@g.us', name: 'Team' });
+
+    await makeService({ getGroupJoinInfo }).getGroupJoinInfo('s1', '  ABC123  ');
+
+    expect(getGroupJoinInfo).toHaveBeenCalledWith('ABC123');
+  });
+
+  // An empty code would otherwise reach the engine and come back as a confusing not-found rather
+  // than the client error it plainly is.
+  it.each(['', '   ', undefined])('rejects a missing code (%p) before reaching the engine', code => {
+    const getGroupJoinInfo = jest.fn();
+
+    expect(() => makeService({ getGroupJoinInfo }).getGroupJoinInfo('s1', code as string)).toThrow(BadRequestException);
+    expect(getGroupJoinInfo).not.toHaveBeenCalled();
+  });
+
+  it('throws 400 when the session is not started', () => {
+    expect(() => new GroupService(new EngineRegistry(), inertPacing()).getGroupJoinInfo('s1', 'ABC')).toThrow(
+      BadRequestException,
+    );
+  });
+});
+
+describe('GroupService membership requests', () => {
+  const makeService = (engine: Partial<IWhatsAppEngine>, pacing: SendPacingService = inertPacing()) => {
+    const engines = new EngineRegistry();
+    engines.set('s1', engine as IWhatsAppEngine);
+    return { svc: new GroupService(engines, pacing), pacing };
+  };
+
+  it('delegates the pending-request list to the engine', async () => {
+    const requests = [{ participantId: '628111@c.us', method: 'invite_link', requestedAt: 1754700000 }];
+    const getGroupMembershipRequests = jest.fn().mockResolvedValue(requests);
+
+    const { svc } = makeService({ getGroupMembershipRequests });
+
+    await expect(svc.getGroupMembershipRequests('s1', 'g1')).resolves.toEqual(requests);
+    expect(getGroupMembershipRequests).toHaveBeenCalledWith('g1');
+  });
+
+  it.each([['approveGroupMembershipRequests' as const], ['rejectGroupMembershipRequests' as const]])(
+    '%s forwards the named participants and the results verbatim',
+    async method => {
+      const results = [{ id: '628111@c.us', success: true, status: 200 }];
+      const engineFn = jest.fn().mockResolvedValue(results);
+
+      const { svc } = makeService({ [method]: engineFn });
+
+      await expect(svc[method]('s1', 'g1', ['628111@c.us'])).resolves.toEqual(results);
+      expect(engineFn).toHaveBeenCalledWith('g1', ['628111@c.us']);
+    },
+  );
+
+  it('passes an omitted participant list through as undefined (approve/reject ALL pending)', async () => {
+    const approveGroupMembershipRequests = jest.fn().mockResolvedValue([]);
+
+    const { svc } = makeService({ approveGroupMembershipRequests });
+
+    await expect(svc.approveGroupMembershipRequests('s1', 'g1')).resolves.toEqual([]);
+    expect(approveGroupMembershipRequests).toHaveBeenCalledWith('g1', undefined);
+  });
+
+  it('does NOT draw on the cold-reachout budget — the requesters asked for the contact', async () => {
+    const approveGroupMembershipRequests = jest.fn().mockResolvedValue([]);
+    const assertReachoutAllowed = jest.fn().mockResolvedValue(undefined);
+
+    const { svc } = makeService({ approveGroupMembershipRequests }, {
+      assertReachoutAllowed,
+    } as unknown as SendPacingService);
+    await svc.approveGroupMembershipRequests('s1', 'g1', ['628111@c.us']);
+
+    expect(assertReachoutAllowed).not.toHaveBeenCalled();
+  });
+
+  it('throws 400 when the session is not started', () => {
+    const svc = new GroupService(new EngineRegistry(), inertPacing());
+    expect(() => svc.getGroupMembershipRequests('s1', 'g1')).toThrow(BadRequestException);
+  });
+});
+
+describe('GroupService participant id validation (#1220)', () => {
+  const GROUP = '120363165619688042@g.us';
+
+  const makeService = (engine: Partial<IWhatsAppEngine>, pacing: SendPacingService = inertPacing()) => {
+    const engines = new EngineRegistry();
+    engines.set('s1', engine as IWhatsAppEngine);
+    return new GroupService(engines, pacing);
+  };
+
+  /**
+   * The three status-only writes are synchronous forwarders, so their guard throws synchronously,
+   * while createGroup/addParticipants are async. Routing both through a promise lets one table
+   * cover all five without asserting the wrong failure mode for half of them.
+   */
+  const call = (svc: GroupService, op: string, participants: string[]) =>
+    Promise.resolve().then(() =>
+      op === 'createGroup'
+        ? svc.createGroup('s1', 'Team', participants)
+        : (svc as unknown as Record<string, (s: string, g: string, p: string[]) => Promise<unknown>>)[op](
+            's1',
+            GROUP,
+            participants,
+          ),
+    );
+
+  it.each([
+    ['removeParticipants'],
+    ['promoteParticipants'],
+    ['demoteParticipants'],
+    ['addParticipants'],
+    ['createGroup'],
+  ])('%s rejects an unaddressable id with 400 before reaching the engine', async op => {
+    const engineOp = jest.fn();
+    const svc = makeService({ [op]: engineOp });
+
+    await expect(call(svc, op, ['NOT A USER'])).rejects.toBeInstanceOf(BadRequestException);
+    expect(engineOp).not.toHaveBeenCalled();
+  });
+
+  it('names every offending entry and leaves the valid ones out of the message', async () => {
+    const svc = makeService({ removeParticipants: jest.fn() });
+
+    const err = await call(svc, 'removeParticipants', ['628123456789@c.us', 'NOT A USER', '12036@g.us']).catch(
+      (e: unknown) => e,
+    );
+
+    expect((err as Error).message).toContain('NOT A USER');
+    expect((err as Error).message).toContain('12036@g.us');
+    expect((err as Error).message).not.toContain('628123456789@c.us');
+  });
+
+  it('accepts a bare number, a c.us id and a lid, forwarding them verbatim', async () => {
+    const removeParticipants = jest.fn().mockResolvedValue([]);
+    const svc = makeService({ removeParticipants });
+
+    await call(svc, 'removeParticipants', ['628123456789', '628999@c.us', '12345678901234567890@lid']);
+
+    expect(removeParticipants).toHaveBeenCalledWith(GROUP, ['628123456789', '628999@c.us', '12345678901234567890@lid']);
+  });
+
+  it.each([['addParticipants'], ['createGroup']])(
+    '%s rejects a malformed participant before it can consume reachout budget',
+    async op => {
+      // Both paced writes, not just one: a batch that can never reach WhatsApp must not draw on the
+      // cold-reachout budget on its way to a 400.
+      const assertReachoutAllowed = jest.fn().mockResolvedValue(undefined);
+      const svc = makeService({ [op]: jest.fn() }, { assertReachoutAllowed } as unknown as SendPacingService);
+
+      await expect(call(svc, op, ['NOT A USER'])).rejects.toBeInstanceOf(BadRequestException);
+      expect(assertReachoutAllowed).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['NOT A USER'],
+    // A recognised domain alone satisfied the first version of the guard, and the id still reached
+    // the page-side createWid — reproduced as a 500 against a live session.
+    ['NOT A USER@c.us'],
+    ['@c.us'],
+    ['0@c.us'],
+  ])('rejects %s on removeParticipants rather than handing it to the engine', async id => {
+    const engineOp = jest.fn();
+    const svc = makeService({ removeParticipants: engineOp });
+
+    await expect(call(svc, 'removeParticipants', [id])).rejects.toBeInstanceOf(BadRequestException);
+    expect(engineOp).not.toHaveBeenCalled();
+  });
+
+  it.each([['approveGroupMembershipRequests'], ['rejectGroupMembershipRequests']])(
+    '%s validates named requesters too',
+    async op => {
+      // These take the same participant ids as the five writes above and were missed in the first
+      // sweep. whatsapp-web.js feeds them straight to `requesterIds.map(createWid)` (Utils.js), so
+      // free text throws there exactly as it did on the participant routes.
+      const engineOp = jest.fn();
+      const svc = makeService({ [op]: engineOp });
+
+      // Non-async forwarders, so the guard throws synchronously — route it through a promise, as
+      // the participant writes above do.
+      await expect(
+        Promise.resolve().then(() =>
+          (svc as unknown as Record<string, (s: string, g: string, p?: string[]) => Promise<unknown>>)[op](
+            's1',
+            GROUP,
+            ['NOT A USER'],
+          ),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(engineOp).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([['approveGroupMembershipRequests'], ['rejectGroupMembershipRequests']])(
+    '%s still accepts an omitted list, which means every pending request',
+    async op => {
+      const engineOp = jest.fn().mockResolvedValue([]);
+      const svc = makeService({ [op]: engineOp });
+
+      await (svc as unknown as Record<string, (s: string, g: string, p?: string[]) => Promise<unknown>>)[op](
+        's1',
+        GROUP,
+        undefined,
+      );
+      expect(engineOp).toHaveBeenCalledWith(GROUP, undefined);
+    },
+  );
+});

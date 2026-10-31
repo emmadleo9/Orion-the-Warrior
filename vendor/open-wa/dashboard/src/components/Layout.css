@@ -1,0 +1,506 @@
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ==================== Sidebar ==================== */
+.sidebar {
+  width: 260px;
+  background: var(--bg-white);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  height: 100vh;
+  /* The dynamic viewport excludes a phone browser's collapsing toolbar; the line above is the fallback. */
+  height: 100dvh;
+  z-index: 100;
+  transition:
+    width 0.3s ease,
+    transform 0.3s ease;
+}
+
+.sidebar.collapsed {
+  width: 72px;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1.5rem;
+  min-height: 72px;
+}
+
+.sidebar.collapsed .sidebar-header {
+  /* On the collapsed rail the header stacks: the logo, and the expand control under it. */
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.sidebar-logo {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.mobile-brand .sidebar-logo {
+  width: 24px;
+  height: 24px;
+}
+
+.sidebar-brand {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  white-space: nowrap;
+  /* The clip reaches 4px past the text, where the update link's focus ring (2px, offset 2px) is drawn; the margin
+     takes the padding back, so nothing moves. */
+  padding: 4px;
+  margin: -4px;
+}
+
+.brand-name {
+  font-size: 1.125rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.brand-version {
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+/* Beside the collapse button the brand has about 123px: a longer notice (the Telugu one is about 138px) ends in an
+   ellipsis instead of being cut silently, and its title and accessible name keep the whole text. */
+.brand-update {
+  align-self: flex-start;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: var(--radius);
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: var(--primary-text);
+  background: var(--primary-soft);
+  text-decoration: none;
+}
+
+.brand-update:hover {
+  text-decoration: underline;
+}
+
+/* Collapse Toggle Button - Circular design at edge */
+/* Collapse control: a ghost button at the end of the header row. */
+.collapse-toggle {
+  margin-inline-start: auto;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    color 0.2s;
+}
+
+.collapse-toggle:hover {
+  background: var(--bg-light);
+  color: var(--text-primary);
+}
+
+.collapse-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.sidebar.collapsed .collapse-toggle {
+  margin-inline-start: 0;
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 1rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow-y: auto;
+}
+
+.sidebar.collapsed .sidebar-nav {
+  padding: 1rem 0.5rem;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 1rem;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: 0.7rem;
+}
+
+.nav-item:hover {
+  background: var(--bg-light);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.nav-item.active {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.nav-item.active svg {
+  color: var(--primary-text);
+}
+
+.sidebar-footer {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar.collapsed .sidebar-footer {
+  padding: 0.75rem 0.5rem;
+}
+
+.theme-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.appearance-button-cue {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  /* Plain icon, no brand orb — the green swatch belonged to the removed palette picker. */
+  color: inherit;
+}
+
+.sidebar.collapsed .theme-toggle-btn,
+.sidebar.collapsed .logout-btn {
+  justify-content: center;
+  padding: 0.6rem;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--bg-light);
+  color: var(--text-primary);
+}
+
+.language-menu,
+.appearance-menu {
+  position: relative;
+}
+
+.language-menu .theme-toggle-btn,
+.appearance-menu .theme-toggle-btn {
+  width: 100%;
+}
+
+.language-menu-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 160px;
+  padding: 0.3rem;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
+  z-index: 120;
+  /* The menu grows upward from the footer, so it may be as tall as the window less the footer (up to 186px in
+     Arabic) and a margin. */
+  max-height: calc(100vh - 13rem);
+  max-height: calc(100dvh - 13rem);
+  overflow-y: auto;
+}
+
+.language-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  padding: 0.45rem 0.6rem;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.language-menu-item:hover {
+  background: var(--bg-light);
+  color: var(--text-primary);
+}
+
+.language-menu-item.active {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.sidebar.collapsed .language-menu-list {
+  right: auto;
+  left: calc(100% + 0.5rem);
+  bottom: 0;
+  max-height: calc(100vh - 9rem);
+  max-height: calc(100dvh - 9rem);
+}
+
+.logout-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.logout-btn:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: var(--error-text);
+}
+
+/* ==================== Main Content ==================== */
+.main-content {
+  flex: 1;
+  margin-left: 260px;
+  width: calc(100% - 260px);
+  background: var(--bg-light);
+  min-height: 100vh;
+  /* clip, not hidden: hidden makes this the scroll container that a sticky child (the Plugins status rail)
+     sticks to, and it never scrolls. */
+  overflow-x: clip;
+  transition:
+    margin-left 0.3s ease,
+    width 0.3s ease;
+}
+
+.main-content.expanded {
+  margin-left: 72px;
+  width: calc(100% - 72px);
+}
+
+/* ==================== Mobile Styles ==================== */
+.mobile-header {
+  display: none;
+}
+
+.sidebar-overlay {
+  display: none;
+}
+
+/* Layout.tsx switches to the phone layout on this same query (MOBILE_QUERY), so the drawer markup and these styles
+   agree at every width, a fractional one included. */
+@media (max-width: 767px) {
+  .mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    padding: 0 1rem;
+    background: var(--bg-white);
+    border-bottom: 1px solid var(--border);
+    /* Above the overlay (95) so the menu button, the close control while the drawer is open, is not dimmed. */
+    z-index: 96;
+  }
+
+  .mobile-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: transparent !important;
+    border: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    border-radius: var(--radius);
+    transition: background 0.2s;
+    padding: 0;
+  }
+
+  .mobile-menu-btn svg {
+    color: var(--text-primary);
+    stroke: var(--text-primary);
+  }
+
+  .mobile-menu-btn:hover {
+    background: var(--bg-light) !important;
+  }
+
+  .mobile-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .mobile-brand .brand-name {
+    font-size: 1rem;
+  }
+
+  /* The drawer starts under the header (56px, as the header and the page scroller's padding) so it never covers the
+     menu button. */
+  .sidebar.mobile {
+    transform: translateX(-100%);
+    width: 280px;
+    top: 56px;
+    height: calc(100vh - 56px);
+    height: calc(100dvh - 56px);
+  }
+
+  /* The menu grows upward from the footer, so it gives up the header strip the drawer no longer spans. */
+  .sidebar.mobile .language-menu-list {
+    max-height: calc(100vh - 13rem - 56px);
+    max-height: calc(100dvh - 13rem - 56px);
+  }
+
+  /* The shadow belongs to the open drawer: on the closed one it would reach past the screen edge. */
+  .sidebar.mobile.open {
+    transform: translateX(0);
+    box-shadow: 2px 0 20px rgba(0, 0, 0, 0.1);
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 95;
+    animation: fadeIn 0.2s ease;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .main-content.mobile {
+    margin-left: 0;
+    width: 100%;
+    padding-top: 56px;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .collapse-toggle {
+    display: none;
+  }
+}
+
+/* ==================== RTL support ==================== */
+[dir='rtl'] .sidebar {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+[dir='rtl'] .language-menu-item {
+  text-align: right;
+}
+
+[dir='rtl'] .sidebar.collapsed .language-menu-list {
+  right: calc(100% + 0.5rem);
+  left: auto;
+}
+
+[dir='rtl'] .main-content {
+  margin-left: 0;
+  margin-right: 260px;
+  transition:
+    margin-right 0.3s ease,
+    width 0.3s ease;
+}
+
+[dir='rtl'] .main-content.expanded {
+  margin-right: 72px;
+}
+
+@media (max-width: 767px) {
+  [dir='rtl'] .main-content,
+  [dir='rtl'] .main-content.mobile {
+    margin-right: 0;
+  }
+
+  [dir='rtl'] .sidebar.mobile {
+    transform: translateX(100%);
+  }
+
+  [dir='rtl'] .sidebar.mobile.open {
+    transform: translateX(0);
+    box-shadow: -2px 0 20px rgba(0, 0, 0, 0.1);
+  }
+}

@@ -1,0 +1,251 @@
+.login-container {
+  min-height: 100vh;
+  /* The dynamic viewport excludes a phone browser's collapsing toolbar; the line above is the fallback. */
+  min-height: 100dvh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-light);
+  padding: 2rem;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow-y: auto;
+}
+
+/* The card and the footer centre as one group with auto margins, not justify-content: when the window is
+   shorter than the group the margins give way and the container scrolls from its top edge. */
+.login-container .login-card {
+  background: var(--bg-white);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  padding: 3rem;
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+  margin-top: auto;
+}
+
+.login-container .login-logo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.login-container .logo-icon {
+  width: 127px;
+  height: 127px;
+  object-fit: contain;
+}
+
+.login-container .version-info {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.login-container .login-language {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  margin-bottom: 1.5rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  background: var(--bg-white);
+}
+
+.login-container .login-language svg {
+  flex-shrink: 0;
+}
+
+.login-container .login-language .custom-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.login-container .login-language:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.1);
+}
+
+.login-container .login-form {
+  text-align: start;
+}
+
+.login-container .input-group {
+  margin-bottom: 1.5rem;
+}
+
+.login-container .input-group label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.login-container .input-wrapper {
+  position: relative;
+}
+
+.login-container .input-wrapper input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  padding-inline-end: 3rem;
+  font-size: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-white);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+
+.login-container .input-wrapper input:focus {
+  outline: none;
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.1);
+}
+
+.login-container .input-wrapper input.error {
+  border-color: var(--error);
+}
+
+/* The red border keeps showing the error while the field is focused, so the focus cue is a ring beside it. */
+.login-container .input-wrapper input.error:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.login-container .toggle-visibility {
+  position: absolute;
+  inset-inline-end: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.25rem;
+}
+
+.login-container .toggle-visibility:hover {
+  color: var(--text-secondary);
+}
+
+.login-container .error-message {
+  display: block;
+  color: var(--error-text);
+  font-size: 0.875rem;
+  margin-top: 0.5rem;
+}
+
+.login-container .connect-btn {
+  width: 100%;
+  padding: 0.875rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+  background: var(--primary);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.login-container .connect-btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.login-container .connect-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.login-container .login-help {
+  margin-top: 1.5rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.login-container .login-help a {
+  color: var(--primary-text);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.login-container .login-help a:hover {
+  text-decoration: underline;
+}
+
+.login-container .login-footer {
+  margin-top: 2rem;
+  margin-bottom: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.login-container .login-footer .github-link {
+  color: var(--text-muted);
+  transition: color 0.2s;
+}
+
+.login-container .login-footer .github-link:hover {
+  color: var(--primary-text);
+}
+
+.login-container .login-footer a {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-decoration: none;
+}
+
+.login-container .login-footer a:hover {
+  color: var(--text-secondary);
+}
+
+/* Mobile Responsive */
+@media (max-width: 480px) {
+  .login-container {
+    padding: 1rem;
+  }
+
+  .login-container .login-card {
+    padding: 2rem 1.5rem;
+    border-radius: 10px;
+  }
+
+  .login-container .logo-icon {
+    width: 80px;
+    height: 80px;
+  }
+
+  .login-container .input-wrapper input {
+    padding: 0.625rem 0.875rem;
+    padding-inline-end: 2.5rem;
+    font-size: 0.9375rem;
+  }
+
+  .login-container .connect-btn {
+    padding: 0.75rem 1.25rem;
+    font-size: 0.9375rem;
+  }
+
+  .login-container .login-help {
+    font-size: 0.8125rem;
+  }
+}

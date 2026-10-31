@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=77.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rmyndharis-openwa"
+version = "0.8.0"
+description = "Official Python SDK for OpenWA, the open-source WhatsApp API Gateway (not affiliated with WhatsApp or Meta)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [
+    { name = "OpenWA Contributors" }
+]
+keywords = ["whatsapp", "api", "sdk", "openwa", "gateway"]
+
+dependencies = [
+    "httpx>=0.27.1,<1.0",
+    "typing_extensions>=4.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/rmyndharis/OpenWA"
+Repository = "https://github.com/rmyndharis/OpenWA"
+
+[tool.setuptools.packages.find]
+include = ["openwa*"]
+
+# Ship type information (PEP 561) so consumers get the bundled type hints.
+[tool.setuptools.package-data]
+openwa = ["py.typed"]
+"openwa.resources" = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# This package ships py.typed (see package-data above), so its annotations are a published
+# contract — a consumer's own type checker reads them. pytest cannot see a mistake in one:
+# TypedDict keys are not enforced at runtime, so a request type missing a field still passes every
+# test in this suite while a typed caller is told the field does not exist.
+#
+# BOTH settings below were arrived at by mutation, not by taste. Deleting a key from a TypedDict
+# and confirming the gate goes red is the only way to know it watches anything — and the first two
+# configurations that looked correct were green with the key gone:
+#
+#   files = ["openwa"] only     → exit 0. The resources forward request bodies untouched, so a
+#                                 missing key is invisible from inside the package. The typed
+#                                 CALLERS live in tests/, so that is where the failure surfaces.
+#   check_untyped_defs unset    → exit 0. The test methods carry no annotations, and mypy skips
+#                                 the body of any unannotated function, so every typed call in
+#                                 the suite went unread.
+#
+# A third blind spot lived outside this file: `make_client()` in tests/conftest.py had no return
+# annotation, so it yielded Any and every `make_client(...).messages.send_*(...)` was unchecked.
+# Do not remove that annotation.
+[tool.mypy]
+files = ["openwa", "tests"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+# No python_version pin on purpose: the CI matrix runs this job on 3.9 and 3.12, so mypy checks
+# against whichever interpreter it is installed under and both floors get covered. Pinning one
+# here would check that version twice and mask the other.

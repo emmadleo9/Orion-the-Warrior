@@ -1,0 +1,18 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "testEnvironment": "node",
+  "testRegex": ".e2e-spec.ts$",
+  "setupFiles": ["<rootDir>/setup-e2e.ts"],
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "transformIgnorePatterns": [
+    "node_modules/(?!(https-proxy-agent|socks-proxy-agent|agent-base|proxy-agent-negotiate)/)"
+  ],
+  "moduleNameMapper": {
+    "^puppeteer$": "<rootDir>/__mocks__/puppeteer.ts"
+  },
+  "maxWorkers": 1,
+  "globalTeardown": "<rootDir>/teardown-e2e.ts"
+}

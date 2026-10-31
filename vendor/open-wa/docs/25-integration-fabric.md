@@ -1,0 +1,446 @@
+# 25 - Integration Fabric
+
+> **Status:** Shipped. The core substrate, operator provisioning (an ADMIN instance API and a dashboard
+> **Instances** tab), and the official ingress adapters are all in place; the public SDK reference is
+> still to come (P4). This document describes the architecture and the design rationale — _why_ it is
+> built this way — not a how-to or an API reference (see
+> [15 - Project Roadmap](./15-project-roadmap.md) for the phase table).
+
+## 25.1 What it is
+
+The **Integration Fabric** is a core substrate that lets sandboxed marketplace plugins implement
+bidirectional integrations with external systems — helpdesk agent inboxes, chatbot flow builders, CRMs —
+**without running their own server**. A third party ships an adapter as a normal marketplace plugin,
+declares its needs in the manifest, and never binds a port, never touches Redis or the queue, and never
+re-implements signature verification, deduplication, ordering, or delivery.
+
+It is the inbound counterpart to the existing plugin capability surface. Today a sandboxed plugin is
+outbound-only: it can send messages, read engine state, use per-plugin storage, and make SSRF-guarded
+HTTP calls (`ctx.net.fetch`). What it **cannot** do is receive an inbound external HTTP request — and a
+real bidirectional integration needs exactly that: an agent replies in an external inbox, the external
+system fires a webhook, and something must receive it and relay the reply to WhatsApp.
+
+The core owns ingress, verification, dedup, ordering, delivery, the dead-letter queue, secret storage,
+and the identity-mapping table. The adapter owns only provider-specific logic (API calls, HMAC recompute
+for exotic schemes, handover heuristics). Plugins consume the substrate through a **stable, versioned
+public contract — Integration SDK v1** — because the contract, not any single adapter, is the product.
+
+## 25.2 Design principle: one new primitive, everything else a clone
+
+The overriding goal is to preserve the sandboxed-worker safety invariants _by construction_. OpenWA
+plugins reach the host through a capability-gated worker bridge; the worker is fault containment, not a
+security boundary against a malicious plugin (see [30 - Plugin Sandboxing](./30-plugin-sandboxing.md)).
+Every host↔worker message is a serializable POJO across a `structuredClone` boundary; host-initiated
+calls are bounded by a timeout and drain on a worker crash (a hook fails open; an ingress dispatch fails
+the delivery); permissions are manifest-static and cannot be widened by configuration; session scope is
+enforced host-side.
+
+Rather than invent new machinery that would have to re-earn those properties, the Integration Fabric is
+**~90% a faithful clone of seams OpenWA already ships**:
+
+| Concern                                                   | Cloned from                         |
+| --------------------------------------------------------- | ----------------------------------- |
+| Host→worker dispatch with a bounded timeout + crash-drain | the existing hook bridge            |
+| Worker→host capability calls                              | the existing capability router      |
+| Durable delivery with retry + dead-letter                 | the outbound webhook queue and DLQ  |
+| Identity mapping table (no foreign key, last-write-wins)  | the LID↔phone mapping table         |
+| Inbound deduplication (insert-or-skip on a unique key)    | the inbound-message dedup oracle    |
+| SSRF-guarded egress                                       | `ctx.net.fetch` (reused verbatim)   |
+| Secret masking on read                                    | the plugin config redaction utility |
+
+Exactly **one** genuinely new primitive exists: a host→worker RPC that returns an **HTTP status + body**
+from a sandboxed worker — inbound webhook ingress. It is modelled line-for-line on the hook bridge so its
+correctness properties (its own pending map, a bounded timeout, and a drain in the worker-exit handler)
+come for free. A timeout resolves `504` and a mid-dispatch crash resolves `502`; the ingress job treats
+either as a failed delivery and retries or dead-letters it.
+
+The status a handler returns is not read on this path. Only a handler that throws, a timeout or a worker
+crash fails a delivery, so a handler that wants a retry has to throw; returning `{ status: 500 }` completes
+the job.
+
+## 25.3 Architecture
+
+```mermaid
+flowchart LR
+    WA[WhatsApp engine] -- message.received hook --> Core
+    Provider[External provider] -- POST /api/ingress/:plugin/:instance/:route --> Core
+
+    subgraph Core["OpenWA host (core)"]
+        Ingress[Ingress controller<br/>verify → dedup → persist → enqueue]
+        Queue[(ingress-queue<br/>BullMQ / Redis)]
+        Processor[Ingress processor]
+        RPC[Webhook RPC → worker]
+        Cap[conversation.send capability]
+        Tables[(mappings · dedup · instances · DLQ)]
+        Ingress --> Queue --> Processor --> RPC
+    end
+
+    subgraph Plugin["Sandboxed adapter plugin"]
+        Handler[ctx.registerWebhook handler]
+        Send[ctx.conversations.send]
+    end
+
+    RPC --> Handler
+    Handler --> Send --> Cap --> WA
+    Ingress -. reuses .-> Tables
+```
+
+The topology is intentionally two-tier (an n8n-style queue mode): an **ingress tier** (the public
+controller: authenticate → normalize → persist → enqueue → fast `202`) decoupled by a durable queue from
+a **dispatch tier** (the processor that runs the plugin). A provider spike, a slow adapter, or a wedged
+plugin never loses events; the tiers scale independently with backpressure.
+
+Alongside this async pipeline, a route may additionally declare a `response` contract — host-side
+`preflight` checks and a declarative `ack` — that shapes the synchronous HTTP response the provider sees
+**without** altering the dispatch model: `response` only controls what the provider receives back on the
+request socket. Where the plugin runs is decided by the queue: with it on, the delivery is enqueued and the
+worker runs it with retries and a dead letter; with it off, it runs inline. See §25.4 and §25.8.
+
+## 25.4 Core components
+
+- **Ingress RPC** — the one new primitive. Delivers a verified inbound request into the worker and returns
+  its HTTP result. The worker claims routes with `ctx.registerWebhook(route, handler)`.
+- **Ingress controller** — a `@Public` endpoint accepting any HTTP method on
+  `/api/ingress/:pluginId/:instanceId/:route` (a `GET` on a route that declares `challenge` is answered
+  host-side as the verification handshake; every other request is a delivery). It is public to the
+  API-key guard because an external provider cannot present the gateway's API key, so it self-validates
+  (see §25.6). With the queue on it never runs the plugin inline: providers enforce short acknowledgement
+  deadlines, so the controller fast-acks and defers the work to the queue, and dispatches inline only while
+  Redis is unreachable. With the queue off (the default) a route without a `response` contract runs the
+  plugin inline before its `202`, for at most `INGRESS_DISPATCH_TIMEOUT_MS` (5 s), and a route with one is
+  acked first and then dispatched inline, without the queue's retries. An inline dispatch that fails files a
+  dead letter and leaves the row for the reconciler, and a delivery on a route without a `response` contract
+  for a plugin still being restored is acked at once and dispatched by the reconciler once the plugin is up
+  (§25.7). A route may additionally
+  declare a host-side `response` contract that shapes that synchronous reply without making the plugin
+  inline. Its `preflight` checks (today: `session-alive`) run **after** signature verification and
+  **before** the dedup persist — returning `503` only for a definitively-dead concrete-scoped WhatsApp
+  session (no live engine or `FAILED`), with a `Retry-After` so a provider that retries a 503 only when
+  that header is present comes back; recoverable statuses and `READY` pass through to a normal
+  `202`+enqueue so the worker can still fail fast and the dedup row still holds the delivery. The same
+  `503` with `Retry-After`, again before the dedup persist, answers a route declaring `response` while its
+  plugin is still being restored after startup: no worker can take the delivery yet and the provider wants
+  its answer now (see §25.7 for a route without `response`). A declared
+  `ack` (`status`/`body`/`headers`) replaces the default `202 accepted`. For a route declaring `response`,
+  the ack is returned without awaiting enqueue so a queue-disabled deployment cannot block the provider's
+  deadline; the dedup row already persisted is the durability handle. A route with no `response` is
+  byte-identical to today's default fast-ack, while its plugin restores included.
+- **Plugin instance** — a first-class `instanceId` namespaced under a `pluginId`. One adapter can back
+  many instances (for example, one external account per WhatsApp number). Each instance owns a host-minted
+  ingress secret, a resolved session scope, and a config slice. It is a serializable field threaded
+  through payloads and rows — **not** a separate worker; there is still one worker per plugin.
+  _Known residue:_ per-instance isolation covers the **ingress dispatch** path (concrete-scoped
+  instances resolve their own config slice). A `wildcard`/`null`-scoped sibling is still projected
+  into the plugin's **base** config with last-write-wins merging, so a sparse wildcard instance
+  inherits keys a sibling projected, and hook dispatch resolves config without per-instance
+  scoping. Run one enabled wildcard instance per plugin, or scope instances concretely, until the
+  projection is re-keyed per instance. The base configuration is also the layer under every instance
+  and per-session override. An instance or override that points a `net.allowConfigHosts` key at another
+  origin than the layer beneath does not inherit that layer's `secret` fields and must bring its own; one
+  that keeps the same origin, or sets no host key, inherits them. A host key that holds no text counts as
+  another origin, and a write that moves a host key to another origin than the stored layer is bound to (its own
+  host key, or the host of the layer beneath it when it names none) gets no stored secret back for the mask, so
+  the secret has to be sent with it. An instance row loses its own secrets while a per-session override
+  has moved a host key the row leaves unset away from the base config, and a config `PATCH` of an instance
+  whose plugin is not loaded answers `409`. A plugin that reaches its destination
+  through a key outside `net.allowConfigHosts` (for example under `net.allow: ['*']`) is not covered, so
+  keep such a secret on the instance that uses it. Capability calls are not confined to the dispatching instance's
+  scope either: separating tenants across instances of one plugin relies on the handler using the
+  delivery's `sessionId`.
+- **`conversation.send` capability** — a normalized outbound send authored by the plugin and translated
+  host-side to the message service, so persistence and the message hook chain are preserved. It is gated
+  by a `conversation:send` permission, the manifest's session scope and, for a session-scoped plugin, its
+  activated sessions.
+- **Identity, dedup, and DLQ tables** — see §25.5.
+- **Ingress queue** — a durable BullMQ queue that is a _sibling_ of the outbound webhook queue (its own
+  worker, not the reordering webhook worker), with exponential-backoff retries and a dead-letter row on
+  the final attempt. When that row cannot be written (a data-database outage), the delivery is re-queued
+  under a new job id and runs again after 60s with the same retries; a re-queued copy that fails again
+  adds no second row while one is open.
+
+## 25.5 Data model
+
+Four tables live on the data connection, each created by a hand-authored dual-dialect migration
+(SQLite and PostgreSQL):
+
+- **`plugin_instances`** — one configured instance of an adapter: its host-minted secret (masked on read),
+  resolved session scope, and config.
+- **`conversation_mappings`** — the WhatsApp-chat ↔ external-conversation identity map, indexed in both
+  directions, plus a `handoverState` column (`bot | human | closed`) the core reads before dispatching so
+  a human-handled conversation deterministically stops the bot. `sessionId` is non-foreign-key provenance
+  because a mapping outlives a session.
+- **`ingress_events`** — the persist-before-acknowledge row and the inbound deduplication oracle
+  (`UNIQUE(pluginId, instanceId, providerDeliveryId)`, insert-or-skip). It also carries the dispatch-lifecycle
+  markers the reconciler sweeps on: `dispatchState` (`pending | dispatched | failed`, `NULL` on rows
+  that predate the columns on a synchronize-bootstrapped DB — "not watched"), `dispatchAttempts`, and
+  `lastDispatchAt`. New rows are `pending`; a recorded enqueue outcome flips them to `dispatched`;
+  `failed` is terminal (recovery continues via the DLQ row + redrive), except that a re-queued copy
+  (see §25.4) that delivers moves the event to `dispatched` and retires the delivery's open DLQ row.
+  The row carries the **full request payload only while it is the sole durability handle** — from the
+  persist until the dispatch outcome is recorded. Once the dispatch tier owns the delivery (the BullMQ
+  job data, or the DLQ row on failure), the payload is retired to `NULL` and the row slims to its
+  dedup marker plus `payloadHash` (a sha256 of the raw body kept for operator correlation). This keeps
+  steady-state growth at a few hundred bytes per delivery instead of up to 2× `maxBodyBytes`; dedup
+  rows are pruned on their own short window (`INGRESS_DEDUP_RETENTION_DAYS`, default 7 — a dedup
+  oracle is not an audit log, and `<= 0` falls back to the default rather than disabling the prune
+  into unbounded growth).
+- **`integration_delivery_failures`** — a dead-letter record of last resort for inbound (ingress)
+  deliveries, with a redrive path (added in P1). Only the ingress path writes it, and only as
+  `inbound`; a failed outbound call to the provider is not dead-lettered. A data import restores each
+  row's `direction` as stored, and redrive replays only `inbound` rows.
+
+## 25.6 Security model
+
+- **Authentication inversion.** A provider webhook cannot carry an OpenWA API key, so ingress is public to
+  the API-key guard but validates a **per-instance HMAC (or shared secret)** over the **raw** request
+  bytes with a constant-time comparison. The raw body is preserved by a verify callback on the body parser
+  because a re-serialized payload is not byte-identical to what the provider signed. The route is exempt from
+  the global per-IP throttle and bounded on two keys instead: the client IP, checked by its own guard before
+  anything else, and `(pluginId, instanceId)`, charged only once the delivery's signature verifies. A
+  provider delivering every tenant's webhooks from one egress address would otherwise be shed at the global
+  tier before the per-instance bound ever fired. The payload is intentionally not bound to a DTO so strict
+  validation cannot reject unknown provider fields.
+- **Replay and duplication.** A signed-timestamp tolerance rejects stale deliveries, and
+  `(pluginId, instanceId, providerDeliveryId)` deduplication plus a queue job id keyed on the delivery id
+  provides best-effort de-duplication when the provider supplies a stable delivery id. Standard Webhooks defaults
+  to its signed `webhook-id`; other handlers must remain idempotent because arbitrary provider headers
+  are not authenticated by every scheme. A route whose provider mints a fresh delivery id on every retry
+  attempt can declare `dedupOn: "body"` to key retries on the raw body instead: byte-identical bodies
+  then collapse within `INGRESS_DEDUP_RETENTION_DAYS`, the persisted delivery id and the `{id}` ack
+  token become that content hash, and a provider whose retries legitimately differ in the signed body
+  should keep the default, since `body` would dedup nothing for it. The same content hash is the delivery id
+  whenever no usable dedup header arrives; for an empty body it also covers the method and the query string, so
+  query-borne deliveries (a GET callback, a bodiless POST) stay apart, while deliveries with neither a body nor a
+  query share one id per route and collapse within the window. Freshness is enforced whenever a route declares
+  `signature.timestampHeader`: the declared `toleranceSec` wins, and otherwise the host default
+  (`INGRESS_TIMESTAMP_TOLERANCE_SEC`, default 300) applies — a declared timestamp is never accepted
+  without a freshness check. Freshness alone is not replay protection, though: an **unsigned**
+  timestamp can simply be re-minted by whoever replays a captured (body, signature) pair with a new
+  delivery id. hmac-sha256 routes should therefore bind the timestamp into the signed bytes by
+  including `{timestamp}` in the `contentTemplate` (e.g. `{timestamp}.{rawBody}`, the Chatwoot shape)
+  so the signature itself expires with the window; the loader warns when a route declares the header
+  without signing it (or signs the token without declaring the header). `standard-webhooks` binds
+  id + timestamp by spec. A provider that sends no timestamp header at all stays outside the replay
+  window by construction. For such an hmac-sha256 route, and for every `shared-secret` route, the default
+  header-keyed dedup does not stop a copy of a delivery: the dedup header is not covered by the
+  credential, so a copy with a different header value is accepted as new. `dedupOn: "body"` collapses
+  byte-identical copies within `INGRESS_DEDUP_RETENTION_DAYS` (a copy gets the route's ack and is not
+  enqueued again); beyond that, handler idempotency is the only protection. The loader logs a warning
+  for each such route that keeps the header-keyed default.
+  The value of a route's declared signature header (hmac-sha256 or shared-secret) is redacted from the
+  persisted and enqueued payload, like the well-known signature headers, so the plugin's handler sees
+  `[redacted]` in its place.
+- **Tenancy scoping.** Every durable ingress artifact — secret, dedup store, and dead-letter row — is
+  partitioned by instance. Downstream capability calls are limited to the sessions the plugin's manifest
+  allows and, for a session-scoped plugin (the default), to the sessions it is activated for (the union of
+  its instances' scopes plus any operator activation); they are not checked against the dispatching
+  instance's scope.
+- **Fail-closed by construction.** No request — including an empty-body request — is accepted by an
+  authenticating scheme without the correct per-instance secret. HMAC and Standard Webhooks bind body
+  integrity; `shared-secret` authenticates only the caller header and does not bind the body.
+  `scheme: "none"` is the only unauthenticated path, and a route declaring it **fails the whole plugin's
+  load** unless the operator has explicitly opted in with `ALLOW_UNSIGNED_INGRESS=true` — manifest
+  validation throws, so none of that plugin's other routes load either and its registry status is set to
+  `ERROR`. When the operator has opted in, the loader still logs its boot warning for every such route.
+- **Raw-body content types.** Signature verification observes exact bytes for `application/json` and
+  `application/x-www-form-urlencoded`. Plain text, XML, octet streams, and non-UTF JSON charsets are not
+  supported ingress body formats and are refused with `415` on every signature scheme, before
+  verification or persistence, rather than being re-serialized.
+- **Egress.** The only sanctioned outbound path remains the SSRF-guarded `ctx.net.fetch`, scoped to the
+  manifest's allowed hosts; a direct Node socket opened by the worker is not covered (see [30 - Plugin
+  Sandboxing](./30-plugin-sandboxing.md)).
+- **Re-entrancy.** A send issued from inside a hook handler is short-circuited for the event that handler
+  is running, so a hook cannot re-fire itself. A reply issued from an ingress handler carries no hook
+  context: it runs every plugin's `message:sending` hooks, the adapter's own included, so an adapter that
+  mirrors outbound messages to its provider must recognise and skip the replies it sent itself, for example
+  by the message id the send returned.
+
+## 25.7 Scale and durability
+
+Persist-before-acknowledge; best-effort de-duplication keyed by a stable provider delivery id and queue
+job id; per-instance fairness via a token bucket; and a dead-letter record with bounded redrive. On the
+queued worker path, an **in-process** per-conversation lock prevents concurrent starts for the same lane;
+strict FIFO is not preserved across retry/redrive, and the lock is single-node state rather than Redis or
+PostgreSQL state. When the queue is disabled, ingress dispatches inline after persisting and does not
+serialize concurrent same-conversation deliveries. A queued delivery falls back to the same inline
+dispatch when Redis is unreachable. Before Redis has ever connected, queue calls wait for it at most
+`REDIS_CONNECT_TIMEOUT_MS` (5s when unset or 0) from the first one, then fall back at once until it
+connects. Providers already deliver over unordered, at-least-once HTTP, so plugin handlers must be
+idempotent and treat ingress as a reconciliation trigger.
+
+A plugin's webhook handler has **5 s** (`INGRESS_DISPATCH_TIMEOUT_MS`) to finish. The host cannot cancel a
+handler that overruns it: the attempt is recorded as failed, the conversation lock is released and the
+delivery is retried (queued) or dead-lettered (inline), while the first run goes on and its work still
+lands. A handler that calls a slow upstream, or sends media, can therefore run twice for one delivery.
+Key every side effect on the delivery id (`req.deliveryId`) and hand work that can outlast the budget to
+a background task instead of awaiting it in the handler. The budget is short because a queue-disabled
+deployment answers the provider only after the inline dispatch, and providers abandon a request within a
+few seconds.
+
+A queued, retried, reconciled or redriven delivery runs with what was decided when it was accepted: the
+verification verdict (a delivery stored before the verdict was recorded reads the route as it stands) and
+the session its instance was bound to. If the instance has been disabled or deleted, or bound to another
+session, by the time the delivery runs, the attempt fails and follows the retry and dead-letter path. A
+redrive covers only the rows written under the instance's current session binding; rows of an earlier
+binding stay in the dead-letter table.
+
+A job waiting on that lock still holds one of the `INGRESS_WORKER_CONCURRENCY` worker slots (default
+10). A burst on one lane larger than that fills every slot with same-lane waiters, and events for other
+conversations and instances queue behind the burst until it drains. Size `INGRESS_WORKER_CONCURRENCY`
+above the largest burst you expect on a single lane, and declare a `conversationId` pointer on the
+route so the lane is one conversation; without it the lane is the whole instance. A `jsonPointer` reads
+the body by RFC 6901 tokens: `~1` stands for a slash and `~0` for a tilde in a key, an empty token names
+an empty key (so a trailing or doubled slash looks for that key), and an array takes only a plain index.
+A pointer that finds no string, number or boolean leaves the delivery on the per-instance lane; one
+written without its leading slash resolves as it always did.
+
+Persist-before-acknowledge alone is not delivery: a crash between the persist and the enqueue, or a
+fire-and-forget enqueue on a `response` route whose outcome is never recorded, would strand the row
+with the provider already acknowledged. The **ingress reconciler** closes that window: every
+`INGRESS_RECONCILE_INTERVAL_MS` (default 60s, `0` disables; a blank value falls back to the
+default, and a negative or unparseable value fails the boot) it re-dispatches a bounded batch
+(`INGRESS_RECONCILE_BATCH_SIZE`, default 50) of `pending` rows whose last activity is older than a
+grace period (`INGRESS_RECONCILE_GRACE_MS`, default 60s), through the same queue-or-inline enqueue the
+live path uses and with the original delivery id as job id, so a replay is idempotent against a job
+the crashed live path may have enqueued. The stored row is sufficient for re-dispatch — while
+`pending` it is the full verified request (headers/query/body/rawBody) plus the route and session
+provenance; the conversation lane is re-derived from the current manifest. After
+`INGRESS_RECONCILE_MAX_ATTEMPTS` (default 5) the row goes `failed` and a dead-letter row is
+guaranteed to exist **before** the row's payload is retired, so recovery continues through the
+bounded redrive path instead of an infinite replay loop; a successful replay likewise retires the
+row's payload with the `dispatched` mark and retires any live-path dead-letter row for the same
+delivery so a later redrive never double-delivers. The replay looks the queue job up first: a job
+still in the queue or completed, or a live or completed re-queued copy of it, takes the `dispatched`
+mark without a second enqueue, and a job that failed with no such copy is not replayed: the row goes
+`failed` with a dead-letter row guaranteed as above, so none is written while a copy can still
+deliver. A `pending` row found without a payload (only possible for imported/corrupt history —
+payloads are retired only with a recorded outcome) is excluded from the sweep and never replayed
+empty; nothing logs it, and it stays `pending` until `INGRESS_DEDUP_RETENTION_DAYS` prunes it.
+
+**Plugin restore window.** The gateway opens its port before a slow plugin restore has finished (see
+[19](./19-plugin-architecture.md), Restore on boot), so a delivery can arrive for a plugin that has no
+worker yet. A route declaring a `response` contract is refused with `503` and `Retry-After: 5` (§25.4),
+and the provider's retry is accepted once the plugin is up. Any other route is accepted and persisted
+as usual. A queued job goes back to the delayed set, without spending a retry attempt, until the plugin
+is up. It is held until the next multiple of `INGRESS_RETRY_DELAY_MS` (a period of at least a second), so every
+held job wakes at the same instants and the jobs of one wake come back in the order they were held. That
+order has two limits. Once the restore ends, the jobs of a wake are handled one after another, so those
+already held again come back a period later than those the worker reaches afterwards: earlier deliveries
+of a conversation can follow later ones for as long as the worker needs to go through the whole held
+backlog (milliseconds for a short one, seconds for thousands), and that backlog is handled ahead of newer
+jobs of other plugins. And BullMQ keeps insertion order for at most 4096 held jobs per millisecond: past
+that, the jobs of a wake come back ordered by their id. With the queue off the delivery is acked and not dispatched: its row stays `pending`, and the
+reconciler dispatches it on the first pass after the restore is over and the row is older than
+`INGRESS_RECONCILE_GRACE_MS`. With the defaults that is within a minute after the plugin is up for a row
+accepted at least a minute before it came up, and one to two minutes after the delivery for a later one.
+The reconciler leaves the rows of a restoring plugin out of its batch, so they do not hold back another
+plugin's. With the reconciler disabled
+(`INGRESS_RECONCILE_INTERVAL_MS=0`) nothing would replay a held row, so the delivery is dispatched at once
+and, with no worker to run it, files a dead letter that an operator can redrive.
+
+Table growth is bounded by construction rather than by operator hygiene: the per-instance ingress
+throttle caps the row-creation rate, dispatched rows slim to a marker + hash, and the two retention
+windows prune what remains — `INGRESS_DEDUP_RETENTION_DAYS` (default 7) for the dedup oracle and
+`INGRESS_RETENTION_DAYS` (default 90, `<= 0` disables) for the DLQ. A `pending` row that still
+carries its payload is settled before the age prune deletes it: the prune first writes its
+dead-letter row (unless an open one exists) and marks it `failed`. A delivery stranded across
+downtime longer than the dedup window, or held by an instance disabled for that long, is therefore
+not dropped: it stays redrivable until `INGRESS_RETENTION_DAYS` prunes that dead-letter row. A row
+whose dead-letter write fails is kept for the next run. Two cases get no dead-letter row: a
+queue job that still owns the delivery takes the `dispatched` mark (closing any open dead-letter
+row), and a row whose instance or bound session was deleted is dropped, since redrive refuses a
+deleted instance and a session delete purges its dead letters. A delivery whose completed job was
+already removed from the queue, or whose job lookup failed while Redis was down (or, for a Redis
+slow to start at boot, not yet connected within that first-connect wait), is dead-lettered anyway and
+may already have been delivered: check before redriving it. The check that avoids a second open
+dead-letter row for one delivery reads before it writes, so two nodes pruning the same row at the same
+moment (replicas started together) can leave two, and redriving both delivers it twice. A dead-letter
+row the prune writes takes
+its conversation id from the plugin's current manifest route, as the live path does, so a row whose
+plugin package or route is gone, whose route declares no `conversationId` pointer, or whose pointer
+does not resolve in that delivery carries none and its redrive takes the per-instance lane. There is
+deliberately no per-instance row-count cap: eviction under a flood of forged delivery ids would
+silently drop legit dedup rows and re-admit their replays, which is worse than the bounded growth it
+would prevent.
+
+## 25.8 The Integration SDK (v1)
+
+The stable surface sandboxed adapters consume. A plugin declares `sdkVersion: "1"` and an `ingress`
+descriptor (the route, which is a single URL path segment such as `chatwoot` and never contains a `/`, its
+signature scheme, replay tolerance, dedup header, and an optional verification handshake) in its manifest,
+and requests the `webhook:ingress` and `conversation:send` permissions. The host refuses to load an
+ingress-declaring plugin whose declared **major** differs from the host's supported major, and the surface
+is **additive-only** within a major. The worker-facing API centres on `ctx.registerWebhook(...)` (claim an
+inbound route), `ctx.conversations.send(...)` (normalized reply), and per-instance mapping and handover
+helpers.
+
+The `signature.scheme` field enumerates `hmac-sha256` (HMAC over a `contentTemplate`), `shared-secret`
+(constant-time header compare), `standard-webhooks`, and `none` (unauthenticated — a route declaring it
+fails the whole plugin's load unless the operator sets `ALLOW_UNSIGNED_INGRESS=true`; see §25.6). The
+`standard-webhooks` scheme verifies a [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks)
+payload host-side — Supabase Auth's Send-SMS hook and any Svix-routed provider speak it natively. Its wire
+format is fixed by the spec (the `webhook-id` / `webhook-timestamp` / `webhook-signature` header triple,
+signed over `${id}.${timestamp}.${rawBody}`), so only `toleranceSec` (falling back to the host
+`INGRESS_TIMESTAMP_TOLERANCE_SEC`, default 300) and `dedupHeader` apply; `header`, `contentTemplate`,
+`encoding`, `prefix`, and `timestampHeader` are ignored, and the
+operator pastes the provider's Svix secret (`v1,whsec_<base64>`) as the instance secret. It is the
+recommended scheme for Standard-Webhooks providers: because the `session-alive` preflight (§25.4) runs
+_after_ signature verification, an unauthenticated caller can no longer use that preflight as a liveness
+oracle on a route that previously declared `scheme: "none"`. The existing `hmac-sha256`/`shared-secret`/
+`none` behavior is unchanged. For `hmac-sha256`, declaring `timestampHeader` always activates the replay
+window (§25.6) — declare it together with a `contentTemplate` that includes `{timestamp}` so the checked
+timestamp is also signed.
+
+Within major 1 the surface grows additively. A route's optional `response` contract — `preflight[]`
+(host-side checks such as `session-alive`, evaluated after signature verify), `ack{}` (`status`/`body`/
+`headers`, rendered host-side with `{rawBody}`/`{timestamp}`/`{id}` templates from the verified request),
+and an advisory `deadlineMs` — lets an adapter shape the synchronous HTTP response the provider sees; the
+ack of such a route never waits for the plugin, which runs from the queue or, with the queue off, inline after
+the ack (§25.4), and a route with no `response` is byte-identical to today's default fast-ack. `ack.body` and every `ack.headers` value must be strings, `ack.status` must be a final status
+(200-599), and a header value may hold no control character (other than HTAB) and nothing above U+00FF,
+since Node cannot write one; a manifest that declares otherwise is refused at install and at boot, which
+leaves that plugin in error until the manifest is fixed. A declared header is dropped rather than written
+when it is one of these thirteen names: `content-type`, which the host sets itself (a declared
+`application/json` or `text/plain` is honored as the bare media type with `charset=utf-8`, and any other
+declared type, or none, is sent as `text/plain`, so a reflected ack is never served as executable
+content); `content-length`, `transfer-encoding`, `content-encoding` and `trailer`, since the host frames
+the response itself and never compresses it; `set-cookie`, `access-control-allow-origin` and
+`access-control-allow-credentials`; and `content-security-policy`, `x-content-type-options`,
+`x-frame-options`, `strict-transport-security` and `referrer-policy`, the response protections the host
+sets for every request. Every other declared header goes out verbatim.
+
+The `mode: 'sync-reply'` value is **deprecated** in favor of `response`: it was inert dead code
+that was never wired to the HTTP response (the pipeline is always async + fast-ack), and it is kept in the
+`mode` union only to preserve SDK v1 additive-only compatibility — do not remove it within major 1, and do
+not rely on it at runtime.
+
+The full SDK reference — every manifest field, the envelope schema, the lifecycle, and the golden
+compatibility fixtures — is a P4 deliverable and is not published yet, so this document and the manifest
+types remain the source of truth.
+
+## 25.9 Phasing and status
+
+See [15 - Project Roadmap](./15-project-roadmap.md) for the full phase table. In brief: **P0** (this
+substrate) is merged; **P1** added scale-correctness (per-conversation ordering, per-instance fairness,
+DLQ redrive, handover); **P2** shipped operator provisioning in v0.8.0 — an ADMIN-only instance API
+(`POST|GET /api/integration/plugins/:pluginId/instances` to create and list, with
+`GET|PATCH|DELETE /api/integration/plugins/:pluginId/instances/:instanceId` and
+`POST /api/integration/plugins/:pluginId/instances/:instanceId/regenerate-secret` on the item path) and a
+dashboard **Instances** tab; **P3** validated the substrate against a second ingress adapter
+(`supabase-otp-hook`). The official
+ingress adapters ship as sandboxed plugins in the
+[OpenWA-plugins](https://github.com/rmyndharis/OpenWA-plugins) catalog, not in this repository. What
+remains open is **P4**: the published SDK reference, a compatibility test suite, and multi-node routing.
+
+> **Provisioning is a first-class operator surface.** An ADMIN key mints a plugin instance against an
+> ingress-capable plugin, binds it to a session scope, and receives the ingress URLs for the plugin's
+> declared routes. The instance's ingress secret (and its `verifyToken`) are revealed once, on create and
+> on regenerate, and masked on every later read.
+
+---
+
+> See also: [03 - System Architecture](03-system-architecture.md),
+> [04 - Security Design](04-security-design.md),
+> [19 - Plugin Architecture](19-plugin-architecture.md),
+> [30 - Plugin Sandboxing](30-plugin-sandboxing.md),
+> [15 - Project Roadmap](15-project-roadmap.md).

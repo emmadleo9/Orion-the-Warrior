@@ -1,0 +1,158 @@
+import AdmZip from 'adm-zip';
+import * as path from 'path';
+import * as zlib from 'zlib';
+import { BadRequestException } from '@nestjs/common';
+import { PluginManifest, RESERVED_PLUGIN_IDS, INSTALLABLE_TYPES, validatePluginManifest } from '../../core/plugins';
+
+// Re-exported so existing importers of this module keep working; the definitions live in
+// core/plugins/plugin-manifest.ts, shared with the boot-time loader validation.
+export { RESERVED_PLUGIN_IDS, INSTALLABLE_TYPES };
+
+export interface PackageLimits {
+  /** Max number of files in the archive (cheap zip-bomb / fork-bomb guard). */
+  maxEntries: number;
+  /** Max total uncompressed bytes (checked against the zip headers BEFORE decompressing). */
+  maxTotalBytes: number;
+}
+
+export const DEFAULT_PACKAGE_LIMITS: PackageLimits = { maxEntries: 200, maxTotalBytes: 20 * 1024 * 1024 };
+
+/**
+ * Decompress one zip entry with a hard cap on actual output bytes. An entry that lies about being
+ * empty (header.size = 0) is inflated here with zlib `maxOutputLength` set to the caller's cap.
+ * Every other entry goes through `getData()`: adm-zip caps a DEFLATED entry at its declared size,
+ * but copies a STORED entry at its real length whatever the header says, so output larger than the
+ * declared size is rejected here. That keeps every positive-size entry within the declared sum the
+ * caller has already checked. A corrupt entry, a CRC mismatch, or a lying-small header throws, and
+ * the caller maps that to a clean 400.
+ */
+function readEntryData(entry: AdmZip.IZipEntry, maxBytes: number): Buffer {
+  if (entry.header.size === 0 && entry.header.compressedSize > 0) {
+    const compressed = entry.getCompressedData();
+    if (compressed.length === 0) return Buffer.alloc(0);
+    // maxOutputLength aborts inflation (ERR_BUFFER_TOO_LARGE) once output exceeds the cap, so a
+    // lying size=0 entry cannot grow unbounded in memory before we reject the archive.
+    return zlib.inflateRawSync(compressed, { maxOutputLength: maxBytes });
+  }
+  const data = entry.getData();
+  if (data.length > entry.header.size) throw new Error('Entry is larger than its declared size');
+  return data;
+}
+
+export interface ParsedPackage {
+  manifest: PluginManifest;
+  /** Files to write under the plugin directory, relative to the package root, zip-slip-safe. */
+  entries: { relPath: string; data: Buffer }[];
+}
+
+/**
+ * Parse + validate an uploaded plugin `.zip` without touching the filesystem. Locates the package
+ * root (the shallowest `manifest.json`, so both a flat zip and a single-folder zip work), validates
+ * the manifest and id, and resolves every file path defensively (rejects absolute / `..` escapes and
+ * over-size archives). The caller writes the returned entries; this function decides what is safe.
+ */
+export function parsePluginPackage(buffer: Buffer, limits: PackageLimits = DEFAULT_PACKAGE_LIMITS): ParsedPackage {
+  // The constructor reads only the end-of-central-directory record; the central directory itself is
+  // parsed lazily by getEntries(), so an archive whose trailer parses and whose directory does not
+  // escaped this guard as a plain Error and reached the caller as a 500. Both answer the same
+  // question, "is this a readable archive", so both are caught here.
+  let files: AdmZip.IZipEntry[];
+  try {
+    files = new AdmZip(buffer).getEntries().filter(e => !e.isDirectory);
+  } catch {
+    throw new BadRequestException('Uploaded file is not a valid .zip archive');
+  }
+
+  if (files.length === 0) throw new BadRequestException('The archive is empty');
+  if (files.length > limits.maxEntries) throw new BadRequestException('The archive has too many files');
+  // A leading slash makes path.posix.dirname return '/' or '//', so the prefix below would not match
+  // the manifest's own name and its declared size would escape the size guard.
+  const absolute = files.find(e => e.entryName.startsWith('/'));
+  if (absolute) throw new BadRequestException(`Unsafe path in archive: ${absolute.entryName}`);
+
+  // Package root = directory of the shallowest manifest.json (handles flat and single-folder zips).
+  const manifestEntry = files
+    .filter(e => path.posix.basename(e.entryName) === 'manifest.json')
+    .sort((a, b) => a.entryName.split('/').length - b.entryName.split('/').length)[0];
+  if (!manifestEntry) throw new BadRequestException('The archive has no manifest.json');
+  const dir = path.posix.dirname(manifestEntry.entryName);
+  const prefix = dir === '.' ? '' : dir + '/';
+
+  // Size guard FIRST, off the declared header sizes, so an archive that declares more than the limit
+  // is rejected before any entry, the manifest included, is decompressed. An entry that declares
+  // size 0 adds nothing here; readEntryData still inflates it, capped at maxTotalBytes.
+  const packaged = files.filter(e => !prefix || e.entryName.startsWith(prefix));
+  const declared = packaged.reduce((sum, e) => sum + e.header.size, 0);
+  if (declared > limits.maxTotalBytes) throw new BadRequestException('The archive contents exceed the size limit');
+
+  let manifestRaw: Buffer;
+  try {
+    manifestRaw = readEntryData(manifestEntry, limits.maxTotalBytes);
+  } catch {
+    // A corrupt / oversized manifest entry must surface as a clean 400, not an uncaught
+    // decompression error (BAD_CRC / ERR_BUFFER_TOO_LARGE) that would escape as an HTTP 500.
+    throw new BadRequestException('Plugin package is corrupt or too large to extract');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestRaw.toString('utf-8'));
+  } catch {
+    throw new BadRequestException('manifest.json is not valid JSON');
+  }
+  // The SAME manifest validation the boot-time loader enforces (shape, required string fields, id
+  // format + reserved ids, extension-only type, contained `main`) — shared so the two entry points
+  // can never drift apart. Mapped to a clean 400 here, never an uncaught TypeError (HTTP 500) on
+  // the attacker-controlled install path.
+  try {
+    validatePluginManifest(parsed);
+  } catch (error) {
+    throw new BadRequestException(error instanceof Error ? error.message : String(error));
+  }
+  const manifest = parsed;
+
+  const entries: { relPath: string; data: Buffer }[] = [];
+  // Normalized paths already taken, NFC-normalized and case-folded because a case- or
+  // normalization-insensitive filesystem (APFS, NTFS) writes `Manifest.json` and `manifest.json`, or
+  // an NFC and an NFD spelling, to one file. Upper-then-lower also folds characters such as the long
+  // s that toLowerCase() leaves alone. Entries are written in order, so a repeat would let a later
+  // `z/../manifest.json` replace the manifest validated above.
+  const seen = new Set<string>();
+  let actualBytes = 0;
+  for (const e of packaged) {
+    const relPath = e.entryName.slice(prefix.length);
+    if (!relPath) continue;
+    const norm = path.posix.normalize(relPath);
+    if (relPath.includes('\\') || norm.startsWith('..') || norm === '..' || path.posix.isAbsolute(norm)) {
+      throw new BadRequestException(`Unsafe path in archive: ${e.entryName}`);
+    }
+    const key = norm.normalize('NFC').toUpperCase().toLowerCase();
+    if (seen.has(key)) throw new BadRequestException(`Duplicate path in archive: ${e.entryName}`);
+    seen.add(key);
+    let data: Buffer;
+    try {
+      data = readEntryData(e, limits.maxTotalBytes);
+    } catch {
+      // Corrupt entry (bad CRC / truncated), a lying-small header (zlib ERR_BUFFER_TOO_LARGE), or a
+      // lying size=0 entry that exceeds the cap — all must yield a clean 400, never an uncaught
+      // decompression error (HTTP 500).
+      throw new BadRequestException('Plugin package is corrupt or too large to extract');
+    }
+    // Aggregate actual-bytes bound: the declared-sum pre-check above uses header.size (which lying
+    // size=0 entries contribute as 0), and the per-entry cap only bounds each entry individually. A
+    // crafted archive with many lying-size=0 entries (each just under the per-entry cap) would pass
+    // both and accumulate unbounded in `entries` before the function returns. Abort as soon as the
+    // running total of decompressed bytes exceeds the cap.
+    actualBytes += data.length;
+    if (actualBytes > limits.maxTotalBytes) {
+      throw new BadRequestException('Plugin package is too large to extract');
+    }
+    entries.push({ relPath: norm, data });
+  }
+
+  const mainRel = path.posix.normalize(manifest.main);
+  if (!entries.some(en => en.relPath === mainRel)) {
+    throw new BadRequestException(`The archive is missing its main file: ${manifest.main}`);
+  }
+
+  return { manifest, entries };
+}

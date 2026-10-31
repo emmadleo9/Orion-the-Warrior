@@ -1,0 +1,192 @@
+# replicaCount MUST stay 1. A session lease now stops two pods from launching the same
+# session, so the shared-auth corruption this warning used to describe can no longer
+# happen. The reasons now: API keys and the audit log live in each pod's own main.sqlite,
+# so a key created, revoked or narrowed on one pod is unchanged on the others, and the WS
+# rate-limit buckets, the liveness watchdog and reconnect timers, and in-flight bulk
+# batches are process-local. See docs/13-horizontal-scaling.md.
+# Postgres boot migrations no longer add a cross-replica hazard: replicas serialize them
+# with a session-scoped advisory lock at startup, so simultaneous boots cannot race DDL
+# against the shared migrations ledger. That part is enforced in-process, not by keeping
+# replicaCount at 1 — the process-local state above is what still keeps it at 1.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/rmyndharis/openwa
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Non-secret application config, rendered into a ConfigMap and loaded via envFrom.
+# Any variable from .env.example is valid here — that file stays the canonical list.
+# NOTE: the container port is fixed at 2785 (containerPort, probes and the Service
+# targetPort are all pinned to it). Setting PORT here breaks the pod — use
+# service.port to change the Service port instead.
+# PII warning: never leave DATABASE_LOGGING=true here outside a debug session — TypeORM
+# then logs every query WITH its parameters (message bodies, phone numbers) into pod
+# logs, which a wider RBAC audience can usually read than the database itself.
+# NODE_ENV=production makes the app send the CSP upgrade-insecure-requests directive;
+# behind an ingress without TLS set CSP_UPGRADE_INSECURE_REQUESTS: "false" here, or the
+# dashboard renders blank over http.
+env:
+  NODE_ENV: production
+  LOG_LEVEL: info
+
+# Secret config, rendered into a chart-managed Secret (stringData). Leave
+# API_MASTER_KEY empty to let the app bootstrap a key into /app/data/.api-key
+# (persists on the PVC) — NOTES.txt after install shows how to read it.
+# If a key exists in both env and secretEnv, the secret value wins (envFrom ordering).
+secretEnv:
+  API_MASTER_KEY: ""
+
+# Note: a sha256 of the rendered Secret is published as a pod annotation so that changing
+# secretEnv restarts the pod — without it the new value would never reach the running
+# container. Pod annotations are readable by anyone with `get pods`, which is a wider set
+# than `get secrets` under a common RBAC split, so someone who can list Pods can confirm a
+# guessed value offline. Uninteresting for a high-entropy API_MASTER_KEY; worth knowing
+# before adding something like DATABASE_PASSWORD here. Use existingSecret below to keep the
+# value out of the chart entirely — the trade is that the chart can no longer detect changes
+# to it, so restarts become `kubectl rollout restart`.
+#
+# Name of an existing, operator-managed Secret to load via envFrom instead of the
+# chart-managed one. When set, secretEnv is ignored and no Secret is created.
+existingSecret: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+persistence:
+  # /app/data holds session auth, the main SQLite DB, media and plugins — losing
+  # this volume loses the linked WhatsApp sessions and the API keys.
+  # Empty storageClass means the cluster's default StorageClass; the PVC pends if
+  # the cluster has none.
+  size: 10Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+# Headless Chromium (whatsapp-web.js) is memory-heavy during QR/init; too-tight
+# limits show up as OOMKilled loops at session start.
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 250m
+  limits:
+    memory: 2Gi
+    cpu: 1000m
+
+# Matches docker-compose stop_grace_period. Sized for the worst case (QUEUE_ENABLED, Redis, a plugin
+# enabled), where the bounded teardown stages add up to 63s: drain 3 + ingress reconciler 5 + engines
+# 10 (in parallel, whatever the session count) + auto-start wait 5 + webhook drain 5 + worker close 10
+# + producer queue close 2 for each of two queues + usage flush 5 + plugin phase 10 + three Redis quits
+# 2 each. The process force-exits 67s after the drain and 5s before this deadline. Raising
+# SHUTDOWN_DELAY_MS or WEBHOOK_SHUTDOWN_DRAIN_MS moves that exit later by the same amount, so raise
+# this by the same amount too.
+terminationGracePeriodSeconds: 75
+
+# Boot budget of the kubelet startupProbe on /api/health/live: the container is restarted after
+# periodSeconds x (failureThreshold - 1) = 5s x 59 = 295s without an answer. The first boot after an
+# upgrade builds indexes on a large messages table (about 3.8s per million rows) and converts legacy
+# message types in the same transaction (about 60s per million legacy rows on PostgreSQL) before the
+# port opens, so raise failureThreshold, or run the migrations first (docs/14, section 14.5). A higher
+# value only delays the restart of a boot that is genuinely stuck.
+startupProbe:
+  periodSeconds: 5
+  failureThreshold: 60
+
+# Pod-level securityContext, empty by default. The default image start is as
+# root: the entrypoint re-owns /app/data and the XDG dirs, then drops to the
+# openwa user (uid/gid 997) via gosu, which needs the capabilities added below.
+#
+# To run as non-root from the first instruction instead (Pod Security Standard
+# "restricted"), set:
+#
+#   podSecurityContext:
+#     runAsNonRoot: true
+#     runAsUser: 997
+#     runAsGroup: 997
+#     fsGroup: 997
+#     fsGroupChangePolicy: OnRootMismatch
+#     seccompProfile:
+#       type: RuntimeDefault
+#   containerSecurityContext:
+#     readOnlyRootFilesystem: true
+#     allowPrivilegeEscalation: false
+#     capabilities:
+#       drop: [ALL]
+#       add: null
+#
+# The entrypoint then skips its chown and privilege drop and runs as that uid;
+# fsGroup is what makes a fresh volume writable by it. OnRootMismatch makes the
+# kubelet re-own the volume only when its root has the wrong group or mode,
+# instead of touching every file on every mount. `add: null` removes the
+# default list below; Helm merges maps, so leaving it out keeps all six.
+# The RuntimeDefault seccomp profile is opt-in (it can also be set alone,
+# under either context) until a whatsapp-web.js session start under it has
+# been confirmed on arm64, where the image uses Debian's Chromium.
+podSecurityContext: {}
+
+# Parity with docker-compose hardening. The added capabilities support
+# the root entrypoint and init signal forwarding after the gosu drop; see
+# podSecurityContext above for the non-root alternative.
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID
+
+ingress:
+  enabled: false
+  className: ""
+  # ingress-nginx refuses a request body over 1m by default, below the 25mb the app accepts
+  # (BODY_SIZE_LIMIT), so a base64 media send fails with 413 before it reaches the pod. Raise it
+  # to at least BODY_SIZE_LIMIT, for example:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: 25m
+  annotations: {}
+  host: openwa.example.com
+  paths:
+    - path: /
+      pathType: Prefix
+  tls: []
+  #  - secretName: openwa-tls
+  #    hosts:
+  #      - openwa.example.com
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# With replicaCount 1, minAvailable: 1 blocks voluntary eviction (node drains hang
+# until the pod is rescheduled). Opt in only with a matching runbook.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Requires METRICS_TOKEN set on the app (via secretEnv); without it /api/metrics
+# returns 404. A production boot refuses the placeholder from .env.example and
+# other known weak values, so use a long random token.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  # Extra labels for the ServiceMonitor — most Prometheus Operators select
+  # ServiceMonitors by a release label (e.g. release: kube-prometheus-stack).
+  additionalLabels: {}
+  # Secret holding the METRICS_TOKEN value for bearer auth.
+  bearerTokenSecret:
+    name: ""
+    key: token
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

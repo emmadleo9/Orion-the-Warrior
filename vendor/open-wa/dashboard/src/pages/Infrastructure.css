@@ -1,0 +1,785 @@
+.infrastructure-page {
+  padding: 2rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.infrastructure-page .page-header {
+  margin-bottom: 2rem;
+}
+
+/* H1 inherited from global */
+
+.infrastructure-page .infra-sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+  width: 100%;
+}
+
+.infrastructure-page .infra-card {
+  background: var(--bg-white);
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.infrastructure-page .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.infrastructure-page .header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.infrastructure-page .header-left svg {
+  color: var(--primary-text);
+}
+
+.infrastructure-page .card-header h2 {
+  margin: 0;
+}
+
+.infrastructure-page .status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.375rem 0.75rem;
+  border-radius: 9999px;
+}
+
+.infrastructure-page .status-indicator.connected {
+  background: rgba(37, 211, 102, 0.1);
+  color: var(--primary-text);
+}
+
+.infrastructure-page .status-indicator.disconnected {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error-text);
+}
+
+.infrastructure-page .status-indicator.sqlite {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--info);
+}
+
+/* Radio Group */
+.infrastructure-page .radio-group {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.infrastructure-page .radio-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.infrastructure-page .radio-option:hover {
+  border-color: var(--text-muted);
+}
+
+.infrastructure-page .radio-option.selected {
+  border-color: var(--primary);
+  background: rgba(37, 211, 102, 0.05);
+}
+
+/* Hidden but focusable: display: none would take the radio out of the tab order, and the arrow keys
+   that change the choice with it. */
+.infrastructure-page .radio-option input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.infrastructure-page .radio-option:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.infrastructure-page .radio-option span {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.infrastructure-page .radio-option small {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* Watermark Icon */
+.infrastructure-page .radio-option {
+  position: relative;
+  overflow: hidden;
+}
+
+.infrastructure-page .watermark-icon {
+  position: absolute;
+  inset-inline-end: -15px;
+  bottom: -15px;
+  width: 100px;
+  height: 100px;
+  opacity: 0.15;
+  transform: rotate(-15deg);
+  pointer-events: none;
+  transition: all 0.3s ease;
+}
+
+.infrastructure-page .radio-option:hover .watermark-icon {
+  opacity: 0.25;
+  transform: rotate(-12deg) scale(1.05);
+}
+
+.infrastructure-page .radio-option.selected .watermark-icon {
+  opacity: 0.3;
+  transform: rotate(-12deg) scale(1.1);
+}
+
+/* Form Styles */
+.infrastructure-page .config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.infrastructure-page .form-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+.infrastructure-page .form-row .form-group.small {
+  max-width: 120px;
+}
+
+.infrastructure-page .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.infrastructure-page .form-group label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.infrastructure-page .form-group input,
+.infrastructure-page .form-group select {
+  padding: 0.75rem 1rem;
+  font-size: 0.9375rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--bg-white);
+  transition: border-color 0.2s;
+}
+
+.infrastructure-page .form-group input:focus,
+.infrastructure-page .form-group select:focus {
+  outline: none;
+  border-color: var(--focus-ring);
+}
+
+.infrastructure-page .form-group small {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Toggle */
+.infrastructure-page .toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+}
+
+.infrastructure-page .toggle-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.infrastructure-page .toggle-info span {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.infrastructure-page .toggle-info small {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-muted); /* Slate 500 */
+}
+
+.infrastructure-page .toggle-switch {
+  position: relative;
+  width: 48px;
+  height: 26px;
+  cursor: pointer;
+}
+
+.infrastructure-page .toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.infrastructure-page .toggle-slider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--border);
+  border-radius: 26px;
+  transition: all 0.2s;
+}
+
+.infrastructure-page .toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  left: 3px;
+  bottom: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: all 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.infrastructure-page .toggle-switch input:checked + .toggle-slider {
+  background: var(--primary);
+}
+
+.infrastructure-page .toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(22px);
+}
+
+.infrastructure-page .toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Queue Stats */
+.infrastructure-page .queue-stats {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.infrastructure-page .queue-stats h3 {
+  margin: 0 0 1rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.infrastructure-page .stats-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, max-content));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.infrastructure-page .queue-stat-card {
+  background: var(--bg-light);
+  padding: 1rem;
+  border-radius: var(--radius);
+}
+
+.infrastructure-page .queue-stat-card h4 {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.infrastructure-page .stat-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+}
+
+.infrastructure-page .stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.infrastructure-page .stat-item .value {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.infrastructure-page .stat-item .label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.infrastructure-page .stat-item.pending .value {
+  color: var(--warning-text);
+}
+.infrastructure-page .stat-item.pending .label {
+  color: var(--warning-text);
+}
+.infrastructure-page .stat-item.completed .value {
+  color: var(--primary-text);
+}
+.infrastructure-page .stat-item.completed .label {
+  color: var(--primary-text);
+}
+.infrastructure-page .stat-item.failed .value {
+  color: var(--error-text);
+}
+.infrastructure-page .stat-item.failed .label {
+  color: var(--error-text);
+}
+
+.infrastructure-page .queue-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+/* Buttons */
+.infrastructure-page .btn-primary.large {
+  padding: 0.875rem 1.5rem;
+  font-size: 1rem;
+}
+
+.infrastructure-page .btn-outline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.infrastructure-page .btn-outline:hover {
+  background: var(--bg-light);
+}
+
+/* Footer */
+.infrastructure-page .page-footer {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Responsive */
+/* Two columns of cards need 1035px of viewport with the sidebar open (1190px in German, whose labels are
+   wider); below that they stack. */
+@media (max-width: 1200px) {
+  .infrastructure-page .infra-sections {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .infrastructure-page {
+    padding: 1rem;
+  }
+
+  .infrastructure-page .radio-group {
+    grid-template-columns: 1fr;
+  }
+
+  .infrastructure-page .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .infrastructure-page .stats-row {
+    grid-template-columns: 1fr;
+  }
+
+  /* Card header mobile layout */
+  .infrastructure-page .card-header {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .infrastructure-page .header-left {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .infrastructure-page .header-left h2 {
+    font-size: 0.9375rem;
+    line-height: 1.3;
+  }
+
+  /* Status badge mobile - prevent shrinking */
+  .infrastructure-page .status-indicator {
+    flex-shrink: 0;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    padding: 0.25rem 0.625rem;
+  }
+
+  /* Toggle row mobile - prevent switch from being cut off */
+  .infrastructure-page .toggle-row {
+    gap: 1rem;
+  }
+
+  .infrastructure-page .toggle-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .infrastructure-page .toggle-switch {
+    flex-shrink: 0;
+  }
+
+  /* Queue actions stack on mobile */
+  .infrastructure-page .queue-actions {
+    flex-direction: column;
+  }
+
+  .infrastructure-page .queue-actions button {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 768px) {
+  .infrastructure-page {
+    padding: 0.75rem;
+  }
+
+  .infrastructure-page .infra-card {
+    padding: 1rem;
+  }
+
+  .infrastructure-page .form-row .form-group.small {
+    max-width: none;
+  }
+
+  .infrastructure-page .form-group input,
+  .infrastructure-page .form-group select {
+    font-size: 0.875rem;
+    padding: 0.625rem 0.875rem;
+  }
+
+  .infrastructure-page .stat-values {
+    gap: 1rem;
+  }
+
+  .infrastructure-page .stat-item .value {
+    font-size: 1rem;
+  }
+
+  .infrastructure-page .page-footer {
+    justify-content: stretch;
+  }
+
+  .infrastructure-page .page-footer button {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+.infrastructure-page .engine-web-version {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+.infrastructure-page .engine-web-version code {
+  font-size: 0.8125rem;
+  background: rgba(127, 127, 127, 0.1);
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+}
+.infrastructure-page .engine-web-version .muted {
+  color: var(--text-muted);
+}
+
+.infrastructure-page .env-pin-note {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+  color: var(--warning-text);
+  /* A long variable name (DATABASE_SSL_REJECT_UNAUTHORIZED) breaks instead of running past a narrow card. */
+  overflow-wrap: anywhere;
+}
+.infrastructure-page .env-pin-note svg {
+  flex-shrink: 0;
+}
+
+.infrastructure-page .migration-warning {
+  display: flex;
+  gap: 0.6rem;
+  text-align: start;
+  margin: 0 0 1.5rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: var(--text-primary);
+}
+.infrastructure-page .migration-warning svg {
+  flex-shrink: 0;
+  color: var(--warning-text);
+  margin-top: 0.1rem;
+}
+.infrastructure-page .migration-warning p {
+  margin: 0.25rem 0 0.6rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.infrastructure-page .data-migration-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.infrastructure-page .data-migration-row small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 0.15rem;
+}
+.infrastructure-page .data-migration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.infrastructure-page .data-migration-actions .btn-sm,
+.infrastructure-page .migration-warning .btn-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* Loading / status-load-error states */
+.infrastructure-page.infra-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+}
+
+.infrastructure-page .status-error-card {
+  text-align: center;
+  padding: 2.5rem;
+}
+
+.infrastructure-page .status-error-icon {
+  color: var(--warning-text, #9f6707);
+  margin-bottom: 1rem;
+}
+
+.infrastructure-page .status-error-text {
+  margin: 0;
+}
+
+.infrastructure-page .status-error-retry {
+  margin-top: 1.25rem;
+}
+
+/* Toggle-row spacing variants */
+.infrastructure-page .toggle-row-spaced {
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+}
+
+.infrastructure-page .toggle-row-spaced-bottom {
+  margin-bottom: 1rem;
+}
+
+.infrastructure-page .queue-toggle-row {
+  border-top: 1px solid var(--border);
+  padding-top: 1.25rem;
+  margin-top: 0.5rem;
+}
+
+/* Empty-state cards (migrations status, redis disabled) */
+.infrastructure-page .empty-state-card {
+  padding: 2.5rem;
+  text-align: center;
+  background: var(--bg-light);
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  margin-top: 1rem;
+}
+
+.infrastructure-page .empty-state-icon {
+  margin-bottom: 1rem;
+}
+
+.infrastructure-page .empty-state-icon.success {
+  color: var(--success-text);
+  opacity: 0.7;
+}
+
+.infrastructure-page .empty-state-icon.muted {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.infrastructure-page .empty-state-title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.infrastructure-page .migrations-status {
+  margin: 0.75rem 0 0;
+  color: var(--success-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+}
+
+/* Shared muted hint text (migration hint, engine notes, redis disabled) */
+.infrastructure-page .muted-hint {
+  margin: 0.5rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.infrastructure-page .engine-restart-note {
+  margin: 1rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* Data backup / restore. Import data is a label around its file input, hidden from sight but focusable: display: none
+   would take the chooser out of the tab order. The label shows the keyboard focus. */
+.infrastructure-page .hidden-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.infrastructure-page label:has(> .hidden-file-input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Restart / migration progress modal */
+.infrastructure-page .restart-modal {
+  max-width: 500px;
+  text-align: center;
+}
+
+.infrastructure-page .restart-modal .modal-header {
+  justify-content: center;
+  border-bottom: none;
+}
+
+.infrastructure-page .restart-modal .modal-body {
+  padding: 2rem;
+}
+
+.infrastructure-page .restart-idle-desc {
+  font-size: 1rem;
+  color: var(--text-secondary);
+  margin-bottom: 1.5rem;
+}
+
+.infrastructure-page .restart-stop-name {
+  white-space: nowrap;
+}
+
+.infrastructure-page .restart-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.infrastructure-page .restart-countdown {
+  margin-bottom: 1.5rem;
+}
+
+.infrastructure-page .restart-status-icon {
+  color: var(--success-text);
+  margin-bottom: 1rem;
+}
+
+.infrastructure-page .restart-countdown-msg {
+  font-size: 1.125rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.infrastructure-page .restart-progress-track {
+  width: 100%;
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.infrastructure-page .restart-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 1s linear;
+}
+
+.infrastructure-page .restart-dont-close {
+  margin-top: 1rem;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.infrastructure-page .restart-success-msg {
+  font-size: 1rem;
+  color: var(--text-secondary);
+}
+
+.infrastructure-page .restart-error-msg {
+  font-size: 1rem;
+  color: var(--error-text);
+  margin-bottom: 1rem;
+}

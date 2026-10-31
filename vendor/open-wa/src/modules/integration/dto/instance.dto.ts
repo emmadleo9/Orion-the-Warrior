@@ -1,0 +1,183 @@
+import {
+  IsBoolean,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IngressUrl } from '../ingress-url';
+import { ToStrictBoolean, ToStrictString } from '../../../common/utils/strict-boolean';
+
+// Safe charset: the instanceId goes unencoded into the ingress URL path and the `<pluginId>:<instanceId>` row id.
+const INSTANCE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export class CreateInstanceDto {
+  @ApiProperty({
+    description:
+      'Operator-chosen instance id (unique within the plugin). Namespaces the ingress URL and the instance secret.',
+    pattern: INSTANCE_ID_PATTERN.source,
+    example: 'chatwoot-prod-1',
+  })
+  @ToStrictString()
+  @IsString()
+  @Matches(INSTANCE_ID_PATTERN, { message: 'instanceId must match ^[a-zA-Z0-9_-]{1,64}$' })
+  instanceId!: string;
+
+  @ApiPropertyOptional({
+    description: 'Session id the instance is scoped to. Omit for all sessions.',
+    minLength: 1,
+    maxLength: 256,
+    example: '8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a',
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty({ message: 'sessionScope must not be empty (omit it for all sessions)' })
+  @MaxLength(256)
+  sessionScope?: string;
+
+  @ApiPropertyOptional({
+    description: 'Token echoed back for the provider webhook verification handshake. Auto-generated when omitted.',
+    maxLength: 512,
+    example: 'a1b2c3d4e5f6',
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @MaxLength(512)
+  verifyToken?: string;
+
+  // Operator-supplied ingress HMAC secret (e.g. the provider's webhook secret). When present it must be
+  // a real value (>= 16 chars) — an empty/short secret would make the public ingress signature forgeable.
+  // Omit to auto-generate a random 64-hex secret.
+  @ApiPropertyOptional({
+    description:
+      "Ingress HMAC secret shared with the provider. Omit to auto-generate a random 64-hex secret. Masked ('***') on every later read; plaintext returned only once on create/regenerate-secret.",
+    writeOnly: true,
+    minLength: 16,
+    maxLength: 512,
+    example: 'super-secret-provider-webhook-key',
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @MinLength(16, { message: 'secret must be at least 16 characters' })
+  @MaxLength(512)
+  secret?: string;
+
+  @ApiPropertyOptional({
+    description: 'Per-instance config slice passed to the adapter (shape defined by the plugin).',
+    example: { apiKey: 'chatwoot-key', inboxId: 42 },
+  })
+  @IsOptional()
+  @IsObject()
+  config?: Record<string, unknown>;
+}
+
+export class UpdateInstanceDto {
+  @ApiPropertyOptional({
+    description: 'Whether the instance is enabled (ingress accepted, dispatch active).',
+    example: true,
+  })
+  @ToStrictBoolean()
+  // Not @IsOptional: that also skips null, which then reaches the NOT NULL column as a 500.
+  @ValidateIf((o: UpdateInstanceDto) => o.enabled !== undefined)
+  @IsBoolean()
+  enabled?: boolean;
+
+  // @IsOptional skips null as well as undefined, so null reaches the service, which stores it as the
+  // same null an unscoped create does.
+  @ApiPropertyOptional({
+    description: 'Session id to bind the instance to, or null for all sessions. Omit to leave the scope unchanged.',
+    nullable: true,
+    // `string | null` reduces to `Object` under emitDecoratorMetadata; declare the real type.
+    type: String,
+    minLength: 1,
+    maxLength: 256,
+  })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty({ message: 'sessionScope must not be empty (send null for all sessions)' })
+  @MaxLength(256)
+  sessionScope?: string | null;
+
+  @ApiPropertyOptional({ description: 'Per-instance config slice passed to the adapter.' })
+  @IsOptional()
+  @IsObject()
+  config?: Record<string, unknown>;
+}
+
+// A class (not an interface) so @nestjs/swagger can reflect it into the published spec — the
+// integration-instance responses are otherwise opaque to generated clients.
+export class InstanceView {
+  @ApiProperty({ description: 'Instance row id.' })
+  id!: string;
+
+  @ApiProperty({ description: 'Plugin id this instance belongs to.' })
+  pluginId!: string;
+
+  @ApiProperty({ description: 'Operator-chosen instance id (unique within the plugin).' })
+  instanceId!: string;
+
+  @ApiPropertyOptional({
+    description: 'Session id the instance is scoped to, or null for all sessions.',
+    nullable: true,
+    // `string | null` reduces to `Object` under emitDecoratorMetadata; declare the real type.
+    type: String,
+  })
+  sessionScope!: string | null;
+
+  @ApiProperty({
+    description:
+      "Ingress HMAC secret. Masked ('***') on every read; plaintext returned only once on create/regenerate-secret.",
+  })
+  secret!: string;
+
+  @ApiPropertyOptional({
+    description: "Provider verify-token. Masked ('***') on reads when set; plaintext on create/regenerate-secret.",
+    nullable: true,
+    type: String,
+  })
+  verifyToken!: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      "Per-instance config slice passed to the adapter, or null. Fields flagged `secret` in the plugin's config schema are masked ('***') on EVERY response — including create/regenerate-secret; only the ingress secret and verifyToken are ever revealed once.",
+    nullable: true,
+    type: Object,
+  })
+  config!: Record<string, unknown> | null;
+
+  @ApiProperty({ description: 'Whether ingress is accepted and dispatch is active.' })
+  enabled!: boolean;
+
+  @ApiProperty({ description: 'Creation timestamp.' })
+  createdAt!: Date;
+
+  @ApiProperty({ description: 'Last update timestamp.' })
+  updatedAt!: Date;
+
+  @ApiProperty({
+    description: 'Ingress URLs the provider posts webhook deliveries to.',
+    type: () => IngressUrl,
+    isArray: true,
+  })
+  ingressUrls!: IngressUrl[];
+}
+
+/** Outcome of one redrive batch over an instance's dead-lettered ingress deliveries. */
+export class RedriveResultDto {
+  @ApiProperty({ description: 'Deliveries re-dispatched by this call.', example: 25 })
+  redriven!: number;
+
+  @ApiProperty({ description: 'Dead-lettered deliveries still retained after this batch.', example: 75 })
+  remaining!: number;
+
+  @ApiProperty({ description: 'The bounded batch size this call processed.', example: 100 })
+  batchSize!: number;
+}

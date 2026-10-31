@@ -1,0 +1,378 @@
+# 09 - Testing Strategy
+
+## 9.1 Current Status
+
+OpenWA now has an active Jest test suite covering the backend core, engine adapters, security helpers,
+database migrations, plugin hooks, and smoke-level e2e boot paths. This document describes the current
+test layout and the expected testing workflow for contributors.
+
+| Area               | Current state                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Backend unit tests | Source-controlled `*.spec.ts` files under `src/`; use the inventory commands below                          |
+| E2E smoke tests    | Source-controlled `*.e2e-spec.ts` files under `test/`; use the inventory commands below                     |
+| Dashboard checks   | ESLint, test type-check, i18n parity, React/Vite build, and source-controlled Node tests                    |
+| SDK checks         | Path-filtered JavaScript, Python, PHP, Java, and Go SDK CI                                                  |
+| PostgreSQL checks  | Dedicated CI job builds migrations and runs `npm run test:pg-smoke` against PostgreSQL 16                   |
+| Coverage gate      | Jest global thresholds plus stricter thresholds for security, auth, engine-adapter, and integration modules |
+
+The exact counts will change as the project evolves. Use the commands below as the source of truth for
+the test inventory, and use the test commands in the next section for pass/fail status.
+
+```bash
+rg --files -g '*.spec.ts' src | wc -l
+rg --files -g '*.e2e-spec.ts' test | wc -l
+rg --files -g '*.test.ts' dashboard/src | wc -l
+rg --files sdk/javascript/test sdk/python/tests sdk/php/tests sdk/java/src/test sdk/go \
+  | rg '(\.test\.ts$|test_.*\.py$|Test\.php$|Test\.java$|_test\.go$)' \
+  | wc -l
+npm test -- --runInBand
+npm run test:e2e -- --runInBand
+npm --prefix dashboard run test:unit
+```
+
+## 9.2 Test Commands
+
+| Command                                                          | Purpose                                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `npm test`                                                       | Run backend Jest unit tests from `src/`                                                                      |
+| `npm test -- --runInBand`                                        | Run backend tests serially; useful for local debugging and clean output                                      |
+| `npm run test:cov`                                               | Run backend tests with coverage and coverage thresholds                                                      |
+| `npm run test:e2e`                                               | Run smoke-level e2e tests from `test/`                                                                       |
+| `npm run test:docs`                                              | Run the docs and manifest drift gates that `npm test` excludes                                               |
+| `npm run test:pg-smoke`                                          | Run the PostgreSQL migration and UUID-default smoke test                                                     |
+| `npm run test:scripts`                                           | Run the repo-level script tests on the Node test runner                                                      |
+| `npm run build && npm run test:engine-real`                      | Exercise inbound messages and outbound recipient preparation with the real Baileys library and built adapter |
+| `OPENWA_SMOKE_IMAGE=<image> ./scripts/smoke-test-engine-libs.sh` | Import Baileys and launch the browser inside a built image                                                   |
+| `./scripts/smoke-test-backup-restore.sh`                         | Run the backup/restore smoke test used by the `scripts-smoke` job                                            |
+| `npm run lint`                                                   | Run backend ESLint with type-aware rules                                                                     |
+| `npm run format:check`                                           | Check Prettier formatting for backend source and specs                                                       |
+| `npx tsc --noEmit -p tsconfig.json`                              | Type-check backend source, unit specs, and e2e specs                                                         |
+| `npm run openapi:check`                                          | Verify the committed OpenAPI snapshot                                                                        |
+| `npm run check:versions`                                         | Verify documentation and package version consistency                                                         |
+| `npm run check:dockerignore`                                     | Verify the Docker build context that `.dockerignore` defines                                                 |
+| `cd dashboard && npm run lint`                                   | Run dashboard ESLint                                                                                         |
+| `cd dashboard && npm run typecheck`                              | Type-check dashboard test files                                                                              |
+| `cd dashboard && npm run test:unit`                              | Run dashboard pure utility/unit tests                                                                        |
+| `cd dashboard && npm run test:cov`                               | Measure dashboard unit-test coverage (on demand, no enforced floor)                                          |
+| `cd dashboard && npm run i18n:check`                             | Verify dashboard locale key parity                                                                           |
+| `cd dashboard && npm run build`                                  | Type-check and build the dashboard                                                                           |
+| `cd sdk/javascript && npm test && npm run typecheck`             | Type-check and unit-test the JavaScript SDK                                                                  |
+| `cd sdk/javascript && npm run build && npm run smoke`            | Build the JavaScript SDK, then smoke-load both builds and send requests through each client                  |
+| `cd sdk/python && pytest`                                        | Run the Python SDK tests                                                                                     |
+| `cd sdk/php && ./vendor/bin/phpunit`                             | Run the PHP SDK tests                                                                                        |
+| `cd sdk/java && mvn -B verify`                                   | Run the Java SDK tests                                                                                       |
+| `cd sdk/go && gofmt -l . && go vet ./... && go test -race ./...` | List unformatted files, vet, and race-test the Go SDK                                                        |
+
+## 9.3 Backend Unit Tests
+
+Backend unit tests live next to the source files they cover:
+
+```text
+src/
+├── common/
+│   ├── security/
+│   │   ├── ssrf-guard.ts
+│   │   └── ssrf-guard.spec.ts
+│   └── storage/
+│       ├── storage.service.ts
+│       └── storage.service.spec.ts
+├── engine/
+│   ├── adapters/
+│   │   ├── baileys.adapter.ts
+│   │   └── baileys.adapter.spec.ts
+│   └── identity/
+│       ├── wa-id.ts
+│       └── wa-id.spec.ts
+└── modules/
+    ├── session/
+    │   ├── session.service.ts
+    │   └── session.service.spec.ts
+    └── webhook/
+        ├── webhook.service.ts
+        └── webhook.service.spec.ts
+```
+
+### What Unit Tests Should Cover
+
+- Service behavior, validation, and error mapping.
+- Engine adapter mapping at the boundary, especially neutral WhatsApp IDs and delivery statuses.
+- Security helpers such as SSRF checks, path containment, trusted proxy IP resolution, and secret-file handling.
+- Database migrations for SQLite and PostgreSQL where SQL differs.
+- Plugin hooks, plugin loading, and capability wrappers.
+- Race-prone behavior such as reconnect handling, ack reconciliation, and concurrent reaction updates.
+
+### Unit Test Pattern
+
+Use Nest's testing module when dependency injection behavior matters. For pure functions and small helpers,
+prefer direct imports with focused assertions.
+
+```typescript
+describe('resolveReconnectConfig', () => {
+  it('clamps invalid reconnect settings to safe defaults', () => {
+    expect(
+      resolveReconnectConfig({
+        maxReconnectAttempts: 'not-a-number',
+        reconnectBaseDelay: -1,
+      }),
+      // non-numeric attempts → the default: unlimited retries (backoff parks at the 5-minute cap);
+      // negative baseDelay → clamped up to the 1s minimum
+    ).toEqual({ maxAttempts: Number.POSITIVE_INFINITY, baseDelay: 1000 });
+  });
+});
+```
+
+## 9.4 E2E Smoke Tests
+
+E2E smoke tests live in `test/` and use `test/jest-e2e.json`.
+
+> **They run one at a time (`maxWorkers: 1`), and that is a correctness requirement, not a
+> performance preference.** Each suite boots a real application, and not every piece of application
+> state is redirected to a per-worker location. The plugin registry once had no environment
+> lever, so every worker's plugin loader read-modify-wrote the same
+> `data/plugins/registry.json`. `PLUGIN_STATE_DIR` now redirects it and each suite takes its own state
+> roots, so that particular collision is closed. Measured on a single parallel run: 52 writes from 12 processes, 30
+> of them within 500ms of a write by a different process. Individual writes are atomic; the
+> read-modify-write cycle is not.
+>
+> Running them in parallel produced a roughly one-in-ten failure that moved between suites — a 403
+> where a 200 was expected, a 404 where a 403 was, a rate-limit window misbehaving — and never
+> reproduced when a suite ran on its own, which is what made it look like flakiness. Serially it
+> does not occur.
+>
+> Adding a suite is safe. Restoring parallelism has not been retried since those roots landed, so it
+> is untested rather than known-safe.
+>
+> A second requirement has nothing to do with parallelism: each suite's server is put on a **loopback**
+> port while it initialises (`test/setup-e2e.ts`). Left alone, supertest starts a listener per request
+> on the wildcard address and then dials 127.0.0.1, and macOS both permits that bind over a port
+> another process holds on 127.0.0.1 specifically and routes the connection to the more specific
+> holder. An assertion then reads a status from an unrelated program on the host, which is why the lane
+> could fail on a status no route can return. `setup-e2e-env.e2e-spec.ts` holds that contract.
+
+```text
+test/
+├── __mocks__/
+├── engine-real/
+├── fixtures/
+├── helpers/
+├── *.e2e-spec.ts        (one suite per surface)
+├── jest-e2e.json
+├── setup-e2e.ts
+└── teardown-e2e.ts
+```
+
+`test/setup-e2e.ts` configures the app for local test boot before `AppModule` is imported:
+
+- `NODE_ENV=test`
+- SQLite database
+- queue disabled
+- auto-start sessions disabled
+- schema synchronize enabled for test boot
+
+The e2e suite intentionally avoids requiring a live WhatsApp account. It focuses on application boot,
+authentication plumbing, public health endpoints, engine selection paths, and dashboard static serving behavior.
+
+## 9.5 Coverage Policy
+
+Coverage thresholds are defined in `package.json` under the Jest configuration. Treat that file as the
+authoritative gate. Current policy:
+
+| Scope                       | Branches | Functions | Lines | Statements |
+| --------------------------- | -------- | --------- | ----- | ---------- |
+| Global                      | 66%      | 80%       | 77%   | 77%        |
+| `src/common/cache/`         | 72%      | 76%       | 95%   | 91%        |
+| `src/common/security/`      | 87%      | 95%       | 93%   | 92%        |
+| `src/common/services/`      | 92%      | 93%       | 94%   | 94%        |
+| `src/common/storage/`       | 83%      | 89%       | 91%   | 88%        |
+| `src/common/utils/`         | 90%      | 92%       | 93%   | 93%        |
+| `src/config/`               | 88%      | 94%       | 94%   | 93%        |
+| `src/core/agent-tools/`     | 88%      | 86%       | 91%   | 91%        |
+| `src/core/hooks/`           | 86%      | 88%       | 91%   | 90%        |
+| `src/core/plugins/`         | 80%      | 81%       | 85%   | 84%        |
+| `src/database/`             | 73%      | 81%       | 82%   | 80%        |
+| `src/engine/adapters/`      | 84%      | 89%       | 91%   | 90%        |
+| `src/engine/identity/`      | 88%      | 93%       | 95%   | 93%        |
+| `src/modules/audit/`        | 75%      | 63%       | 85%   | 85%        |
+| `src/modules/auth/`         | 83%      | 92%       | 92%   | 91%        |
+| `src/modules/automation/`   | 78%      | 93%       | 93%   | 92%        |
+| `src/modules/call/`         | 66%      | 77%       | 95%   | 95%        |
+| `src/modules/catalog/`      | 80%      | 90%       | 95%   | 95%        |
+| `src/modules/channel/`      | 74%      | 62%       | 85%   | 85%        |
+| `src/modules/chat-media/`   | 84%      | 87%       | 95%   | 93%        |
+| `src/modules/contact/`      | 83%      | 92%       | 93%   | 93%        |
+| `src/modules/docker/`       | 87%      | 93%       | 94%   | 93%        |
+| `src/modules/events/`       | 84%      | 94%       | 93%   | 93%        |
+| `src/modules/group/`        | 80%      | 70%       | 86%   | 86%        |
+| `src/modules/health/`       | 77%      | 81%       | 95%   | 95%        |
+| `src/modules/infra/`        | 84%      | 83%       | 92%   | 91%        |
+| `src/modules/integration/`  | 80%      | 87%       | 91%   | 90%        |
+| `src/modules/label/`        | 78%      | 59%       | 80%   | 81%        |
+| `src/modules/mcp/`          | 62%      | 80%       | 78%   | 78%        |
+| `src/modules/media/`        | 82%      | 92%       | 93%   | 92%        |
+| `src/modules/message/`      | 82%      | 80%       | 90%   | 90%        |
+| `src/modules/metrics/`      | 82%      | 92%       | 91%   | 92%        |
+| `src/modules/plugins/`      | 76%      | 82%       | 86%   | 86%        |
+| `src/modules/profile/`      | 68%      | 85%       | 95%   | 95%        |
+| `src/modules/queue/`        | 76%      | 88%       | 95%   | 95%        |
+| `src/modules/search/`       | 77%      | 90%       | 91%   | 89%        |
+| `src/modules/session/`      | 84%      | 89%       | 93%   | 91%        |
+| `src/modules/settings/`     | 62%      | 50%       | 94%   | 95%        |
+| `src/modules/stats/`        | 78%      | 84%       | 92%   | 92%        |
+| `src/modules/status-store/` | 84%      | 80%       | 93%   | 92%        |
+| `src/modules/status/`       | 75%      | 61%       | 86%   | 86%        |
+| `src/modules/template/`     | 77%      | 88%       | 95%   | 94%        |
+| `src/modules/takeover/`     | 76%      | 78%       | 93%   | 93%        |
+| `src/modules/webhook/`      | 79%      | 91%       | 92%   | 91%        |
+
+When raising a floor, set it about five points below that scope's measured coverage, so it catches
+a real regression without failing on ordinary churn, and then check that gap in UNITS rather than
+percent. Five points is denominator-blind: on a scope with 14 functions it buys nothing, and a floor
+that admits zero growth has stopped measuring coverage and started blocking ordinary change. Every
+floor here leaves room for at least two newly uncovered units of its metric, which is the one case
+where a floor may be lowered: not because coverage fell, but because the margin was unattainable. When coverage legitimately shifts — a refactor
+relocating covered logic, a lane split changing which specs a lane runs — reset the floor to the
+newly measured coverage instead. Floors exist to catch regressions, not to force coverage.
+
+Two behaviours of Jest's threshold matching are worth knowing before adding a scope:
+
+- A file counts toward **every** path key it matches — there is no most-specific-wins. Keys must
+  therefore be disjoint, or a nested scope's files are graded twice and the parent floor becomes a
+  restatement of the child.
+- A file matched by any path key is **removed from the global group**. Global therefore grades only
+  the scopes with no floor of their own, which is why its numbers are lower than the repository-wide
+  figure and why adding a scope changes what Global means.
+
+The stricter scoped gates protect security-sensitive code and high-risk boundary layers. When adding
+security, engine-adapter, or integration-fabric behavior, add focused regression tests instead of relying
+on broad integration coverage.
+
+The dashboard is outside these floors. `npm --prefix dashboard run test:cov` measures its coverage on
+demand (Node's built-in coverage, test files and `src/test-helpers/` excluded); no CI floor is enforced.
+
+## 9.6 CI Checks
+
+Main CI is defined in `.github/workflows/ci.yml`. A new push to a pull request cancels that pull
+request's superseded run; push runs on `main` are never cancelled or queued behind one another.
+
+| Job             | Checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `lint`          | backend ESLint, full-program TypeScript check, formatting, version consistency, .dockerignore context, OpenAPI snapshot, SDK routes and webhook events against the contract, contract coverage per SDK, SDK docs against the shipped client surface, client wire shapes (`check:contract-shapes` — the JavaScript SDK's, dashboard's, Python's, Go's and Java's hand-written types against the OpenAPI schemas; the PHP client returns untyped arrays and has no types layer to gate)                                                                                                                                                                                    |
+| `audit`         | dependency security audit of all three npm trees (root, `dashboard/` and `sdk/javascript/`); when npm's audit endpoint cannot answer, the root audit skips with a warning annotation here while the dashboard and SDK audits, a plain `npm audit`, fail closed, so the job still goes red until a re-run; the release gate and the weekly scan fail (`CHECK_AUDIT_REQUIRED=1`)                                                                                                                                                                                                                                                                                           |
+| `test`          | backend coverage run, repo-file drift gates (`test:docs`), script unit tests (node:test), e2e smoke tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `test-postgres` | real PostgreSQL 16 service, backend build, migration smoke, and the PostgreSQL specs (FTS provider, boot-migration lock, message list ordering, entity synchronize, UTC pin, webhook recovery, send idempotency keys, replace-all import, restore without optional tables, message selection restore, session content lifetimes, two-node session delete, failed takeover start, lid mapping ownership, chat-media retention marker, message edit re-emission, foreign-chat receipts, API-send sender, own-sender search, lid mapping report-source migration, merged-ack status, both adapters' lid mapping writes, schema-scoped backup of a schema another role owns) |
+| `dashboard`     | dashboard install, lint, formatting, type-check, i18n parity, build, unit tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `scripts-smoke` | shellcheck on `docker-entrypoint.sh` and every `scripts/*.sh`, plus the backup/restore smoke test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `chart`         | helm lint, helm template with default and fully-toggled values, kubeconform on both renders, the rendered-behaviour check, actionlint on the workflows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `build`         | backend build after lint/audit/test/dashboard/scripts-smoke/chart jobs pass, then `test:engine-real`, which feeds proto-built inbound messages and the outbound recipient preparation through the real Baileys library and the compiled adapter (every jest lane stubs Baileys)                                                                                                                                                                                                                                                                                                                                                                                          |
+| `docker`        | multi-arch build on pushes and pull requests, then against the built image `scripts/smoke-test-non-root.sh` (the entrypoint's root→openwa drop) and `scripts/smoke-test-engine-libs.sh` (imports Baileys and launches the browser, on the runner's native architecture only; the release workflow also runs it for linux/arm64 under emulation, where only the browser binary is executed). Publishes only on push: `:<sha>` from the build, then the branch tag (`:main`) once the smokes pass and only while the commit is still the branch head                                                                                                                       |
+
+SDK CI is defined in `.github/workflows/sdk-ci.yml` and is path-filtered to SDK sources plus server
+contract surfaces that SDKs mirror (`src/**/dto/**`, `src/**/*.controller.ts`, `src/**/*.service.ts`, and
+`src/engine/interfaces/whatsapp-engine.interface.ts`), so any backend controller or service change also
+re-runs the SDK suites. It runs:
+
+- JavaScript SDK type-check, build, and dual CJS/ESM smoke test (module loading plus requests through each build's client) on Node 18 (the `engines` floor), 20 and 22, with unit tests on 22 only (vitest 5 needs Node 22.12+).
+- Python SDK type check with `mypy` and tests with `pytest` on Python 3.9 and 3.12.
+- PHP SDK tests with PHPUnit.
+- Java SDK tests with Maven.
+- Go SDK formatting, `go vet`, and race-enabled tests at the declared Go floor.
+
+Release tags run `.github/workflows/release.yml`, which mirrors the CI gate rather than running a
+lighter one: the same lint job (including all four SDK contract checks), the same test, PostgreSQL,
+dashboard, shell-script and chart jobs. It additionally verifies the tag matches `package.json`, and
+publishes the GitHub Release only after the Docker image has built and pushed successfully. Nothing in
+it packages or publishes the Helm chart — operators install that from the tagged ref, so the tag is the
+last gate the chart passes.
+
+## 9.7 Testing Guidelines
+
+### Add Tests Near the Risk
+
+For narrow changes, add or update the nearest `*.spec.ts`. For shared behavior, test both the helper and
+one representative consumer. For adapter changes, test the adapter boundary shape rather than the external
+WhatsApp library itself.
+
+### Mock External Systems
+
+Do not require live WhatsApp, Redis, S3, Docker, or internet access for the default test suite. Use mocks,
+temporary directories, or local in-memory objects. Keep live-service tests opt-in and document their
+environment variables separately.
+
+### Preserve Engine-Neutral Contracts
+
+Tests that touch WhatsApp IDs should assert the neutral dialect used by application code:
+
+- `<phone>@c.us`
+- `<id>@g.us`
+- `<lid>@lid`
+- `status@broadcast`, `<id>@newsletter`, `<id>@broadcast`
+
+Application-level tests should not assert raw Baileys `@s.whatsapp.net` IDs or whatsapp-web.js internals.
+
+### Test Failure Paths
+
+For services that dispatch asynchronously, include tests for lookup failure, delivery failure, retries,
+and swallowed fire-and-forget errors. A callback used with `void` should either catch internally or be
+covered by a test proving it cannot leak an unhandled rejection.
+
+### Keep E2E Fast
+
+E2E tests should stay smoke-level unless a change specifically needs a full app boot. Prefer unit tests
+for business logic and e2e tests for wiring, guards, global pipes, app boot, and route-level behavior.
+
+## 9.8 Manual Smoke Checks
+
+Use these checks when changing Docker, Chromium, dashboard serving, or session startup behavior.
+
+```bash
+npm run build:all
+node dist/main
+```
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+curl -f http://localhost:2785/api/health/ready
+```
+
+For production-compose changes:
+
+```bash
+docker compose up -d --build
+docker compose logs -f openwa-api
+```
+
+Live WhatsApp checks require an operator-owned account and should not be part of CI:
+
+1. Create a session.
+2. Start the session.
+3. Scan QR or request a pairing code.
+4. Confirm session reaches `ready`.
+5. Send a text message to a test chat.
+6. Confirm message history, webhook delivery, and WebSocket events.
+
+## 9.9 Known Gaps
+
+- No default CI job exercises a real WhatsApp connection. The engine libraries themselves are exercised
+  hermetically: `test:engine-real` runs the real Baileys helpers over the compiled adapter, and the image
+  smoke imports Baileys and launches the browser, neither of which needs WhatsApp to be reachable.
+- The default `test` job uses SQLite; PostgreSQL 16 is only exercised by the dedicated `test-postgres` job.
+- No default CI job exercises S3/MinIO or Docker socket proxy integration. (Redis is no longer a gap: the
+  `test` job starts a `redis:7-alpine` service container so the queue-on and throttler-redis e2e suites have a
+  broker. Those suites skip themselves when no Redis is reachable, so they stay green on a machine without one;
+  under GitHub Actions they fail instead, so a workflow that loses its Redis service cannot report them green.)
+- Performance testing is not automated.
+- Dashboard browser/visual UI tests are not currently automated; dashboard pure utility tests run via `npm --prefix dashboard run test:unit`.
+
+These gaps are intentional because the project prioritizes deterministic tests: no job needs an
+operator-owned WhatsApp account, cloud credentials, or a Docker socket, and neither service container CI
+starts is required locally — `npm test` and `npm run test:e2e` stay on SQLite with the queue disabled. Add
+opt-in integration jobs only when they are isolated, documented, and do not make normal contributor
+workflows brittle.
+
+---
+
+<div align="center">
+
+[← 08 - Development Guidelines](./08-development-guidelines.md) · [Documentation Index](./README.md) · [Next: 10 - DevOps & Infrastructure →](./10-devops-infrastructure.md)
+
+</div>

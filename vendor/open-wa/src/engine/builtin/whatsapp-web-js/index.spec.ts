@@ -1,0 +1,139 @@
+jest.mock('../../adapters/whatsapp-web-js.adapter', () => ({
+  WhatsAppWebJsAdapter: jest.fn().mockImplementation((config: unknown) => ({ config })),
+}));
+
+import { WhatsAppWebJsPlugin } from './index';
+import { WhatsAppWebJsAdapter } from '../../adapters/whatsapp-web-js.adapter';
+import { PluginContext } from '../../../core/plugins';
+import type { LidMappingStore } from '../../identity/lid-mapping-store.service';
+
+describe('WhatsAppWebJsPlugin.createEngine (opaque config)', () => {
+  beforeEach(() => {
+    (WhatsAppWebJsAdapter as unknown as jest.Mock).mockClear();
+  });
+
+  function withContext(plugin: WhatsAppWebJsPlugin, config: Record<string, unknown>): void {
+    // onLoad sets this.context synchronously; the returned promise can be ignored here.
+    void plugin.onLoad({ config, logger: { log: jest.fn() } } as unknown as PluginContext);
+  }
+
+  it('reads browser config from context.config (the opaque engine blob), not per-call', () => {
+    const plugin = new WhatsAppWebJsPlugin();
+    withContext(plugin, {
+      sessionDataPath: '/data/sessions',
+      puppeteer: {
+        headless: false,
+        args: ['--single-process'],
+        executablePath: '/usr/bin/chromium',
+        protocolTimeoutMs: 300_000,
+      },
+    });
+
+    plugin.createEngine({ sessionId: 'sess-1', proxyUrl: 'http://p', proxyType: 'http' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'sess-1',
+        sessionDataPath: '/data/sessions',
+        // protocolTimeoutMs is asserted with a value, not just carried: an object with the key
+        // present-but-undefined equals one without it, so a dropped hop would pass unnoticed.
+        puppeteer: {
+          headless: false,
+          args: ['--single-process'],
+          executablePath: '/usr/bin/chromium',
+          protocolTimeoutMs: 300_000,
+        },
+        proxy: { url: 'http://p', type: 'http' },
+      }),
+    );
+  });
+
+  it('threads the shared lid mapping store to the adapter', () => {
+    const lidMappingStore = {} as LidMappingStore;
+
+    new WhatsAppWebJsPlugin(undefined, lidMappingStore).createEngine({ sessionId: 's' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(expect.objectContaining({ lidMappingStore }));
+  });
+
+  it('falls back to safe defaults when context has no config, leaving the flag list to the adapter', () => {
+    const plugin = new WhatsAppWebJsPlugin();
+
+    plugin.createEngine({ sessionId: 'sess-2' });
+
+    const [config] = (WhatsAppWebJsAdapter as unknown as jest.Mock).mock.calls[0] as [
+      { sessionId: string; sessionDataPath: string; puppeteer: Record<string, unknown> },
+    ];
+    expect(config.sessionId).toBe('sess-2');
+    expect(config.sessionDataPath).toBe('./data/sessions');
+    expect(config.puppeteer.headless).toBe(true);
+    expect(config.puppeteer.args).toBeUndefined();
+  });
+
+  it('does not pin a flag list when a persisted puppeteer override carries no args', () => {
+    const plugin = new WhatsAppWebJsPlugin();
+    withContext(plugin, { puppeteer: { headless: false } });
+
+    plugin.createEngine({ sessionId: 'sess-4' });
+
+    const [config] = (WhatsAppWebJsAdapter as unknown as jest.Mock).mock.calls[0] as [
+      { puppeteer: Record<string, unknown> },
+    ];
+    expect(config.puppeteer.headless).toBe(false);
+    expect(config.puppeteer.args).toBeUndefined();
+  });
+
+  it('Uses the constructor-supplied engine config when onLoad never ran (enable-failure path)', () => {
+    // EngineFactory now also passes the engine blob at construction. If enablePlugin fails before
+    // onLoad runs, this.context is never set — the ctor blob must still supply operator config
+    // instead of silently degrading to defaults (which dropped sessionDataPath/executablePath).
+    const plugin = new WhatsAppWebJsPlugin({
+      sessionDataPath: '/op/sessions',
+      puppeteer: { headless: false, args: ['--flag'], executablePath: '/usr/bin/chromium' },
+    });
+
+    plugin.createEngine({ sessionId: 'sess-3' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'sess-3',
+        sessionDataPath: '/op/sessions',
+        puppeteer: { headless: false, args: ['--flag'], executablePath: '/usr/bin/chromium' },
+      }),
+    );
+  });
+
+  it('Prefers context.config over the constructor blob on the healthy enable path', () => {
+    const plugin = new WhatsAppWebJsPlugin({ sessionDataPath: '/ctor/path' });
+    withContext(plugin, { sessionDataPath: '/context/path' });
+
+    plugin.createEngine({ sessionId: 'sess-4' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'sess-4', sessionDataPath: '/context/path' }),
+    );
+  });
+
+  // The factory hardens and purges credential dirs under its own base, so the engine must write there
+  // even when a persisted plugin-config override names another directory.
+  it('Prefers the per-call sessionDataPath over a context.config override', () => {
+    const plugin = new WhatsAppWebJsPlugin();
+    withContext(plugin, { sessionDataPath: '/override/sessions' });
+
+    plugin.createEngine({ sessionId: 'sess-5', sessionDataPath: '/factory/sessions' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'sess-5', sessionDataPath: '/factory/sessions' }),
+    );
+  });
+});
+
+describe('WhatsAppWebJsPlugin.getFeatures', () => {
+  it('does not advertise catalog — the wwjs adapter 501s every catalog method', () => {
+    const features = new WhatsAppWebJsPlugin().getFeatures();
+    expect(features).not.toContain('catalog');
+    expect(features).toEqual(
+      expect.arrayContaining(['text-messages', 'media-messages', 'group-management', 'labels', 'channels']),
+    );
+  });
+});

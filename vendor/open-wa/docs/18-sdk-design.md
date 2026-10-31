@@ -1,0 +1,1192 @@
+# 18 - SDK Design
+
+> This document describes SDK 0.8.0. `setMemberLabel` (`set_member_label` in Python, `SetMemberLabel` in Go), the search `match` option, and the `thumbnailUrl` and `thumbnailBase64` fields of `customLinkPreview` require OpenWA 0.27.0 or later. Send idempotency, webhook failure redrive, message-window filters, poll choices, last-message types, and the `event.response` webhook event name require OpenWA 0.25.0 or later.
+
+## 18.1 Overview
+
+OpenWA ships five official, hand-written client libraries for the REST API. They are not generated from an OpenAPI spec — each is written directly against the real API surface (paths, request DTOs, response shapes) and **unit-tested with a mocked HTTP transport that asserts on the exact request path, method, and body**, so drift in what an SDK _sends_ is caught at test time rather than in production. That mechanism says nothing about what an SDK expects _back_; see §18.6 for how response shapes are held to the contract.
+
+| Language                | Package                                                                                | Install                              | Notes                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
+| JavaScript / TypeScript | [`@rmyndharis/openwa`](https://www.npmjs.com/package/@rmyndharis/openwa)               | `npm install @rmyndharis/openwa`     | Dual ESM + CJS, bundled `.d.ts` types, Node 18+                                  |
+| Python                  | [`rmyndharis-openwa`](https://pypi.org/project/rmyndharis-openwa/)                     | `pip install rmyndharis-openwa`      | Synchronous (httpx), PEP 561 typed, Python 3.9+                                  |
+| PHP                     | [`rmyndharis/openwa`](https://packagist.org/packages/rmyndharis/openwa)                | `composer require rmyndharis/openwa` | Synchronous (Guzzle 7.9+ or 8), PSR-4, PHP 8.1+                                  |
+| Java                    | [`com.rmyndharis:openwa`](https://central.sonatype.com/artifact/com.rmyndharis/openwa) | Maven Central                        | Sync, `java.net.http`. See [`sdk/java/README.md`](../sdk/java/README.md).        |
+| Go                      | [`github.com/rmyndharis/OpenWA/sdk/go`](../sdk/go)                                     | `go get`                             | Stdlib-only, no third-party deps. See [`sdk/go/README.md`](../sdk/go/README.md). |
+
+> The import names differ from the dist names where the ecosystem requires it. Python installs `rmyndharis-openwa` but imports `openwa`; the client class is `OpenWAClient` in JS/Python and `OpenWA\Client` in PHP.
+
+### Design Principles
+
+- **One client, fluent resources.** A single client object (`OpenWAClient` / `OpenWA\Client`) exposes every resource as a property — `client.messages.sendText(...)`, `client.sessions.start(...)`. All five SDKs expose the **same** resource surface; only the language idioms differ (camelCase methods + objects in JS/PHP/Java, snake_case methods + dicts in Python, exported fields + structs in Go).
+- **It is a request/response client, not an event SDK.** There is no WebSocket, EventEmitter, or `client.on(...)`. To receive inbound messages and acks, register a webhook (the `webhooks` resource) and host your own receiver, checking `X-OpenWA-Signature` with the SDK helper (`verifyWebhookSignature` in JavaScript, `verify_webhook_signature` in Python, `VerifyWebhookSignature` in Go, `WebhookSignature.verify` in Java, `WebhookSignature::verify` in PHP), or connect to the real-time Socket.IO API directly (see [API Specification §6.5](./06-api-specification.md)).
+- **Typed errors.** Non-2xx responses raise/throw a typed error mapped from the HTTP status (`401/403/404/409/429/501/503`), plus a timeout error — all `instanceof`/`catch`-checkable. See each language's Error Handling subsection. A Baileys throttle `503` on a send or a single write means nothing was sent or applied, and so does a send's `503` for a failed recipient lookup, a connection that closed before the message was written, or a media or preview image URL that could not be fetched through the session's proxy; each frees a keyed send's `Idempotency-Key`. A group settings update with several fields applies them one at a time, so a `503` on a later field leaves the earlier ones applied and lists them after `already applied:` in its message: re-read the settings before retrying, or send one field per request.
+- **Injectable transport.** The HTTP layer is replaceable (`fetch` in JS, an `httpx` transport in Python, a Guzzle client in PHP) — the extension point for retry/observability middleware and for testing without the network.
+- **Safe by default.** Redirects are never followed (so the API key is never re-sent to a redirect target), the auth/JSON headers always take precedence over caller-supplied defaults, path segments are percent-encoded, a base-URL path prefix (e.g. behind a reverse proxy at `/v1`) is preserved, and there is a default 30s per-request timeout. **No automatic retries by default** — in JS, Python, PHP, and Java wrap calls in your own backoff if you need them (especially for `429`); the Go SDK additionally ships an opt-in `WithRetry(RetryPolicy)` that never replays a `POST` or `PATCH` after a network error and limits their retries to `429`/`503`.
+
+### Resource Coverage
+
+All five SDKs expose the same fluent surface:
+
+| Resource    | Methods                                                                                                                                                                                                                                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sessions`  | list, get, getConfig, updateConfig, getProxy, updateProxy, create, delete, start, stop, logout, forceKill, getQrCode, requestPairingCode, setOnlinePresence, stats                                                                                                                                                       |
+| `messages`  | list, sendText, sendImage/Video/Audio/Document/Sticker, sendLocation, sendContact, sendTemplate, sendPoll, reply, forward, clickButton, react, delete, editMessage, history, reactions, media, pin, unpin, star, votePoll, sendBulk, batchStatus, cancelBatch                                                            |
+| `contacts`  | list, get, check, profilePicture, profilePictures, phone, upsert, delete, block, unblock, listBlocked                                                                                                                                                                                                                    |
+| `groups`    | list, get, create, joinInfo, joinGroup, add/remove/promote/demoteParticipants, setSubject, setDescription, setMemberLabel, getGroupSettings, updateGroupSettings, leave, getPicture, setPicture, deletePicture, inviteCode, revokeInviteCode, getMembershipRequests, approveMembershipRequests, rejectMembershipRequests |
+| `webhooks`  | list, listAll, deliveryFailures, redriveDeliveryFailures, get, create, update, delete, test                                                                                                                                                                                                                              |
+| `chats`     | list, subscribePresence, getPresence, markRead, markUnread, archive, pin, mute, clearMessages, delete, sendState                                                                                                                                                                                                         |
+| `labels`    | list, get, chats, upsert, delete, forChat, addToChat, removeFromChat _(WhatsApp Business)_                                                                                                                                                                                                                               |
+| `channels`  | list, get, messages, create, delete, mute, subscribe, unsubscribe, demoteAdmin, transferOwnership _(Newsletters)_                                                                                                                                                                                                        |
+| `catalog`   | info, products, product, sendProduct _(WhatsApp Business)_                                                                                                                                                                                                                                                               |
+| `status`    | list, fromContact, media, sendText, sendImage, sendVideo, sendVoice, delete _(Stories)_                                                                                                                                                                                                                                  |
+| `search`    | search                                                                                                                                                                                                                                                                                                                   |
+| `templates` | list, get, create, update, delete                                                                                                                                                                                                                                                                                        |
+| `profile`   | setProfileName, setProfileStatus, setProfilePicture, deleteProfilePicture                                                                                                                                                                                                                                                |
+| `calls`     | rejectCall, createLink                                                                                                                                                                                                                                                                                                   |
+| `media`     | conversionStatus, convertVoice _(OPERATOR)_, convertVideo _(OPERATOR)_                                                                                                                                                                                                                                                   |
+| `health`    | check, live, ready                                                                                                                                                                                                                                                                                                       |
+
+The twelve single-recipient send methods (text, image, video, audio, document, sticker, location, contact, template, poll, reply and forward) take an optional per-call idempotency key: a trailing argument in JavaScript, PHP and Java, `idempotency_key=` in Python and `openwa.WithIdempotencyKey(ctx, key)` in Go. A retry of the same logical send reuses its key; see each SDK's README.
+
+> The SDKs cover the user-facing resources above and stop there. The administrative and operational surfaces are deliberately left out — `auth/api-keys`, `audit`, `settings`, `stats`, `automation`, `infra`, `plugins` and the `integration` management routes are predominantly `ADMIN`-gated; `metrics` is a `@Public()` Prometheus scrape gated by `METRICS_TOKEN` rather than by role; `mcp` is a Streamable-HTTP transport mounted straight onto the Express adapter; and `ingress` is the `@Public()` receiver that integration providers post into. `docker` has no HTTP surface at all — it is an internal service module. Methods that require an `OPERATOR`-level key are annotated **OPERATOR** in the per-language tables below.
+
+## 18.2 TypeScript / JavaScript SDK
+
+The official JavaScript/TypeScript SDK is published as **`@rmyndharis/openwa`**. It is a pure promise-based HTTP client: a single `OpenWAClient` exposes every API resource as a typed property. There is no event model — the SDK does not open WebSockets, emit events, or expose `client.on(...)`. To receive inbound messages and acks, configure a webhook (see the `webhooks` resource) and host your own HTTP receiver, checking each delivery with `await verifyWebhookSignature(rawBody, signature, secret)` and typing its parsed body as `WebhookDelivery`.
+
+The package ships **dual CJS + ESM** with bundled `.d.ts` types, so it is consumable from both `require()` and `import`.
+
+### Installation
+
+```bash
+npm install @rmyndharis/openwa
+# or
+yarn add @rmyndharis/openwa
+# or
+pnpm add @rmyndharis/openwa
+```
+
+> **Node 18+ required.** The transport uses the global `fetch` (and `AbortController`), both built into Node 18 and later. To run on an older runtime, pass your own `fetch` implementation via the client constructor (see [Client Configuration](#client-configuration)).
+
+### Quick Start
+
+```typescript
+import { OpenWAClient } from '@rmyndharis/openwa';
+
+const client = new OpenWAClient({
+  baseUrl: 'http://localhost:2785',
+  apiKey: 'owa_k1_…',
+});
+
+async function main() {
+  // Sessions are addressed by the UUID that create() returns, not by name. Create a session once;
+  // afterwards, find its id with client.sessions.list({ name: 'my-session' }).
+  const session = await client.sessions.create({ name: 'my-session' });
+  await client.sessions.start(session.id);
+
+  // Link the account before sending: scan sessions.getQrCode (or use sessions.requestPairingCode for a number with no linked session),
+  // then wait for status 'ready'. An unlinked session answers the send with 409.
+
+  // Send a text message.
+  const result = await client.messages.sendText(session.id, {
+    chatId: '628123456789@c.us',
+    text: 'Hello from the OpenWA SDK!',
+  });
+
+  console.log(result.messageId); // -> the WhatsApp message id
+}
+
+main();
+```
+
+`sendText` resolves to a `MessageResponse` (`{ messageId: string; timestamp: number }`). `timestamp` is the Unix epoch value returned by the API — **seconds**, passed through unchanged.
+
+CommonJS consumers use the same API via `require`:
+
+```javascript
+const { OpenWAClient } = require('@rmyndharis/openwa');
+```
+
+### Client Configuration
+
+The constructor takes a single `OpenWAClientOptions` object. `baseUrl` and `apiKey` are required (the constructor throws synchronously if either is missing).
+
+| Option           | Type                     | Required | Default            | Description                                                                                                                                                                                                                     |
+| ---------------- | ------------------------ | -------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`        | `string`                 | yes      | —                  | Base URL of the OpenWA API, e.g. `http://localhost:2785`. A trailing slash is trimmed; a path prefix (e.g. `https://host/v1`) is preserved.                                                                                     |
+| `apiKey`         | `string`                 | yes      | —                  | API key sent as the `X-API-Key` header on every request. Surrounding whitespace is trimmed; a control or non-Latin-1 character is refused when the client is built.                                                             |
+| `timeoutMs`      | `number`                 | no       | `30000`            | Per-request timeout in milliseconds; `0` or `Infinity` turns it off, and a value that is not a non-negative number throws a `TypeError`. Overridable per call via `RequestOptions.timeoutMs` on the raw `request()` method.     |
+| `defaultHeaders` | `Record<string, string>` | no       | `{}`               | Headers merged onto every request. The `Content-Type: application/json` and `X-API-Key` headers always take precedence. A value with a control or non-Latin-1 character is refused when the client is built, naming the header. |
+| `fetch`          | `FetchLike`              | no       | `globalThis.fetch` | Injectable transport (the WHATWG `fetch` signature). Use this to wrap requests with retry/observability middleware, or to supply a `fetch` on runtimes that lack a global one.                                                  |
+
+### Resources & Methods
+
+All resources are accessed as properties on the client (`client.<resource>.<method>`). Every method returns a `Promise`. Methods marked **OPERATOR** require an `OPERATOR`-level API key (an `ADMIN` key satisfies it); a `VIEWER` key receives a `403` (`OpenWAForbiddenError`). Some methods are supported by one engine only and answer `501` on the other (a row says so where it matters; section [29.6 of the engine capability matrix](./29-engine-capability-matrix.md#296-the-27-not-available-cells-in-detail) lists them all).
+
+The top-level client also exposes:
+
+| Method    | Signature                    | Description                                                                                                                                                                       |
+| --------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth`    | `client.auth()`              | Validate the configured API key and resolve its role and the running engine (`{ valid, role?, engineType?, scoped? }`); a key restricted to selected chats is refused with `403`. |
+| `request` | `client.request<T>(options)` | Raw escape hatch — issue an arbitrary request against the API.                                                                                                                    |
+
+#### `sessions`
+
+| Method               | Signature                      | Description                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`               | `list(query?)`                 | List all sessions (scoped to the key's `allowedSessions`). The optional query takes `limit`, `offset` and `name` (an exact, case-sensitive match; no match returns an empty list).                                                                                                                                                                              |
+| `getConfig`          | `getConfig(id)`                | Read a session's engine configuration.                                                                                                                                                                                                                                                                                                                          |
+| `updateConfig`       | `updateConfig(id, body)`       | Update a session's configuration, in any state, without a restart or re-link; `autoRejectCalls` applies immediately, the reconnect settings on the next start. **OPERATOR**                                                                                                                                                                                     |
+| `getProxy`           | `getProxy(id)`                 | Read a session's masked proxy configuration (credentials never returned).                                                                                                                                                                                                                                                                                       |
+| `updateProxy`        | `updateProxy(id, body)`        | Update per-session proxy settings; changes apply on the next start, not to a running engine. Send `proxyUrl: null` to clear. **ADMIN**                                                                                                                                                                                                                          |
+| `get`                | `get(id)`                      | Get a single session by id.                                                                                                                                                                                                                                                                                                                                     |
+| `create`             | `create(body)`                 | Create a new session (`body.name` required). **OPERATOR**; setting `proxyUrl` requires **ADMIN**                                                                                                                                                                                                                                                                |
+| `delete`             | `delete(id)`                   | Delete a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                                  |
+| `start`              | `start(id)`                    | Start a session and initialize the WhatsApp connection. **OPERATOR**                                                                                                                                                                                                                                                                                            |
+| `stop`               | `stop(id)`                     | Stop a session and disconnect gracefully. **OPERATOR**                                                                                                                                                                                                                                                                                                          |
+| `logout`             | `logout(id)`                   | Attempt an engine-native unlink of this device, then stop the session. A `200` means the unlink + local cleanup completed (not an independent Linked-Devices observation); a later `start` needs a fresh QR. A `502` (`SESSION_LOGOUT_INCOMPLETE`) stops locally but leaves the operation incomplete; start and retry. Requires a running session. **OPERATOR** |
+| `forceKill`          | `forceKill(id)`                | Force-kill a stuck session (SIGKILL + teardown). A `502` (`SESSION_FORCE_KILL_INCOMPLETE`) stops locally but the engine process may still be running; a retry answers `400`, so restart the node to reap it. **OPERATOR**                                                                                                                                       |
+| `getQrCode`          | `getQrCode(id)`                | Get the current QR code for authentication (live from the engine). **OPERATOR**                                                                                                                                                                                                                                                                                 |
+| `requestPairingCode` | `requestPairingCode(id, body)` | Request an 8-character pairing code for phone-based login. On whatsapp-web.js, not for a number that already has a linked session (WhatsApp can revoke that device; the gateway answers 409 for the stored phone of another of its sessions but cannot see a link made elsewhere); link it by QR instead. **OPERATOR**                                          |
+| `setOnlinePresence`  | `setOnlinePresence(id, body)`  | Set the account's own global presence (appear online or offline). **OPERATOR**                                                                                                                                                                                                                                                                                  |
+| `stats`              | `stats()`                      | Aggregate statistics across the key's sessions.                                                                                                                                                                                                                                                                                                                 |
+
+#### `messages`
+
+| Method         | Signature                                 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`         | `list(sessionId, query?)`                 | List messages. Filters: `type`, `direction`, `chatId`, `from`, `messageId`, `since` (inclusive) and `until` (exclusive) as epoch milliseconds, `orderBy` (`createdAt`, or `timestamp`, which leaves out rows without a message time), `limit`, `offset`, `after` (keyset cursor: the `id` of the last row of the previous page; wins over `offset`) and `inlineMedia` (`false` omits inline media payloads). Returns `{ messages, total, unknownTimestampTotal? }`; `unknownTimestampTotal` counts the rows matching the other filters whose message time is unknown, and is present only with a time bound or `orderBy: 'timestamp'`. |
+| `sendText`     | `sendText(sessionId, { chatId, text })`   | Send a text message (`text` max 4096 chars). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `sendImage`    | `sendImage(sessionId, body)`              | Send an image (`url` or `base64`). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `sendVideo`    | `sendVideo(sessionId, body)`              | Send a video (`url` or `base64`). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `sendAudio`    | `sendAudio(sessionId, body)`              | Send an audio file (`url` or `base64`). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `sendDocument` | `sendDocument(sessionId, body)`           | Send a document (`url` or `base64`; `filename` recommended). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `sendSticker`  | `sendSticker(sessionId, body)`            | Send a sticker (`url` or `base64`). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `sendLocation` | `sendLocation(sessionId, body)`           | Send a location (`{ chatId, latitude, longitude, description? }`). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `sendContact`  | `sendContact(sessionId, body)`            | Send a contact card. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `sendTemplate` | `sendTemplate(sessionId, body)`           | Render and send a stored message template. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `sendPoll`     | `sendPoll(sessionId, body)`               | Send a poll message. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `reply`        | `reply(sessionId, body)`                  | Reply to a specific message. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `forward`      | `forward(sessionId, body)`                | Forward a message to another chat. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `clickButton`  | `clickButton(sessionId, body)`            | Tap a button or list row on a stored WhatsApp Business prompt (Baileys only). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `react`        | `react(sessionId, body)`                  | React to a message (an empty `emoji` removes the reaction). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `delete`       | `delete(sessionId, body)`                 | Delete a message. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `editMessage`  | `editMessage(sessionId, body)`            | Edit the text of a message already sent. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `history`      | `history(sessionId, chatId, query?)`      | Get message history for a chat (read live from WhatsApp).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `reactions`    | `reactions(sessionId, chatId, messageId)` | Get reactions for a specific message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pin`          | `pin(sessionId, body)`                    | Pin a message in its chat. `durationSeconds` must be 86400, 604800 or 2592000; in a group only admins may pin. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `votePoll`     | `votePoll(sessionId, body)`               | Cast a vote on a poll; `options` are the option texts, not ids. Not supported on Baileys (`501`). **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `star`         | `star(sessionId, body)`                   | Star or unstar a message. Best-effort on whatsapp-web.js, which silently ignores a message it will not star. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `unpin`        | `unpin(sessionId, body)`                  | Unpin a pinned message. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `media`        | `media(sessionId, chatId, messageId)`     | Fetch a message's stored media bytes: the archived file when one exists, else the inline copy on the message row. `404` when neither holds bytes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `sendBulk`     | `sendBulk(sessionId, body)`               | Send a batch asynchronously (202 + batch id); poll via `batchStatus`. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `batchStatus`  | `batchStatus(sessionId, batchId)`         | Poll the status/progress of a bulk-send batch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `cancelBatch`  | `cancelBatch(sessionId, batchId)`         | Cancel a running batch. **OPERATOR**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+Media bodies share the `SendMediaRequest` shape: `{ chatId, url? | base64?, mimetype?, filename?, caption? }` (`url` and `base64` are mutually exclusive; `base64` requires `mimetype`).
+
+#### `contacts`
+
+| Method            | Signature                              | Description                                                                          |
+| ----------------- | -------------------------------------- | ------------------------------------------------------------------------------------ |
+| `list`            | `list(sessionId, query?)`              | List contacts known to the session.                                                  |
+| `get`             | `get(sessionId, contactId)`            | Get details for a single contact by JID.                                             |
+| `check`           | `check(sessionId, number)`             | Check whether a phone number is registered on WhatsApp. **OPERATOR**                 |
+| `profilePicture`  | `profilePicture(sessionId, contactId)` | Get the contact's profile picture URL (or null).                                     |
+| `profilePictures` | `profilePictures(sessionId, ids)`      | Profile picture URLs for up to 50 contacts; ids skipped after a timeout are absent.  |
+| `phone`           | `phone(sessionId, contactId)`          | Resolve a contact id (e.g. a `@lid`) to a phone number.                              |
+| `block`           | `block(sessionId, contactId)`          | Block a contact. **OPERATOR**                                                        |
+| `upsert`          | `upsert(sessionId, contactId, body)`   | Save a contact to the account's addressbook, or edit an existing entry. **OPERATOR** |
+| `delete`          | `delete(sessionId, contactId)`         | Remove a contact from the account's addressbook. **OPERATOR**                        |
+| `unblock`         | `unblock(sessionId, contactId)`        | Unblock a contact. **OPERATOR**                                                      |
+| `listBlocked`     | `listBlocked(sessionId)`               | List the ids this account has blocked. Session-wide, so it takes no contact id.      |
+
+#### `groups`
+
+| Method                      | Signature                                                      | Description                                                                                                                |
+| --------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `list`                      | `list(sessionId, query?)`                                      | List all groups for the session.                                                                                           |
+| `get`                       | `get(sessionId, groupId)`                                      | Get detailed group info including participants.                                                                            |
+| `create`                    | `create(sessionId, body)`                                      | Create a new group. **OPERATOR**                                                                                           |
+| `joinInfo`                  | `joinInfo(sessionId, code)`                                    | Preview a group from its invite code WITHOUT joining. Read-only, so it is safe to call on a code from an untrusted source. |
+| `joinGroup`                 | `joinGroup(sessionId, body)`                                   | Join a group via its invite code. **OPERATOR**                                                                             |
+| `addParticipants`           | `addParticipants(sessionId, groupId, participants)`            | Add participants (`string[]`) to a group. **OPERATOR**                                                                     |
+| `removeParticipants`        | `removeParticipants(sessionId, groupId, participants)`         | Remove participants from a group. **OPERATOR**                                                                             |
+| `promoteParticipants`       | `promoteParticipants(sessionId, groupId, participants)`        | Promote participants to group admin. **OPERATOR**                                                                          |
+| `demoteParticipants`        | `demoteParticipants(sessionId, groupId, participants)`         | Demote participants from group admin. **OPERATOR**                                                                         |
+| `setSubject`                | `setSubject(sessionId, groupId, subject)`                      | Update the group subject (name). **OPERATOR**                                                                              |
+| `setDescription`            | `setDescription(sessionId, groupId, description)`              | Update the group description (empty clears it). **OPERATOR**                                                               |
+| `setMemberLabel`            | `setMemberLabel(sessionId, groupId, label)`                    | Set this account's member label in the group (empty clears it; Baileys only, whatsapp-web.js answers 501). **OPERATOR**    |
+| `getGroupSettings`          | `getGroupSettings(sessionId, groupId)`                         | Get the group settings (announce / locked / ephemeral timer / who may add members).                                        |
+| `updateGroupSettings`       | `updateGroupSettings(sessionId, groupId, body)`                | Update the group settings (at least one field required). **OPERATOR**                                                      |
+| `leave`                     | `leave(sessionId, groupId)`                                    | Leave a group. **OPERATOR**                                                                                                |
+| `getPicture`                | `getPicture(sessionId, groupId)`                               | The group's picture URL, or `null` when it has none.                                                                       |
+| `setPicture`                | `setPicture(sessionId, groupId, body)`                         | Set the group's picture. **OPERATOR**                                                                                      |
+| `deletePicture`             | `deletePicture(sessionId, groupId)`                            | Remove the group's picture. **OPERATOR**                                                                                   |
+| `inviteCode`                | `inviteCode(sessionId, groupId)`                               | Get the group invite code and link. **OPERATOR**                                                                           |
+| `revokeInviteCode`          | `revokeInviteCode(sessionId, groupId)`                         | Revoke the current invite code and generate a new one. **OPERATOR**                                                        |
+| `getMembershipRequests`     | `getMembershipRequests(sessionId, groupId)`                    | List a group's pending join requests. Requires group admin.                                                                |
+| `approveMembershipRequests` | `approveMembershipRequests(sessionId, groupId, participants?)` | Approve pending join requests; omit the list to approve all. **OPERATOR**                                                  |
+| `rejectMembershipRequests`  | `rejectMembershipRequests(sessionId, groupId, participants?)`  | Reject pending join requests; omit the list to reject all. **OPERATOR**                                                    |
+
+#### `chats`
+
+| Method              | Signature                            | Description                                                                                                                                                                                                                                  |
+| ------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`              | `list(sessionId, query?)`            | List active chats, most recent first.                                                                                                                                                                                                        |
+| `subscribePresence` | `subscribePresence(sessionId, body)` | Subscribe to a chat's presence; updates then arrive as `presence.update` events. The subscription belongs to the connection and does not survive a reconnect. **OPERATOR**                                                                   |
+| `getPresence`       | `getPresence(sessionId, chatId)`     | The last presence reported for a chat, or `null` when none has been. Held in memory, so a restart clears it.                                                                                                                                 |
+| `markRead`          | `markRead(sessionId, body)`          | Mark a chat as read/seen. **OPERATOR**                                                                                                                                                                                                       |
+| `markUnread`        | `markUnread(sessionId, body)`        | Mark a chat as unread. **OPERATOR**                                                                                                                                                                                                          |
+| `archive`           | `archive(sessionId, body)`           | Archive or unarchive a chat. `success: false` means the engine declined. **OPERATOR**                                                                                                                                                        |
+| `pin`               | `pin(sessionId, body)`               | Pin a chat to the top of the list, or unpin it. `success: false` means WhatsApp declined — three pins maximum. **OPERATOR**                                                                                                                  |
+| `mute`              | `mute(sessionId, body)`              | Mute a chat until an absolute epoch-MILLISECONDS timestamp, or unmute with `null`. **OPERATOR**                                                                                                                                              |
+| `clearMessages`     | `clearMessages(sessionId, chatId)`   | Delete every message in a chat, keeping the chat itself. On success the gateway also deletes its stored copy of the chat's messages (rows, inline and archived media, search entries); export the history first if you need it. **OPERATOR** |
+| `delete`            | `delete(sessionId, body)`            | Delete a chat from the chat list. On success the gateway also deletes its stored copy of the chat's messages (rows, inline and archived media, search entries); export the history first if you need it. **OPERATOR**                        |
+| `sendState`         | `sendState(sessionId, body)`         | Send a chat presence state (typing/recording/paused). **OPERATOR**                                                                                                                                                                           |
+
+#### `webhooks`
+
+| Method                    | Signature                        | Description                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listAll`                 | `listAll(query?)`                | List webhooks across EVERY session the key can see, not one session's. **OPERATOR**                                                                                                                                                                                                                                                          |
+| `deliveryFailures`        | `deliveryFailures(query?)`       | Deliveries that exhausted their retries (`attempts > 0`), or were shed, oversize, failed preflight or refused at shutdown, possibly between retries (`attempts: 0`); a later successful delivery removes the row; the diagnostic for a webhook that stopped arriving. A delivery a smart filter suppressed never reaches this log. **ADMIN** |
+| `redriveDeliveryFailures` | `redriveDeliveryFailures(body?)` | Replay the rows `deliveryFailures` marks `replayable` (kept while `WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` > 0), fewest attempts first, then oldest, one bounded batch per call, reusing each stored idempotency key; returns delivered/failed/skipped/remaining counts; `enqueued` is always 0. **ADMIN**                                  |
+| `list`                    | `list(sessionId)`                | List all webhooks for a session. **OPERATOR**                                                                                                                                                                                                                                                                                                |
+| `get`                     | `get(sessionId, id)`             | Get a single webhook by id. **OPERATOR**                                                                                                                                                                                                                                                                                                     |
+| `create`                  | `create(sessionId, body)`        | Create a new webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                           |
+| `update`                  | `update(sessionId, id, body)`    | Update a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `delete`                  | `delete(sessionId, id)`          | Delete a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `test`                    | `test(sessionId, id)`            | Trigger a test dispatch to the webhook URL and report the result. **OPERATOR**                                                                                                                                                                                                                                                               |
+
+#### `labels` _(WhatsApp Business)_
+
+| Method           | Signature                                    | Description                                                                              |
+| ---------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `list`           | `list(sessionId)`                            | List all labels available in the business account.                                       |
+| `get`            | `get(sessionId, labelId)`                    | Get a single label by id.                                                                |
+| `chats`          | `chats(sessionId, labelId)`                  | Every chat carrying a label. **whatsapp-web.js only** — Baileys answers `501`.           |
+| `upsert`         | `upsert(sessionId, labelId, body)`           | Create or update a label. **Baileys only** — whatsapp-web.js answers `501`. **OPERATOR** |
+| `delete`         | `delete(sessionId, labelId)`                 | Delete a label. **OPERATOR**                                                             |
+| `forChat`        | `forChat(sessionId, chatId)`                 | Get the labels currently applied to a chat.                                              |
+| `addToChat`      | `addToChat(sessionId, chatId, body)`         | Add a label to a chat. **OPERATOR**                                                      |
+| `removeFromChat` | `removeFromChat(sessionId, chatId, labelId)` | Remove a label from a chat. **OPERATOR**                                                 |
+
+#### `channels` _(Newsletters)_
+
+| Method              | Signature                                       | Description                                                                                                                 |
+| ------------------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `list`              | `list(sessionId)`                               | List all channels/newsletters the session is subscribed to.                                                                 |
+| `get`               | `get(sessionId, channelId)`                     | Get a single channel by id.                                                                                                 |
+| `messages`          | `messages(sessionId, channelId, query?)`        | Get recent messages from a channel.                                                                                         |
+| `create`            | `create(sessionId, body)`                       | Create a channel this account owns. **OPERATOR**                                                                            |
+| `delete`            | `delete(sessionId, channelId)`                  | Delete a channel this account owns. Irreversible, and every subscriber loses it — distinct from `unsubscribe`. **OPERATOR** |
+| `mute`              | `mute(sessionId, channelId, body)`              | Mute or unmute a channel's notifications. **OPERATOR**                                                                      |
+| `subscribe`         | `subscribe(sessionId, body)`                    | Subscribe to a channel using its invite code. **OPERATOR**                                                                  |
+| `unsubscribe`       | `unsubscribe(sessionId, channelId)`             | Unsubscribe from a channel. **OPERATOR**                                                                                    |
+| `demoteAdmin`       | `demoteAdmin(sessionId, channelId, body)`       | Demote a channel admin back to a subscriber; no promote counterpart exists. **OPERATOR**                                    |
+| `transferOwnership` | `transferOwnership(sessionId, channelId, body)` | Hand a channel to a new owner. Irreversible. **OPERATOR**                                                                   |
+
+#### `catalog` _(WhatsApp Business)_
+
+| Method        | Signature                       | Description                                                                         |
+| ------------- | ------------------------------- | ----------------------------------------------------------------------------------- |
+| `info`        | `info(sessionId)`               | Get the business catalog info, or null when the account has no catalog.             |
+| `products`    | `products(sessionId, query?)`   | List catalog products; returns `{ products, pagination }`.                          |
+| `product`     | `product(sessionId, productId)` | Get a single product by id, or null when no product in the catalog carries that id. |
+| `sendProduct` | `sendProduct(sessionId, body)`  | Send a product message. **OPERATOR**                                                |
+
+#### `status` _(Stories)_
+
+| Method        | Signature                           | Description                                                                                                                                                       |
+| ------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`        | `list(sessionId)`                   | Get all status updates (`{ statuses }`).                                                                                                                          |
+| `fromContact` | `fromContact(sessionId, contactId)` | Get status updates from a specific contact.                                                                                                                       |
+| `media`       | `media(sessionId, statusId)`        | Fetch the stored media bytes for a status update (404 when there is none).                                                                                        |
+| `sendText`    | `sendText(sessionId, body)`         | Post a text status update. **OPERATOR**                                                                                                                           |
+| `sendImage`   | `sendImage(sessionId, body)`        | Post an image status update. **OPERATOR**                                                                                                                         |
+| `sendVideo`   | `sendVideo(sessionId, body)`        | Post a video status update. **OPERATOR**                                                                                                                          |
+| `sendVoice`   | `sendVoice(sessionId, body)`        | Post an audio status as a voice note. WhatsApp plays one only as Ogg/Opus and neither engine transcodes, so convert with `media.convertVoice` first. **OPERATOR** |
+| `delete`      | `delete(sessionId, statusId)`       | Delete a status update by id. **OPERATOR**                                                                                                                        |
+
+> This is WhatsApp "Status/Stories", distinct from session lifecycle status.
+
+#### `search`
+
+| Method   | Signature        | Description                                                                                                                                      |
+| -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `search` | `search(params)` | Search persisted messages across sessions via the active search provider; a scoped key's reach is bounded by its `allowedSessions`. **OPERATOR** |
+
+#### `templates`
+
+| Method   | Signature                     | Description                                    |
+| -------- | ----------------------------- | ---------------------------------------------- |
+| `list`   | `list(sessionId)`             | List all templates for a session. **OPERATOR** |
+| `get`    | `get(sessionId, id)`          | Get a single template by id. **OPERATOR**      |
+| `create` | `create(sessionId, body)`     | Create a new template. **OPERATOR**            |
+| `update` | `update(sessionId, id, body)` | Update a template. **OPERATOR**                |
+| `delete` | `delete(sessionId, id)`       | Delete a template. **OPERATOR**                |
+
+#### `profile`
+
+| Method                 | Signature                             | Description                                                                    |
+| ---------------------- | ------------------------------------- | ------------------------------------------------------------------------------ |
+| `setProfileName`       | `setProfileName(sessionId, name)`     | Set the account display name. **OPERATOR**                                     |
+| `setProfileStatus`     | `setProfileStatus(sessionId, status)` | Set the account about/status text (empty clears it). **OPERATOR**              |
+| `setProfilePicture`    | `setProfilePicture(sessionId, body)`  | Set the account profile picture (`url` or `base64` + `mimetype`). **OPERATOR** |
+| `deleteProfilePicture` | `deleteProfilePicture(sessionId)`     | Remove the account profile picture. **OPERATOR**                               |
+
+#### `calls`
+
+| Method       | Signature                       | Description                                                                                                                                   |
+| ------------ | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rejectCall` | `rejectCall(sessionId, callId)` | Reject a ringing incoming call (`callId` comes from the `call.received` event). **Baileys only**: whatsapp-web.js answers `501`. **OPERATOR** |
+| `createLink` | `createLink(sessionId, body)`   | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**                                                       |
+
+#### `media`
+
+| Method             | Signature                        | Description                                                                                  |
+| ------------------ | -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `conversionStatus` | `conversionStatus(sessionId)`    | Whether conversion is switched on for this deployment AND the ffmpeg binary can be run.      |
+| `convertVoice`     | `convertVoice(sessionId, input)` | Convert audio into a WhatsApp voice note (Ogg/Opus, mono, tuned for speech). **OPERATOR**    |
+| `convertVideo`     | `convertVideo(sessionId, input)` | Convert video into an MP4 every WhatsApp client accepts (baseline H.264 + AAC). **OPERATOR** |
+
+#### `health`
+
+| Method  | Signature | Description                                              |
+| ------- | --------- | -------------------------------------------------------- |
+| `check` | `check()` | General health (also returns the running version).       |
+| `live`  | `live()`  | Kubernetes liveness probe (`{ status }`).                |
+| `ready` | `ready()` | Kubernetes readiness probe — checks both DB connections. |
+
+### Error Handling
+
+On a non-2xx response the SDK throws a typed `OpenWAApiError` subclass carrying `.status` (HTTP status), `.body` (parsed JSON error envelope, or raw text), and `.errorKind` (the NestJS `error` field, `undefined` when the gateway omits it — which is the norm for a validation rejection in production, where `disableErrorMessages` is on). All error classes extend `OpenWAError` and are exported, so they are `instanceof`-checkable. A timeout throws `OpenWATimeoutError`, which extends `OpenWAError` directly (not `OpenWAApiError`). An API error also carries `.code` (the body's `code`, e.g. `SEND_PACING_LIMITED`), `.retryAfterSeconds` (the body's `retryAfterSeconds`, else the `Retry-After` header) and `.headers` (the response `Headers`).
+
+| Error class                     | HTTP status | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenWAAuthError`               | 401         | Missing or invalid API key.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `OpenWAForbiddenError`          | 403         | The key's role or scope refuses the call (e.g. an OPERATOR-only route, or a session, IP or chat outside the key's allow-lists), or WhatsApp itself refused the operation (for example, missing group admin rights).                                                                                                                                                                                                                                                                                                                                                                                     |
+| `OpenWANotFoundError`           | 404         | Resource not found.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `OpenWAConflictError`           | 409         | Conflict: a conflicting state, typically a session that is not ready, or a keyed send pending or unconfirmed (see `code`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `OpenWARateLimitError`          | 429         | Rate limited. The global rate limiter's 429 lifts when its window expires (seconds for the per-second tier, up to an hour for the hourly tier by default), and `retryAfterSeconds` carries its `Retry-After` header. A 429 whose `code` is `"SEND_PACING_LIMITED"` is usually not transient: do not retry it before `retryAfterSeconds`, which then comes from the body: a few seconds when only sends still in flight caused it, the rest of the failure breaker's cooldown (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes by default) after a run of send failures, otherwise up to the next UTC day. |
+| `OpenWANotImplementedError`     | 501         | The active engine does not support this operation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWAServiceUnavailableError` | 503         | The gateway could not complete the request now (transport failure, draining, or on Baileys a WhatsApp throttle (429) or timeout (408)). Back off and retry later, though a catalog 503 can persist because WhatsApp may never answer that query; 501 is permanent. In a routed deployment a forward that fails before reaching the owner node answers 503, and a 503 from the owner itself is relayed unchanged (a bounded write it covers may still have been applied); a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on.                 |
+| `OpenWAApiError`                | any other   | Generic non-2xx (the base API error, e.g. `400`; also surfaced for unfollowed 3xx redirects).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `OpenWATimeoutError`            | —           | The request exceeded the configured timeout.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+```typescript
+import {
+  OpenWAClient,
+  OpenWAConflictError,
+  OpenWANotFoundError,
+  OpenWARateLimitError,
+  OpenWATimeoutError,
+  OpenWAApiError,
+} from '@rmyndharis/openwa';
+
+try {
+  await client.messages.sendText(sessionId, {
+    chatId: '628123456789@c.us',
+    text: 'Hi!',
+  });
+} catch (err) {
+  if (err instanceof OpenWAConflictError) {
+    // 409: a conflicting state, typically a session that is not ready (start it first), or a keyed send pending or unconfirmed (see err.code).
+  } else if (err instanceof OpenWANotFoundError) {
+    // 404 — session/chat does not exist.
+  } else if (err instanceof OpenWARateLimitError) {
+    // 429 — back off and retry.
+  } else if (err instanceof OpenWATimeoutError) {
+    // request timed out.
+  } else if (err instanceof OpenWAApiError) {
+    console.error(`API error ${err.status}:`, err.body);
+  } else {
+    throw err; // network/transport error
+  }
+}
+```
+
+### Notable Behaviors
+
+- **Redirects are never followed.** The transport uses `redirect: 'manual'`, so a `3xx` surfaces to the caller as an error (via `OpenWAApiError`) rather than being followed — this guarantees the `X-API-Key` header is never re-sent to a redirect target (potentially a different origin).
+- **Auth and JSON headers take precedence.** Request headers are merged in the order `defaultHeaders` → per-call headers → `Content-Type: application/json` → `X-API-Key`. Both `Content-Type` and `X-API-Key` are applied last, so neither can be overridden by a caller-supplied header.
+- **Path segments are percent-encoded.** Ids (session, chat, message, etc.) are encoded so a value cannot break out of its path position, while keeping the WhatsApp-safe characters `@`, `:`, and `+` readable (e.g. `628123456789@c.us`).
+- **Empty and dot segments are refused.** An empty, `.` or `..` id rejects with a `TypeError` and nothing is sent, because `fetch` would otherwise resolve it to the parent resource. A raw `request()`/`requestBytes()` path with a `.` or `..` segment rejects with a `TypeError`, and so does one that does not begin with `/`; a trailing or double slash in a raw path is sent as written.
+- **Base-URL path prefix is preserved.** A `baseUrl` such as `https://gateway.example.com/v1` keeps its `/v1` prefix on every request; only a trailing slash is trimmed.
+- **No automatic retries.** A failed request rejects immediately — the SDK does not retry, even on `429`. Wrap calls in your own backoff if you need retries.
+- **Injectable transport.** Supply a custom `fetch` to wrap outbound calls with retry, logging, or observability middleware, or to run on a runtime without a global `fetch`. This is also the recommended way to unit-test without monkey-patching globals.
+- **Dual CJS + ESM.** The package exposes both an `import` (ESM) and `require` (CommonJS) entry point with bundled type declarations, so it works in either module system without configuration.
+
+## 18.3 Python SDK
+
+The Python SDK is a **synchronous** client built on [`httpx`](https://www.python-httpx.org/). It ships its own type hints (PEP 561) so editors and type-checkers see the full surface without stubs. There is **no async client and no event/streaming model** — every call is a blocking method that returns a plain `dict`/`list` (or `None` for a 204), and request payloads are plain `dict`s.
+
+### Installation
+
+The PyPI distribution name and the import package differ:
+
+```bash
+pip install rmyndharis-openwa
+```
+
+```python
+from openwa import OpenWAClient
+```
+
+- **Distribution (PyPI):** `rmyndharis-openwa`
+- **Import package:** `openwa`
+- **Client class:** `OpenWAClient`
+- **Python:** `>=3.9` (per `pyproject.toml`)
+- **Runtime dependencies:** `httpx>=0.27.1,<1.0`, plus `typing_extensions>=4.0` on Python < 3.11
+- **Typed:** ships `py.typed` markers for `openwa` and `openwa.resources` (PEP 561)
+
+### Quick Start
+
+```python
+from openwa import OpenWAClient
+
+client = OpenWAClient(
+    base_url="http://localhost:2785",
+    api_key="owa_k1_…",
+)
+
+# Sessions are addressed by the UUID that create() returns, not by name. Create a session once;
+# afterwards, find its id with client.sessions.list({"name": "my-session"}).
+session = client.sessions.create({"name": "my-session"})
+client.sessions.start(session["id"])
+
+# Link the account before sending: scan sessions.get_qr_code (or use sessions.request_pairing_code for a number with no linked session),
+# then wait for status "ready". An unlinked session answers the send with 409.
+
+# Send a text message
+result = client.messages.send_text(session["id"], {
+    "chatId": "628123456789@c.us",
+    "text": "Hello from the OpenWA Python SDK!",
+})
+print(result["messageId"])
+
+client.close()
+```
+
+`OpenWAClient` is also a context manager, so the connection pool is closed for you:
+
+```python
+with OpenWAClient(base_url="http://localhost:2785", api_key="owa_k1_…") as client:
+    print(client.health.check())
+```
+
+### Client Configuration
+
+Constructor signature (from `client.py`):
+
+```python
+OpenWAClient(
+    base_url: str,
+    api_key: str,
+    *,
+    timeout: float | httpx.Timeout | tuple[float | None, float | None, float | None, float | None] | None = 30.0,
+    default_headers: Mapping[str, str] | None = None,
+    transport: httpx.BaseTransport | None = None,
+)
+```
+
+| Parameter         | Type                                      | Default      | Description                                                                                                                                                                                                                                                                                                   |
+| ----------------- | ----------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base_url`        | `str`                                     | _(required)_ | Gateway base URL, e.g. `http://localhost:2785`. Raises `ValueError` if empty. A trailing `/` is stripped; any path prefix is preserved.                                                                                                                                                                       |
+| `api_key`         | `str`                                     | _(required)_ | API key sent as the `X-API-Key` header. Surrounding whitespace is trimmed; raises `ValueError` if empty or if it holds a control or non-ASCII character.                                                                                                                                                      |
+| `timeout`         | `float \| httpx.Timeout \| tuple \| None` | `30.0`       | Seconds per network operation, not per call; `0`, `inf` or `None` turns it off. An `httpx.Timeout` or a `(connect, read, write, pool)` tuple sets the operations apart. A breach raises `OpenWATimeoutError`.                                                                                                 |
+| `default_headers` | `Mapping[str, str] \| None`               | `None`       | Extra headers applied to every request. Applied **first**, so the SDK's `X-API-Key` and `Content-Type: application/json` always win. A name must be an HTTP token and a value text without a control or non-ASCII character (surrounding spaces are trimmed); `ValueError` names the header, never the value. |
+| `transport`       | `httpx.BaseTransport \| None`             | `None`       | Optional `httpx` transport override (e.g. `httpx.MockTransport`) sharing the one connection pool. Useful for testing.                                                                                                                                                                                         |
+
+The client also exposes a few non-resource members:
+
+| Member    | Signature                                                | Description                                                                                                            |
+| --------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `auth`    | `auth() -> AuthValidateResponse`                         | `POST /api/auth/validate` — validate the configured API key; a key restricted to selected chats is refused with `403`. |
+| `request` | `request(method, path, *, query=None, body=None) -> Any` | Raw escape hatch; `path` begins with `/`.                                                                              |
+| `close`   | `close() -> None`                                        | Close the underlying `httpx.Client`.                                                                                   |
+
+### Resources & Methods
+
+Resources are accessed as properties on the client (e.g. `client.messages`). All methods are **snake_case**; `body`/`query` arguments are plain dicts. Methods marked **OPERATOR** require an `OPERATOR`-level API key. Some methods are supported by one engine only and answer `501` on the other (a row says so where it matters; section [29.6 of the engine capability matrix](./29-engine-capability-matrix.md#296-the-27-not-available-cells-in-detail) lists them all).
+
+#### `client.sessions`
+
+| Method                 | Signature                                                       | Description                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`                 | `list(query=None) -> list[SessionResponse]`                     | List all sessions. The optional query takes `limit`, `offset` and `name` (an exact, case-sensitive match; no match returns an empty list).                                                                                                                                                                                                                      |
+| `get_config`           | `get_config(session_id) -> SessionConfig`                       | Read a session's engine configuration.                                                                                                                                                                                                                                                                                                                          |
+| `update_config`        | `update_config(session_id, body) -> SessionConfig`              | Update a session's configuration, in any state, without a restart or re-link; `autoRejectCalls` applies immediately, the reconnect settings on the next start. **OPERATOR**                                                                                                                                                                                     |
+| `get_proxy`            | `get_proxy(session_id) -> SessionProxy`                         | Read a session's masked proxy configuration (credentials never returned).                                                                                                                                                                                                                                                                                       |
+| `update_proxy`         | `update_proxy(session_id, body) -> SessionProxy`                | Update per-session proxy settings; changes apply on the next start. Send `proxyUrl: null` to clear. **ADMIN**                                                                                                                                                                                                                                                   |
+| `get`                  | `get(session_id) -> SessionResponse`                            | Get one session.                                                                                                                                                                                                                                                                                                                                                |
+| `create`               | `create(body) -> SessionResponse`                               | Create a session (`body["name"]` required). **OPERATOR**; setting `proxyUrl` requires **ADMIN**                                                                                                                                                                                                                                                                 |
+| `delete`               | `delete(session_id) -> None`                                    | Delete a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                                  |
+| `start`                | `start(session_id) -> SessionResponse`                          | Start (connect) a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                         |
+| `stop`                 | `stop(session_id) -> SessionResponse`                           | Stop a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                                    |
+| `logout`               | `logout(session_id) -> SessionResponse`                         | Attempt an engine-native unlink of this device, then stop the session. A `200` means the unlink + local cleanup completed (not an independent Linked-Devices observation); a later `start` needs a fresh QR. A `502` (`SESSION_LOGOUT_INCOMPLETE`) stops locally but leaves the operation incomplete; start and retry. Requires a running session. **OPERATOR** |
+| `force_kill`           | `force_kill(session_id) -> SessionResponse`                     | Force-terminate a session. A `502` (`SESSION_FORCE_KILL_INCOMPLETE`) stops locally but the engine process may still be running; a retry answers `400`, so restart the node to reap it. **OPERATOR**                                                                                                                                                             |
+| `get_qr_code`          | `get_qr_code(session_id) -> QrCodeResponse`                     | Fetch the login QR code. **OPERATOR**                                                                                                                                                                                                                                                                                                                           |
+| `request_pairing_code` | `request_pairing_code(session_id, body) -> PairingCodeResponse` | Request a phone-number pairing code. On whatsapp-web.js, not for a number that already has a linked session (WhatsApp can revoke that device; the gateway answers 409 for the stored phone of another of its sessions but cannot see a link made elsewhere); link it by QR instead. **OPERATOR**                                                                |
+| `set_online_presence`  | `set_online_presence(session_id, body) -> SuccessResult`        | Set the account's own global presence (appear online or offline). **OPERATOR**                                                                                                                                                                                                                                                                                  |
+| `stats`                | `stats() -> SessionStatsOverview`                               | Session statistics overview.                                                                                                                                                                                                                                                                                                                                    |
+
+#### `client.messages`
+
+| Method          | Signature                                                              | Description                                                                                                                                                                 |
+| --------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`          | `list(session_id, query=None) -> MessageListResponse`                  | List stored messages; the query takes the same keys as the JavaScript client's `messages.list`, and the response carries `unknownTimestampTotal` under the same conditions. |
+| `send_text`     | `send_text(session_id, body) -> MessageResponse`                       | Send a text message. **OPERATOR**                                                                                                                                           |
+| `send_image`    | `send_image(session_id, body) -> MessageResponse`                      | Send an image. **OPERATOR**                                                                                                                                                 |
+| `send_video`    | `send_video(session_id, body) -> MessageResponse`                      | Send a video. **OPERATOR**                                                                                                                                                  |
+| `send_audio`    | `send_audio(session_id, body) -> MessageResponse`                      | Send audio. **OPERATOR**                                                                                                                                                    |
+| `send_document` | `send_document(session_id, body) -> MessageResponse`                   | Send a document. **OPERATOR**                                                                                                                                               |
+| `send_sticker`  | `send_sticker(session_id, body) -> MessageResponse`                    | Send a sticker. **OPERATOR**                                                                                                                                                |
+| `send_location` | `send_location(session_id, body) -> MessageResponse`                   | Send a location. **OPERATOR**                                                                                                                                               |
+| `send_contact`  | `send_contact(session_id, body) -> MessageResponse`                    | Send a contact card. **OPERATOR**                                                                                                                                           |
+| `send_template` | `send_template(session_id, body) -> MessageResponse`                   | Send a stored template. **OPERATOR**                                                                                                                                        |
+| `send_poll`     | `send_poll(session_id, body) -> MessageResponse`                       | Send a poll message. **OPERATOR**                                                                                                                                           |
+| `reply`         | `reply(session_id, body) -> MessageResponse`                           | Reply to a message. **OPERATOR**                                                                                                                                            |
+| `forward`       | `forward(session_id, body) -> MessageResponse`                         | Forward a message. **OPERATOR**                                                                                                                                             |
+| `click_button`  | `click_button(session_id, body) -> MessageResponse`                    | Tap a button or list row on a stored WhatsApp Business prompt (Baileys only). **OPERATOR**                                                                                  |
+| `react`         | `react(session_id, body) -> SuccessResult`                             | React to a message. **OPERATOR**                                                                                                                                            |
+| `delete`        | `delete(session_id, body) -> SuccessResult`                            | Delete a message. **OPERATOR**                                                                                                                                              |
+| `edit_message`  | `edit_message(session_id, body) -> MessageResponse`                    | Edit the text of a message already sent. **OPERATOR**                                                                                                                       |
+| `history`       | `history(session_id, chat_id, query=None) -> list[ChatHistoryMessage]` | Fetch chat history.                                                                                                                                                         |
+| `reactions`     | `reactions(session_id, chat_id, message_id) -> list[ReactionRecord]`   | List reactions on a message.                                                                                                                                                |
+| `pin`           | `pin(session_id, body) -> SuccessResult`                               | Pin a message in its chat. `durationSeconds` must be 86400, 604800 or 2592000; in a group only admins may pin. **OPERATOR**                                                 |
+| `vote_poll`     | `vote_poll(session_id, body) -> SuccessResult`                         | Cast a vote on a poll; `options` are the option texts, not ids. Not supported on Baileys (`501`). **OPERATOR**                                                              |
+| `star`          | `star(session_id, body) -> SuccessResult`                              | Star or unstar a message. Best-effort on whatsapp-web.js, which silently ignores a message it will not star. **OPERATOR**                                                   |
+| `unpin`         | `unpin(session_id, body) -> SuccessResult`                             | Unpin a pinned message. **OPERATOR**                                                                                                                                        |
+| `media`         | `media(session_id, chat_id, message_id) -> MessageMedia`               | Fetch a message's stored media bytes: the archived file when one exists, else the inline copy on the message row. `404` when neither holds bytes.                           |
+| `send_bulk`     | `send_bulk(session_id, body) -> BulkMessageResponse`                   | Enqueue a bulk send batch. **OPERATOR**                                                                                                                                     |
+| `batch_status`  | `batch_status(session_id, batch_id) -> BatchStatusResponse`            | Get bulk batch status.                                                                                                                                                      |
+| `cancel_batch`  | `cancel_batch(session_id, batch_id) -> BatchCancelResponse`            | Cancel a running batch. **OPERATOR**                                                                                                                                        |
+
+#### `client.contacts`
+
+| Method             | Signature                                                           | Description                                                                          |
+| ------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `list`             | `list(session_id, query=None) -> list[ContactRecord]`               | List contacts (`query`: `limit`, `offset`).                                          |
+| `get`              | `get(session_id, contact_id) -> ContactRecord`                      | Get one contact.                                                                     |
+| `check`            | `check(session_id, number) -> CheckNumberResponse`                  | Check whether a number is on WhatsApp. **OPERATOR**                                  |
+| `profile_picture`  | `profile_picture(session_id, contact_id) -> ProfilePictureResponse` | Get a contact's profile picture.                                                     |
+| `profile_pictures` | `profile_pictures(session_id, ids) -> ProfilePicturesResponse`      | Profile picture URLs for up to 50 contacts; ids skipped after a timeout are absent.  |
+| `phone`            | `phone(session_id, contact_id) -> ContactPhoneResponse`             | Resolve a contact's phone number.                                                    |
+| `block`            | `block(session_id, contact_id) -> SuccessResult`                    | Block a contact. **OPERATOR**                                                        |
+| `upsert`           | `upsert(session_id, contact_id, body) -> SuccessResult`             | Save a contact to the account's addressbook, or edit an existing entry. **OPERATOR** |
+| `delete`           | `delete(session_id, contact_id) -> SuccessResult`                   | Remove a contact from the account's addressbook. **OPERATOR**                        |
+| `unblock`          | `unblock(session_id, contact_id) -> SuccessResult`                  | Unblock a contact. **OPERATOR**                                                      |
+| `list_blocked`     | `list_blocked(session_id) -> list[str]`                             | List the ids this account has blocked. Session-wide, so it takes no contact id.      |
+
+#### `client.groups`
+
+| Method                        | Signature                                                                                    | Description                                                                                                                |
+| ----------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `list`                        | `list(session_id, query=None) -> list[GroupSummary]`                                         | List groups (`query`: `limit`, `offset`).                                                                                  |
+| `get`                         | `get(session_id, group_id) -> GroupInfo`                                                     | Get group details.                                                                                                         |
+| `create`                      | `create(session_id, body) -> GroupSummary`                                                   | Create a group. **OPERATOR**                                                                                               |
+| `join_info`                   | `join_info(session_id, code) -> GroupJoinInfo`                                               | Preview a group from its invite code WITHOUT joining. Read-only, so it is safe to call on a code from an untrusted source. |
+| `join_group`                  | `join_group(session_id, body) -> JoinGroupResponse`                                          | Join a group via its invite code. **OPERATOR**                                                                             |
+| `add_participants`            | `add_participants(session_id, group_id, participants) -> ParticipantsResult`                 | Add participants (`list[str]`). A partial refusal still answers 200, so check `results`. **OPERATOR**                      |
+| `remove_participants`         | `remove_participants(session_id, group_id, participants) -> ParticipantsResult`              | Remove participants. A partial refusal still answers 200, so check `results`. **OPERATOR**                                 |
+| `promote_participants`        | `promote_participants(session_id, group_id, participants) -> ParticipantsResult`             | Promote to admin. A partial refusal still answers 200, so check `results`. **OPERATOR**                                    |
+| `demote_participants`         | `demote_participants(session_id, group_id, participants) -> ParticipantsResult`              | Demote from admin. A partial refusal still answers 200, so check `results`. **OPERATOR**                                   |
+| `set_subject`                 | `set_subject(session_id, group_id, subject) -> SuccessResult`                                | Set group subject. **OPERATOR**                                                                                            |
+| `set_description`             | `set_description(session_id, group_id, description) -> SuccessResult`                        | Set group description. **OPERATOR**                                                                                        |
+| `set_member_label`            | `set_member_label(session_id, group_id, label) -> SuccessResult`                             | Set this account's member label in the group (empty clears it; Baileys only). **OPERATOR**                                 |
+| `get_group_settings`          | `get_group_settings(session_id, group_id) -> GroupSettings`                                  | Get the group settings (announce / locked / ephemeral timer / who may add members).                                        |
+| `update_group_settings`       | `update_group_settings(session_id, group_id, body) -> SuccessResult`                         | Update the group settings (at least one field required). **OPERATOR**                                                      |
+| `leave`                       | `leave(session_id, group_id) -> SuccessResult`                                               | Leave the group. **OPERATOR**                                                                                              |
+| `get_picture`                 | `get_picture(session_id, group_id) -> dict[str, Any]`                                        | The group's picture URL, or `null` when it has none.                                                                       |
+| `set_picture`                 | `set_picture(session_id, group_id, body) -> SuccessResult`                                   | Set the group's picture. **OPERATOR**                                                                                      |
+| `delete_picture`              | `delete_picture(session_id, group_id) -> SuccessResult`                                      | Remove the group's picture. **OPERATOR**                                                                                   |
+| `invite_code`                 | `invite_code(session_id, group_id) -> InviteCodeResponse`                                    | Get the invite code. **OPERATOR**                                                                                          |
+| `revoke_invite_code`          | `revoke_invite_code(session_id, group_id) -> InviteCodeResponse`                             | Revoke and regenerate the invite code. **OPERATOR**                                                                        |
+| `get_membership_requests`     | `get_membership_requests(session_id, group_id) -> list[GroupMembershipRequest]`              | List a group's pending join requests. Requires group admin.                                                                |
+| `approve_membership_requests` | `approve_membership_requests(session_id, group_id, participants=None) -> ParticipantsResult` | Approve pending join requests; omit the list to approve all. **OPERATOR**                                                  |
+| `reject_membership_requests`  | `reject_membership_requests(session_id, group_id, participants=None) -> ParticipantsResult`  | Reject pending join requests; omit the list to reject all. **OPERATOR**                                                    |
+
+#### `client.chats`
+
+| Method               | Signature                                                   | Description                                                                                                                                                                                                                                  |
+| -------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`               | `list(session_id, query=None) -> list[ChatSummary]`         | List chats (`query`: `limit`, `offset`).                                                                                                                                                                                                     |
+| `subscribe_presence` | `subscribe_presence(session_id, body) -> SuccessResult`     | Subscribe to a chat's presence; updates then arrive as `presence.update` events. The subscription belongs to the connection and does not survive a reconnect. **OPERATOR**                                                                   |
+| `get_presence`       | `get_presence(session_id, chat_id) -> ChatPresence \| None` | The last presence reported for a chat, or `null` when none has been. Held in memory, so a restart clears it.                                                                                                                                 |
+| `mark_read`          | `mark_read(session_id, body) -> SuccessResult`              | Mark a chat as read. **OPERATOR**                                                                                                                                                                                                            |
+| `mark_unread`        | `mark_unread(session_id, body) -> SuccessResult`            | Mark a chat as unread. **OPERATOR**                                                                                                                                                                                                          |
+| `archive`            | `archive(session_id, body) -> SuccessResult`                | Archive or unarchive a chat. `success: false` means the engine declined. **OPERATOR**                                                                                                                                                        |
+| `pin`                | `pin(session_id, body) -> SuccessResult`                    | Pin a chat to the top of the list, or unpin it. `success: false` means WhatsApp declined — three pins maximum. **OPERATOR**                                                                                                                  |
+| `mute`               | `mute(session_id, body) -> SuccessResult`                   | Mute a chat until an absolute epoch-MILLISECONDS timestamp, or unmute with `null`. **OPERATOR**                                                                                                                                              |
+| `clear_messages`     | `clear_messages(session_id, chat_id) -> SuccessResult`      | Delete every message in a chat, keeping the chat itself. On success the gateway also deletes its stored copy of the chat's messages (rows, inline and archived media, search entries); export the history first if you need it. **OPERATOR** |
+| `delete`             | `delete(session_id, body) -> SuccessResult`                 | Delete a chat. On success the gateway also deletes its stored copy of the chat's messages (rows, inline and archived media, search entries); export the history first if you need it. **OPERATOR**                                           |
+| `send_state`         | `send_state(session_id, body) -> SuccessResult`             | Send a typing/recording chat state. **OPERATOR**                                                                                                                                                                                             |
+
+#### `client.webhooks`
+
+| Method                      | Signature                                                       | Description                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_all`                  | `list_all(query=None) -> list[WebhookResponse]`                 | List webhooks across EVERY session the key can see, not one session's. **OPERATOR**                                                                                                                                                                                                                                                          |
+| `delivery_failures`         | `delivery_failures(query=None) -> list[WebhookDeliveryFailure]` | Deliveries that exhausted their retries (`attempts > 0`), or were shed, oversize, failed preflight or refused at shutdown, possibly between retries (`attempts: 0`); a later successful delivery removes the row; the diagnostic for a webhook that stopped arriving. A delivery a smart filter suppressed never reaches this log. **ADMIN** |
+| `redrive_delivery_failures` | `redrive_delivery_failures(body=None) -> WebhookRedriveResult`  | Replay the rows `delivery_failures` marks `replayable` (kept while `WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` > 0), fewest attempts first, then oldest, one bounded batch per call, reusing each stored idempotency key; returns delivered/failed/skipped/remaining counts; `enqueued` is always 0. **ADMIN**                                 |
+| `list`                      | `list(session_id) -> list[WebhookResponse]`                     | List webhooks. **OPERATOR**                                                                                                                                                                                                                                                                                                                  |
+| `get`                       | `get(session_id, webhook_id) -> WebhookResponse`                | Get one webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                                |
+| `create`                    | `create(session_id, body) -> WebhookResponse`                   | Create a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `update`                    | `update(session_id, webhook_id, body) -> WebhookResponse`       | Update a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `delete`                    | `delete(session_id, webhook_id) -> None`                        | Delete a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `test`                      | `test(session_id, webhook_id) -> WebhookTestResult`             | Send a test delivery. **OPERATOR**                                                                                                                                                                                                                                                                                                           |
+
+#### `client.labels` _(WhatsApp Business)_
+
+| Method             | Signature                                                          | Description                                                                              |
+| ------------------ | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `list`             | `list(session_id) -> list[LabelRecord]`                            | List labels.                                                                             |
+| `get`              | `get(session_id, label_id) -> LabelRecord`                         | Get one label.                                                                           |
+| `chats`            | `chats(session_id, label_id) -> list[ChatSummary]`                 | Every chat carrying a label. **whatsapp-web.js only** — Baileys answers `501`.           |
+| `upsert`           | `upsert(session_id, label_id, body) -> SuccessResult`              | Create or update a label. **Baileys only** — whatsapp-web.js answers `501`. **OPERATOR** |
+| `delete`           | `delete(session_id, label_id) -> SuccessResult`                    | Delete a label. **OPERATOR**                                                             |
+| `for_chat`         | `for_chat(session_id, chat_id) -> list[LabelRecord]`               | Labels applied to a chat.                                                                |
+| `add_to_chat`      | `add_to_chat(session_id, chat_id, body) -> SuccessResult`          | Add a label to a chat. **OPERATOR**                                                      |
+| `remove_from_chat` | `remove_from_chat(session_id, chat_id, label_id) -> SuccessResult` | Remove a label from a chat. **OPERATOR**                                                 |
+
+#### `client.channels` _(Newsletters)_
+
+| Method               | Signature                                                                    | Description                                                                                                                 |
+| -------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `list`               | `list(session_id) -> list[ChannelRecord]`                                    | List subscribed channels.                                                                                                   |
+| `get`                | `get(session_id, channel_id) -> ChannelRecord`                               | Get one channel.                                                                                                            |
+| `messages`           | `messages(session_id, channel_id, query=None) -> list[ChannelMessageRecord]` | List channel messages.                                                                                                      |
+| `create`             | `create(session_id, body) -> ChannelRecord`                                  | Create a channel this account owns. **OPERATOR**                                                                            |
+| `delete`             | `delete(session_id, channel_id) -> SuccessResult`                            | Delete a channel this account owns. Irreversible, and every subscriber loses it — distinct from `unsubscribe`. **OPERATOR** |
+| `mute`               | `mute(session_id, channel_id, body) -> SuccessResult`                        | Mute or unmute a channel's notifications. **OPERATOR**                                                                      |
+| `subscribe`          | `subscribe(session_id, body) -> ChannelRecord`                               | Subscribe via invite code. **OPERATOR**                                                                                     |
+| `unsubscribe`        | `unsubscribe(session_id, channel_id) -> SuccessResult`                       | Unsubscribe from a channel. **OPERATOR**                                                                                    |
+| `demote_admin`       | `demote_admin(session_id, channel_id, body) -> SuccessResult`                | Demote a channel admin back to a subscriber; no promote counterpart exists. **OPERATOR**                                    |
+| `transfer_ownership` | `transfer_ownership(session_id, channel_id, body) -> SuccessResult`          | Hand a channel to a new owner. Irreversible. **OPERATOR**                                                                   |
+
+#### `client.catalog` _(WhatsApp Business)_
+
+| Method         | Signature                                                   | Description                                                                         |
+| -------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `info`         | `info(session_id) -> CatalogInfo \| None`                   | Get catalog info, or None when the account has no catalog.                          |
+| `products`     | `products(session_id, query=None) -> PaginatedProducts`     | List products (paginated).                                                          |
+| `product`      | `product(session_id, product_id) -> CatalogProduct \| None` | Get one product, or None when no product has that id.                               |
+| `send_product` | `send_product(session_id, body) -> ProductMessageResponse`  | Send a product message; the message id is under `id`, not `messageId`. **OPERATOR** |
+
+#### `client.status` _(Stories)_
+
+| Method         | Signature                                                               | Description                                                                                                                                                        |
+| -------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `list`         | `list(session_id) -> dict[str, list[StatusRecord]]`                     | List all status updates.                                                                                                                                           |
+| `from_contact` | `from_contact(session_id, contact_id) -> dict[str, list[StatusRecord]]` | Status updates from one contact.                                                                                                                                   |
+| `media`        | `media(session_id, status_id) -> StatusMedia`                           | Fetch the stored media bytes for a status update.                                                                                                                  |
+| `send_text`    | `send_text(session_id, body) -> StatusResult`                           | Post a text status. **OPERATOR**                                                                                                                                   |
+| `send_image`   | `send_image(session_id, body) -> StatusResult`                          | Post an image status. **OPERATOR**                                                                                                                                 |
+| `send_video`   | `send_video(session_id, body) -> StatusResult`                          | Post a video status. **OPERATOR**                                                                                                                                  |
+| `send_voice`   | `send_voice(session_id, body) -> StatusResult`                          | Post an audio status as a voice note. WhatsApp plays one only as Ogg/Opus and neither engine transcodes, so convert with `media.convert_voice` first. **OPERATOR** |
+| `delete`       | `delete(session_id, status_id) -> None`                                 | Delete a status. **OPERATOR**                                                                                                                                      |
+
+#### `client.search`
+
+| Method   | Signature                         | Description                                                                            |
+| -------- | --------------------------------- | -------------------------------------------------------------------------------------- |
+| `search` | `search(params) -> SearchResults` | Search persisted messages across sessions via the active search provider. **OPERATOR** |
+
+#### `client.templates`
+
+| Method   | Signature                                                 | Description                     |
+| -------- | --------------------------------------------------------- | ------------------------------- |
+| `list`   | `list(session_id) -> list[TemplateRecord]`                | List templates. **OPERATOR**    |
+| `get`    | `get(session_id, template_id) -> TemplateRecord`          | Get one template. **OPERATOR**  |
+| `create` | `create(session_id, body) -> TemplateRecord`              | Create a template. **OPERATOR** |
+| `update` | `update(session_id, template_id, body) -> TemplateRecord` | Update a template. **OPERATOR** |
+| `delete` | `delete(session_id, template_id) -> None`                 | Delete a template. **OPERATOR** |
+
+#### `client.profile`
+
+| Method                   | Signature                                                | Description                                                                    |
+| ------------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `set_profile_name`       | `set_profile_name(session_id, body) -> SuccessResult`    | Set the account display name. **OPERATOR**                                     |
+| `set_profile_status`     | `set_profile_status(session_id, body) -> SuccessResult`  | Set the account about/status text (empty clears it). **OPERATOR**              |
+| `set_profile_picture`    | `set_profile_picture(session_id, body) -> SuccessResult` | Set the account profile picture (`url` or `base64` + `mimetype`). **OPERATOR** |
+| `delete_profile_picture` | `delete_profile_picture(session_id) -> SuccessResult`    | Remove the account profile picture. **OPERATOR**                               |
+
+#### `client.calls`
+
+| Method        | Signature                                           | Description                                                                                   |
+| ------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `reject_call` | `reject_call(session_id, call_id) -> SuccessResult` | Reject a ringing incoming call. **Baileys only**: whatsapp-web.js answers `501`. **OPERATOR** |
+| `create_link` | `create_link(session_id, body) -> CallLinkResponse` | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**       |
+
+#### `client.media`
+
+| Method              | Signature                                                               | Description                                                                                  |
+| ------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `conversion_status` | `conversion_status(session_id) -> MediaConversionAvailability`          | Whether conversion is switched on for this deployment AND the ffmpeg binary can be run.      |
+| `convert_voice`     | `convert_voice(session_id, *, url=None, base64=None) -> ConvertedMedia` | Convert audio into a WhatsApp voice note (Ogg/Opus, mono, tuned for speech). **OPERATOR**    |
+| `convert_video`     | `convert_video(session_id, *, url=None, base64=None) -> ConvertedMedia` | Convert video into an MP4 every WhatsApp client accepts (baseline H.264 + AAC). **OPERATOR** |
+
+#### `client.health`
+
+| Method  | Signature                        | Description             |
+| ------- | -------------------------------- | ----------------------- |
+| `check` | `check() -> HealthResponse`      | Aggregate health check. |
+| `live`  | `live() -> dict[str, str]`       | Liveness probe.         |
+| `ready` | `ready() -> HealthReadyResponse` | Readiness probe.        |
+
+### Error Handling
+
+Every error the SDK raises itself inherits from `OpenWAError`. A non-2xx response raises an `OpenWAApiError` (or a more specific subclass picked by status); a timeout raises `OpenWATimeoutError`. A connection failure (refused, reset, DNS, TLS) surfaces as `httpx.TransportError` and an invalid argument as `ValueError`, so a catch-all names those as well. The API-error classes carry `.status` (HTTP code), `.body` (parsed JSON or raw text), and `.error_kind` (the NestJS `error` field), plus `.code` (the body's `code`), `.retry_after_seconds` (the body's `retryAfterSeconds`, else the `Retry-After` header) and `.headers` (the response headers).
+
+| Exception                       | Trigger                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenWAAuthError`               | HTTP `401` — missing or invalid API key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `OpenWAForbiddenError`          | HTTP `403` — the key's role or scope (session, IP or chat allow-list) refuses the call, or WhatsApp itself refused the operation (for example, missing group admin rights)                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `OpenWANotFoundError`           | HTTP `404` — resource not found                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `OpenWAConflictError`           | HTTP `409`: a conflicting state, typically a session that is not ready, or a keyed send pending or unconfirmed (see `code`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `OpenWARateLimitError`          | HTTP `429` — too many requests. The global rate limiter's 429 lifts when its window expires (seconds for the per-second tier, up to an hour for the hourly tier by default), and `retry_after_seconds` carries its `Retry-After` header. A 429 whose `code` is `"SEND_PACING_LIMITED"` is usually not transient: do not retry it before `retry_after_seconds`, which then comes from the body: a few seconds when only sends still in flight caused it, the rest of the failure breaker's cooldown (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes by default) after a run of send failures, otherwise up to the next UTC day. |
+| `OpenWANotImplementedError`     | HTTP `501` — active engine doesn't support the operation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWAServiceUnavailableError` | HTTP `503` — the gateway could not complete the request now (transport failure, draining, or on Baileys a WhatsApp throttle (429) or timeout (408)); back off and retry later, though a catalog 503 can persist because WhatsApp may never answer that query. In a routed deployment a forward that fails before reaching the owner node answers 503, and a 503 from the owner itself is relayed unchanged (a bounded write it covers may still have been applied); a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on                                             |
+| `OpenWAApiError`                | any other non-2xx status (incl. unfollowed `3xx`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `OpenWATimeoutError`            | request exceeded `timeout` (has a `.timeout` attribute)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+```python
+from openwa import (
+    OpenWAClient,
+    OpenWAConflictError,
+    OpenWANotFoundError,
+    OpenWARateLimitError,
+    OpenWATimeoutError,
+    OpenWAApiError,
+)
+
+client = OpenWAClient(base_url="http://localhost:2785", api_key="owa_k1_…")
+
+try:
+    client.messages.send_text(session_id, {
+        "chatId": "628123456789@c.us",
+        "text": "Hi!",
+    })
+except OpenWAConflictError as e:
+    print(f"Conflict: typically the session is not ready yet (start it first); see e.code ({e.code}).")
+except OpenWANotFoundError:
+    print("Session does not exist.")
+except OpenWARateLimitError:
+    print("Rate limited — back off and retry.")
+except OpenWATimeoutError as e:
+    print(f"Timed out after {e.timeout}s")
+except OpenWAApiError as e:
+    print(f"API error {e.status} ({e.error_kind}): {e.body}")
+```
+
+### Notable Behaviors
+
+- **Redirects are never followed.** `follow_redirects` is forced off so the `X-API-Key` header is never re-sent to a redirect target. An unfollowed `3xx` therefore surfaces as an `OpenWAApiError` rather than a success.
+- **Auth/JSON headers always win.** `default_headers` are applied first; the SDK then sets `Content-Type: application/json` and `X-API-Key`, so caller headers can never clobber them.
+- **Path segments are percent-encoded.** Each path value (session/chat/message id, etc.) is encoded so a `/`, `#`, or `?` can't break out of its position; already-safe id characters `@`, `:`, `+` are left readable. Boolean query params are serialized lowercase (`true`/`false`); `None` query values are dropped.
+- **Empty and dot segments are refused.** An empty, `.` or `..` id raises `ValueError` before anything is sent, because httpx would otherwise resolve it to the parent resource. A raw `request()` path that does not begin with `/` raises `ValueError` too.
+- **Base-URL path prefix is preserved.** A trailing `/` is stripped from `base_url`, but any path prefix (e.g. when running behind a reverse proxy) is kept on every request.
+- **No automatic retries.** Each call issues exactly one request; retry/backoff is the caller's responsibility. Wrap or inject a custom `transport` for retry or observability middleware.
+- **Testable transport injection.** Pass `transport=httpx.MockTransport(handler)` to intercept requests in tests — no global monkey-patching.
+- **204 / non-JSON handling.** A `204` (or empty body) returns `None`; a 2xx body that isn't valid JSON is returned as raw text instead of raising.
+- **PEP 561 typed.** The package ships `py.typed`, so type-checkers consume the bundled hints directly.
+
+## 18.4 PHP SDK
+
+The PHP SDK is a hand-written, synchronous client built on Guzzle 7.9+ or 8. It mirrors the full user-facing API surface: every resource method maps to one REST endpoint, request/response payloads are plain associative arrays, and non-2xx responses are translated into a typed `OpenWA*Exception` hierarchy.
+
+### Installation
+
+```bash
+composer require rmyndharis/openwa
+```
+
+Requirements:
+
+- **PHP 8.1+** (`declare(strict_types=1)` throughout; typed properties, `match`).
+- **Guzzle 7.9+ or 8** (`guzzlehttp/guzzle: ^7.9 || ^8.0`).
+- PSR-4 autoloaded under the `OpenWA\` namespace (`"OpenWA\\": "src/"`).
+
+### Quick Start
+
+```php
+<?php
+require 'vendor/autoload.php';
+
+use OpenWA\Client;
+
+$client = new Client([
+    'baseUrl' => 'http://localhost:2785',
+    'apiKey'  => 'owa_k1_…',
+]);
+
+// Sessions are addressed by the UUID that create() returns, not by name. Create a session once;
+// afterwards, find its id with $client->sessions->list(['name' => 'my-session']).
+$session = $client->sessions->create(['name' => 'my-session']);
+$client->sessions->start($session['id']);
+
+// Link the account before sending: scan sessions->getQrCode (or use sessions->requestPairingCode for a number with no linked session),
+// then wait for status 'ready'. An unlinked session answers the send with 409.
+$result = $client->messages->sendText($session['id'], [
+    'chatId' => '628123456789@c.us',
+    'text'   => 'Hello from the OpenWA PHP SDK!',
+]);
+
+echo $result['messageId'];
+```
+
+The entry class is `OpenWA\Client`. It validates that `baseUrl` and `apiKey` are present (throwing `OpenWAException` otherwise), constructs the shared HTTP transport, and exposes each resource as a public property: `$client->sessions`, `$client->messages`, `$client->search`, `$client->contacts`, `$client->groups`, `$client->webhooks`, `$client->chats`, `$client->status`, `$client->health`, `$client->labels`, `$client->channels`, `$client->catalog`, `$client->templates`, `$client->profile`, `$client->calls`, `$client->media`.
+
+Two escape hatches sit on the client itself:
+
+| Method    | Signature                                                                             | Description                                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth`    | `auth(): array`                                                                       | `POST /api/auth/validate` — validate the configured key and resolve its role; a key restricted to selected chats is refused with `403`. |
+| `request` | `request(string $method, string $path, array $query = [], mixed $body = null): mixed` | Raw request against any path (advanced use); returns decoded JSON or `null` for empty/204.                                              |
+
+### Client Configuration
+
+The constructor takes a single associative `$config` array:
+
+| Key                 | Type                           | Default          | Description                                                                                                                                                                                                                                                |
+| ------------------- | ------------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`           | `string`                       | — (**required**) | API base URL, e.g. `http://localhost:2785`. A trailing `/` is stripped; any path prefix (e.g. `/v1` behind a proxy) is preserved.                                                                                                                          |
+| `apiKey`            | `string`                       | — (**required**) | Sent as the `X-API-Key` header on every request. Surrounding whitespace is trimmed; a control or non-ASCII character is refused.                                                                                                                           |
+| `timeout`           | `float`                        | `30.0`           | Per-request timeout in seconds, applied to an injected `httpClient` too. On Guzzle 8 it is also sent as `read_timeout` (the stream handler's idle bound, `0` for none), replacing the injected client's own. The SDK has no separate idle setting.         |
+| `httpClient`        | `?\GuzzleHttp\ClientInterface` | `null`           | Inject a Guzzle client (e.g. one built on a `MockHandler`) for testing or middleware. When `null`, a default Guzzle client is created with the configured timeout. On Guzzle 8 the SDK `timeout` replaces this client's `read_timeout` (see `timeout`).    |
+| `defaultHeaders`    | `array<string,scalar\|list>`   | `[]`             | Extra headers applied on every request, **under** the SDK's auth/JSON headers (which always win). A name must be an HTTP token; a value is text, a scalar or `null` (sent as text) or a non-empty list of those, without a control or non-ASCII character. |
+| `allowInsecureHttp` | `bool`                         | `false`          | Skip the `error_log()` warning written for an `http://` `baseUrl` whose host is not localhost (e.g. a private Docker network or a TLS-terminating proxy).                                                                                                  |
+
+Missing `baseUrl` or `apiKey`, a key or default header value with a control or non-ASCII character, or a default header name that is not an HTTP token throws `OpenWA\Exceptions\OpenWAException` from the constructor. So does an empty list as a header value, by header name, because Guzzle 8 cannot represent a header with zero values; use `''` for an empty value.
+
+### Resources & Methods
+
+All payloads are associative arrays; all listed methods are synchronous and return the decoded JSON (an `array`), except the `void` deletes. Methods marked **OPERATOR** require an operator-level API key. Some methods are supported by one engine only and answer `501` on the other (a row says so where it matters; section [29.6 of the engine capability matrix](./29-engine-capability-matrix.md#296-the-27-not-available-cells-in-detail) lists them all).
+
+#### `sessions`
+
+| Method               | Signature                                            | Description                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`               | `list(array $query = []): array`                     | List all sessions. The optional query takes `limit`, `offset` and `name` (an exact, case-sensitive match; no match returns an empty list).                                                                                                                                                                                                                      |
+| `getConfig`          | `getConfig(string $id): array`                       | Read a session's engine configuration.                                                                                                                                                                                                                                                                                                                          |
+| `updateConfig`       | `updateConfig(string $id, array $body): array`       | Update a session's configuration, in any state, without a restart or re-link; `autoRejectCalls` applies immediately, the reconnect settings on the next start. **OPERATOR**                                                                                                                                                                                     |
+| `getProxy`           | `getProxy(string $id): array`                        | Read a session's masked proxy configuration (credentials never returned).                                                                                                                                                                                                                                                                                       |
+| `updateProxy`        | `updateProxy(string $id, array $body): array`        | Update per-session proxy settings; changes apply on the next start. Send `proxyUrl: null` to clear. **ADMIN**                                                                                                                                                                                                                                                   |
+| `get`                | `get(string $id): array`                             | Get one session.                                                                                                                                                                                                                                                                                                                                                |
+| `create`             | `create(array $body): array`                         | Create a session (`$body['name']` required). **OPERATOR**; setting `proxyUrl` requires **ADMIN**                                                                                                                                                                                                                                                                |
+| `delete`             | `delete(string $id): void`                           | Delete a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                                  |
+| `start`              | `start(string $id): array`                           | Start a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                                   |
+| `stop`               | `stop(string $id): array`                            | Stop a session. **OPERATOR**                                                                                                                                                                                                                                                                                                                                    |
+| `logout`             | `logout(string $id): array`                          | Attempt an engine-native unlink of this device, then stop the session. A `200` means the unlink + local cleanup completed (not an independent Linked-Devices observation); a later `start` needs a fresh QR. A `502` (`SESSION_LOGOUT_INCOMPLETE`) stops locally but leaves the operation incomplete; start and retry. Requires a running session. **OPERATOR** |
+| `forceKill`          | `forceKill(string $id): array`                       | Force-kill a session. A `502` (`SESSION_FORCE_KILL_INCOMPLETE`) stops locally but the engine process may still be running; a retry answers `400`, so restart the node to reap it. **OPERATOR**                                                                                                                                                                  |
+| `getQrCode`          | `getQrCode(string $id): array`                       | Fetch the current QR code. **OPERATOR**                                                                                                                                                                                                                                                                                                                         |
+| `requestPairingCode` | `requestPairingCode(string $id, array $body): array` | Request a phone-pairing code. On whatsapp-web.js, not for a number that already has a linked session (WhatsApp can revoke that device; the gateway answers 409 for the stored phone of another of its sessions but cannot see a link made elsewhere); link it by QR instead. **OPERATOR**                                                                       |
+| `setOnlinePresence`  | `setOnlinePresence(string $id, array $body): array`  | Set the account's own global presence (appear online or offline). **OPERATOR**                                                                                                                                                                                                                                                                                  |
+| `stats`              | `stats(): array`                                     | `GET /api/sessions/stats/overview`.                                                                                                                                                                                                                                                                                                                             |
+
+#### `messages`
+
+| Method         | Signature                                                                | Description                                                                                                                                                                 |
+| -------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`         | `list(string $sessionId, array $query = []): array`                      | List stored messages; the query takes the same keys as the JavaScript client's `messages.list`, and the response carries `unknownTimestampTotal` under the same conditions. |
+| `sendText`     | `sendText(string $sessionId, array $body): array`                        | Send a text message (`send-text`). **OPERATOR**                                                                                                                             |
+| `sendImage`    | `sendImage(string $sessionId, array $body): array`                       | Send an image. **OPERATOR**                                                                                                                                                 |
+| `sendVideo`    | `sendVideo(string $sessionId, array $body): array`                       | Send a video. **OPERATOR**                                                                                                                                                  |
+| `sendAudio`    | `sendAudio(string $sessionId, array $body): array`                       | Send audio. **OPERATOR**                                                                                                                                                    |
+| `sendDocument` | `sendDocument(string $sessionId, array $body): array`                    | Send a document. **OPERATOR**                                                                                                                                               |
+| `sendSticker`  | `sendSticker(string $sessionId, array $body): array`                     | Send a sticker. **OPERATOR**                                                                                                                                                |
+| `sendLocation` | `sendLocation(string $sessionId, array $body): array`                    | Send a location. **OPERATOR**                                                                                                                                               |
+| `sendContact`  | `sendContact(string $sessionId, array $body): array`                     | Send a contact card. **OPERATOR**                                                                                                                                           |
+| `sendTemplate` | `sendTemplate(string $sessionId, array $body): array`                    | Send a stored template. **OPERATOR**                                                                                                                                        |
+| `sendPoll`     | `sendPoll(string $sessionId, array $body): array`                        | Send a native poll (2–12 options). **OPERATOR**                                                                                                                             |
+| `reply`        | `reply(string $sessionId, array $body): array`                           | Reply to a message. **OPERATOR**                                                                                                                                            |
+| `forward`      | `forward(string $sessionId, array $body): array`                         | Forward a message. **OPERATOR**                                                                                                                                             |
+| `clickButton`  | `clickButton(string $sessionId, array $body): array`                     | Tap a button or list row on a stored WhatsApp Business prompt (Baileys only). **OPERATOR**                                                                                  |
+| `react`        | `react(string $sessionId, array $body): array`                           | React to a message. **OPERATOR**                                                                                                                                            |
+| `delete`       | `delete(string $sessionId, array $body): array`                          | Delete a message. **OPERATOR**                                                                                                                                              |
+| `editMessage`  | `editMessage(string $sessionId, array $body): array`                     | Edit the text of a message already sent (`$body` needs `chatId`, `messageId`, `body`). **OPERATOR**                                                                         |
+| `history`      | `history(string $sessionId, string $chatId, array $query = []): array`   | Fetch chat history.                                                                                                                                                         |
+| `reactions`    | `reactions(string $sessionId, string $chatId, string $messageId): array` | List reactions on a message.                                                                                                                                                |
+| `pin`          | `pin(string $sessionId, array $body): array`                             | Pin a message in its chat. `durationSeconds` must be 86400, 604800 or 2592000; in a group only admins may pin. **OPERATOR**                                                 |
+| `votePoll`     | `votePoll(string $sessionId, array $body): array`                        | Cast a vote on a poll; `options` are the option texts, not ids. Not supported on Baileys (`501`). **OPERATOR**                                                              |
+| `star`         | `star(string $sessionId, array $body): array`                            | Star or unstar a message. Best-effort on whatsapp-web.js, which silently ignores a message it will not star. **OPERATOR**                                                   |
+| `unpin`        | `unpin(string $sessionId, array $body): array`                           | Unpin a pinned message. **OPERATOR**                                                                                                                                        |
+| `media`        | `media(string $sessionId, string $chatId, string $messageId): array`     | Fetch a message's stored media bytes: the archived file when one exists, else the inline copy on the message row. `404` when neither holds bytes.                           |
+| `sendBulk`     | `sendBulk(string $sessionId, array $body): array`                        | Enqueue a bulk send batch. **OPERATOR**                                                                                                                                     |
+| `batchStatus`  | `batchStatus(string $sessionId, string $batchId): array`                 | Get bulk batch status.                                                                                                                                                      |
+| `cancelBatch`  | `cancelBatch(string $sessionId, string $batchId): array`                 | Cancel a bulk batch. **OPERATOR**                                                                                                                                           |
+
+#### `contacts`
+
+| Method            | Signature                                                          | Description                                                                          |
+| ----------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `list`            | `list(string $sessionId, array $query = []): array`                | List contacts.                                                                       |
+| `get`             | `get(string $sessionId, string $contactId): array`                 | Get one contact.                                                                     |
+| `check`           | `check(string $sessionId, string $number): array`                  | Check whether a number is on WhatsApp. **OPERATOR**                                  |
+| `profilePicture`  | `profilePicture(string $sessionId, string $contactId): array`      | Get a contact's profile picture.                                                     |
+| `profilePictures` | `profilePictures(string $sessionId, array $ids): array`            | Profile picture URLs for up to 50 contacts; ids skipped after a timeout are absent.  |
+| `phone`           | `phone(string $sessionId, string $contactId): array`               | Resolve a contact's phone number.                                                    |
+| `block`           | `block(string $sessionId, string $contactId): array`               | Block a contact. **OPERATOR**                                                        |
+| `upsert`          | `upsert(string $sessionId, string $contactId, array $body): array` | Save a contact to the account's addressbook, or edit an existing entry. **OPERATOR** |
+| `delete`          | `delete(string $sessionId, string $contactId): array`              | Remove a contact from the account's addressbook. **OPERATOR**                        |
+| `unblock`         | `unblock(string $sessionId, string $contactId): array`             | Unblock a contact. **OPERATOR**                                                      |
+| `listBlocked`     | `listBlocked(string $sessionId): array`                            | List the ids this account has blocked. Session-wide, so it takes no contact id.      |
+
+#### `groups`
+
+| Method                      | Signature                                                                                           | Description                                                                                                                |
+| --------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `list`                      | `list(string $sessionId, array $query = []): array`                                                 | List groups.                                                                                                               |
+| `get`                       | `get(string $sessionId, string $groupId): array`                                                    | Get one group.                                                                                                             |
+| `create`                    | `create(string $sessionId, array $body): array`                                                     | Create a group. **OPERATOR**                                                                                               |
+| `joinInfo`                  | `joinInfo(string $sessionId, string $code): array`                                                  | Preview a group from its invite code WITHOUT joining. Read-only, so it is safe to call on a code from an untrusted source. |
+| `joinGroup`                 | `joinGroup(string $sessionId, string $inviteCode): array`                                           | Join a group via its invite code. **OPERATOR**                                                                             |
+| `addParticipants`           | `addParticipants(string $sessionId, string $groupId, array $participants): array`                   | Add participants. **OPERATOR**                                                                                             |
+| `removeParticipants`        | `removeParticipants(string $sessionId, string $groupId, array $participants): array`                | Remove participants. **OPERATOR**                                                                                          |
+| `promoteParticipants`       | `promoteParticipants(string $sessionId, string $groupId, array $participants): array`               | Promote to admin. **OPERATOR**                                                                                             |
+| `demoteParticipants`        | `demoteParticipants(string $sessionId, string $groupId, array $participants): array`                | Demote admins. **OPERATOR**                                                                                                |
+| `setSubject`                | `setSubject(string $sessionId, string $groupId, string $subject): array`                            | Update the group subject. **OPERATOR**                                                                                     |
+| `setDescription`            | `setDescription(string $sessionId, string $groupId, string $description): array`                    | Update the group description. **OPERATOR**                                                                                 |
+| `setMemberLabel`            | `setMemberLabel(string $sessionId, string $groupId, string $label): array`                          | Set this account's member label in the group (empty clears it; Baileys only). **OPERATOR**                                 |
+| `getGroupSettings`          | `getGroupSettings(string $sessionId, string $groupId): array`                                       | Get the group settings (only the ones the active engine supports are present).                                             |
+| `updateGroupSettings`       | `updateGroupSettings(string $sessionId, string $groupId, array $settings): array`                   | Update the group settings (at least one of `announce`, `locked`, `ephemeralSeconds`, `memberAddMode`). **OPERATOR**        |
+| `leave`                     | `leave(string $sessionId, string $groupId): array`                                                  | Leave the group. **OPERATOR**                                                                                              |
+| `getPicture`                | `getPicture(string $sessionId, string $groupId): array`                                             | The group's picture URL, or `null` when it has none.                                                                       |
+| `setPicture`                | `setPicture(string $sessionId, string $groupId, array $body): array`                                | Set the group's picture. **OPERATOR**                                                                                      |
+| `deletePicture`             | `deletePicture(string $sessionId, string $groupId): array`                                          | Remove the group's picture. **OPERATOR**                                                                                   |
+| `inviteCode`                | `inviteCode(string $sessionId, string $groupId): array`                                             | Get the invite code. **OPERATOR**                                                                                          |
+| `revokeInviteCode`          | `revokeInviteCode(string $sessionId, string $groupId): array`                                       | Revoke and regenerate the invite code. **OPERATOR**                                                                        |
+| `getMembershipRequests`     | `getMembershipRequests(string $sessionId, string $groupId): array`                                  | List a group's pending join requests. Requires group admin.                                                                |
+| `approveMembershipRequests` | `approveMembershipRequests(string $sessionId, string $groupId, ?array $participants = null): array` | Approve pending join requests; omit the list to approve all. **OPERATOR**                                                  |
+| `rejectMembershipRequests`  | `rejectMembershipRequests(string $sessionId, string $groupId, ?array $participants = null): array`  | Reject pending join requests; omit the list to reject all. **OPERATOR**                                                    |
+
+#### `chats`
+
+| Method              | Signature                                                  | Description                                                                                                                                                                                                                                  |
+| ------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`              | `list(string $sessionId, array $query = []): array`        | List chats.                                                                                                                                                                                                                                  |
+| `subscribePresence` | `subscribePresence(string $sessionId, array $body): array` | Subscribe to a chat's presence; updates then arrive as `presence.update` events. The subscription belongs to the connection and does not survive a reconnect. **OPERATOR**                                                                   |
+| `getPresence`       | `getPresence(string $sessionId, string $chatId): ?array`   | The last presence reported for a chat, or `null` when none has been. Held in memory, so a restart clears it.                                                                                                                                 |
+| `markRead`          | `markRead(string $sessionId, array $body): array`          | Mark chat(s) read. **OPERATOR**                                                                                                                                                                                                              |
+| `markUnread`        | `markUnread(string $sessionId, array $body): array`        | Mark chat(s) unread. **OPERATOR**                                                                                                                                                                                                            |
+| `archive`           | `archive(string $sessionId, array $body): array`           | Archive or unarchive a chat. `success: false` means the engine declined. **OPERATOR**                                                                                                                                                        |
+| `pin`               | `pin(string $sessionId, array $body): array`               | Pin a chat to the top of the list, or unpin it. `success: false` means WhatsApp declined — three pins maximum. **OPERATOR**                                                                                                                  |
+| `mute`              | `mute(string $sessionId, array $body): array`              | Mute a chat until an absolute epoch-MILLISECONDS timestamp, or unmute with `null`. **OPERATOR**                                                                                                                                              |
+| `clearMessages`     | `clearMessages(string $sessionId, string $chatId): array`  | Delete every message in a chat, keeping the chat itself. On success the gateway also deletes its stored copy of the chat's messages (rows, inline and archived media, search entries); export the history first if you need it. **OPERATOR** |
+| `delete`            | `delete(string $sessionId, array $body): array`            | Delete chat(s). On success the gateway also deletes its stored copy of the chat's messages (rows, inline and archived media, search entries); export the history first if you need it. **OPERATOR**                                          |
+| `sendState`         | `sendState(string $sessionId, array $body): array`         | Send a typing/recording state. **OPERATOR**                                                                                                                                                                                                  |
+
+#### `webhooks`
+
+| Method                    | Signature                                                   | Description                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listAll`                 | `listAll(array $query = []): array`                         | List webhooks across EVERY session the key can see, not one session's. **OPERATOR**                                                                                                                                                                                                                                                          |
+| `deliveryFailures`        | `deliveryFailures(array $query = [])`                       | Deliveries that exhausted their retries (`attempts > 0`), or were shed, oversize, failed preflight or refused at shutdown, possibly between retries (`attempts: 0`); a later successful delivery removes the row; the diagnostic for a webhook that stopped arriving. A delivery a smart filter suppressed never reaches this log. **ADMIN** |
+| `redriveDeliveryFailures` | `redriveDeliveryFailures(array $body = []): array`          | Replay the rows `deliveryFailures` marks `replayable` (kept while `WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` > 0), fewest attempts first, then oldest, one bounded batch per call, reusing each stored idempotency key; returns delivered/failed/skipped/remaining counts; `enqueued` is always 0. **ADMIN**                                  |
+| `list`                    | `list(string $sessionId): array`                            | List webhooks. **OPERATOR**                                                                                                                                                                                                                                                                                                                  |
+| `get`                     | `get(string $sessionId, string $id): array`                 | Get one webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                                |
+| `create`                  | `create(string $sessionId, array $body): array`             | Create a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `update`                  | `update(string $sessionId, string $id, array $body): array` | Update a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `delete`                  | `delete(string $sessionId, string $id): void`               | Delete a webhook. **OPERATOR**                                                                                                                                                                                                                                                                                                               |
+| `test`                    | `test(string $sessionId, string $id): array`                | Send a test event. **OPERATOR**                                                                                                                                                                                                                                                                                                              |
+
+#### `labels` _(WhatsApp Business)_
+
+| Method           | Signature                                                                   | Description                                                                              |
+| ---------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `list`           | `list(string $sessionId): array`                                            | List labels.                                                                             |
+| `get`            | `get(string $sessionId, string $labelId): array`                            | Get one label.                                                                           |
+| `chats`          | `chats(string $sessionId, string $labelId): array`                          | Every chat carrying a label. **whatsapp-web.js only** — Baileys answers `501`.           |
+| `upsert`         | `upsert(string $sessionId, string $labelId, array $body): array`            | Create or update a label. **Baileys only** — whatsapp-web.js answers `501`. **OPERATOR** |
+| `delete`         | `delete(string $sessionId, string $labelId): array`                         | Delete a label. **OPERATOR**                                                             |
+| `forChat`        | `forChat(string $sessionId, string $chatId): array`                         | List labels applied to a chat.                                                           |
+| `addToChat`      | `addToChat(string $sessionId, string $chatId, array $body): array`          | Add a label to a chat (`$body` needs `labelId`). **OPERATOR**                            |
+| `removeFromChat` | `removeFromChat(string $sessionId, string $chatId, string $labelId): array` | Remove a label from a chat. **OPERATOR**                                                 |
+
+#### `channels` _(Newsletters)_
+
+| Method              | Signature                                                                     | Description                                                                                                                 |
+| ------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `list`              | `list(string $sessionId): array`                                              | List channels.                                                                                                              |
+| `get`               | `get(string $sessionId, string $channelId): array`                            | Get one channel.                                                                                                            |
+| `messages`          | `messages(string $sessionId, string $channelId, array $query = []): array`    | Recent channel messages.                                                                                                    |
+| `create`            | `create(string $sessionId, array $body): array`                               | Create a channel this account owns. **OPERATOR**                                                                            |
+| `delete`            | `delete(string $sessionId, string $channelId): array`                         | Delete a channel this account owns. Irreversible, and every subscriber loses it — distinct from `unsubscribe`. **OPERATOR** |
+| `mute`              | `mute(string $sessionId, string $channelId, array $body): array`              | Mute or unmute a channel's notifications. **OPERATOR**                                                                      |
+| `subscribe`         | `subscribe(string $sessionId, array $body): array`                            | Subscribe via invite code (`$body` needs `inviteCode`). **OPERATOR**                                                        |
+| `unsubscribe`       | `unsubscribe(string $sessionId, string $channelId): array`                    | Unsubscribe from a channel. **OPERATOR**                                                                                    |
+| `demoteAdmin`       | `demoteAdmin(string $sessionId, string $channelId, array $body): array`       | Demote a channel admin back to a subscriber; no promote counterpart exists. **OPERATOR**                                    |
+| `transferOwnership` | `transferOwnership(string $sessionId, string $channelId, array $body): array` | Hand a channel to a new owner. Irreversible. **OPERATOR**                                                                   |
+
+#### `catalog` _(WhatsApp Business)_
+
+| Method        | Signature                                               | Description                                                   |
+| ------------- | ------------------------------------------------------- | ------------------------------------------------------------- |
+| `info`        | `info(string $sessionId): ?array`                       | Get catalog info, or null when the account has no catalog.    |
+| `products`    | `products(string $sessionId, array $query = []): array` | List products (e.g. `['page' => 1, 'limit' => 20]`).          |
+| `product`     | `product(string $sessionId, string $productId): ?array` | Get one product, or null when no product has that id.         |
+| `sendProduct` | `sendProduct(string $sessionId, array $body): array`    | Send a product message (`chatId` + `productId`). **OPERATOR** |
+
+#### `status` _(Stories)_
+
+| Method        | Signature                                                  | Description                                                                                                                                                       |
+| ------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`        | `list(string $sessionId): array`                           | List status updates.                                                                                                                                              |
+| `fromContact` | `fromContact(string $sessionId, string $contactId): array` | Status updates from one contact.                                                                                                                                  |
+| `media`       | `media(string $sessionId, string $statusId): array`        | Fetch the stored media bytes for a status update (`{data, contentType}`; 404 when there is none).                                                                 |
+| `sendText`    | `sendText(string $sessionId, array $body): array`          | Post a text status. **OPERATOR**                                                                                                                                  |
+| `sendImage`   | `sendImage(string $sessionId, array $body): array`         | Post an image status. **OPERATOR**                                                                                                                                |
+| `sendVideo`   | `sendVideo(string $sessionId, array $body): array`         | Post a video status. **OPERATOR**                                                                                                                                 |
+| `sendVoice`   | `sendVoice(string $sessionId, array $body): array`         | Post an audio status as a voice note. WhatsApp plays one only as Ogg/Opus and neither engine transcodes, so convert with `media.convertVoice` first. **OPERATOR** |
+| `delete`      | `delete(string $sessionId, string $statusId): void`        | Delete a status. **OPERATOR**                                                                                                                                     |
+
+#### `search`
+
+| Method   | Signature                      | Description                                                                                                      |
+| -------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `search` | `search(array $params): array` | Search persisted messages across sessions via the active search provider (`$params['q']` required). **OPERATOR** |
+
+#### `templates`
+
+| Method   | Signature                                                           | Description                                                                                   |
+| -------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `list`   | `list(string $sessionId): array`                                    | List templates. **OPERATOR**                                                                  |
+| `get`    | `get(string $sessionId, string $templateId): array`                 | Get one template. **OPERATOR**                                                                |
+| `create` | `create(string $sessionId, array $body): array`                     | Create a template (`$body` needs `name` and `body`; `header`/`footer` optional). **OPERATOR** |
+| `update` | `update(string $sessionId, string $templateId, array $body): array` | Update a template. **OPERATOR**                                                               |
+| `delete` | `delete(string $sessionId, string $templateId): void`               | Delete a template. **OPERATOR**                                                               |
+
+#### `profile`
+
+| Method                 | Signature                                                    | Description                                                                    |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `setProfileName`       | `setProfileName(string $sessionId, string $name): array`     | Set the account display name. **OPERATOR**                                     |
+| `setProfileStatus`     | `setProfileStatus(string $sessionId, string $status): array` | Set the account about/status text (empty clears it). **OPERATOR**              |
+| `setProfilePicture`    | `setProfilePicture(string $sessionId, array $body): array`   | Set the account profile picture (`url` or `base64` + `mimetype`). **OPERATOR** |
+| `deleteProfilePicture` | `deleteProfilePicture(string $sessionId): array`             | Remove the account profile picture. **OPERATOR**                               |
+
+#### `calls`
+
+| Method       | Signature                                              | Description                                                                                                                                   |
+| ------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rejectCall` | `rejectCall(string $sessionId, string $callId): array` | Reject a ringing incoming call (404 when it is not found or no longer ringing). **Baileys only**: whatsapp-web.js answers `501`. **OPERATOR** |
+| `createLink` | `createLink(string $sessionId, array $body): array`    | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**                                                       |
+
+#### `media`
+
+| Method             | Signature                                              | Description                                                                                  |
+| ------------------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `conversionStatus` | `conversionStatus(string $sessionId): array`           | Whether conversion is switched on for this deployment AND the ffmpeg binary can be run.      |
+| `convertVoice`     | `convertVoice(string $sessionId, array $media): array` | Convert audio into a WhatsApp voice note (Ogg/Opus, mono, tuned for speech). **OPERATOR**    |
+| `convertVideo`     | `convertVideo(string $sessionId, array $media): array` | Convert video into an MP4 every WhatsApp client accepts (baseline H.264 + AAC). **OPERATOR** |
+
+#### `health`
+
+| Method  | Signature        | Description        |
+| ------- | ---------------- | ------------------ |
+| `check` | `check(): array` | `GET /api/health`. |
+| `live`  | `live(): array`  | Liveness probe.    |
+| `ready` | `ready(): array` | Readiness probe.   |
+
+### Error Handling
+
+All exceptions the SDK raises itself live in `OpenWA\Exceptions` and descend from `OpenWAException` (which extends PHP's `\Exception`). A transport failure that is not a timeout (a refused connection, a reset, a TLS verification failure) surfaces as one of Guzzle's own `GuzzleHttp\Exception\TransferException` subclasses and an invalid argument as `InvalidArgumentException`, so a catch-all names those as well. The subclass depends on the Guzzle major (a reset is a `RequestException` on Guzzle 7 and a `NetworkException`, which is not a `RequestException`, on Guzzle 8), so catch `TransferException` rather than a subclass. A body that ends before the `Content-Length` it declares is such a failure too: cURL and Guzzle 8 raise their own, and the SDK raises a `RequestException` on Guzzle 7's stream handler, which returns the short body as if it were whole. That handler still returns two cut bodies without an error, because neither carries a length to compare with: a chunked body (the gateway sends a `Content-Length` with media whenever the store reports a size) and a compressed body the application asked for with its own `Accept-Encoding` header. On Guzzle 7's stream handler (a host without `ext-curl`) a `timeout` of `0` still leaves PHP's `default_socket_timeout` before the response headers, and that wait ends with such a failure too, not an `OpenWATimeoutException` (see the [PHP README](../sdk/php/README.md)). That handler also bounds each wait rather than the whole call: a silence in the body can last up to about twice the `timeout` before it is cut off, and a body that keeps trickling bytes is not cut off at all, while cURL and Guzzle 8's stream handler bound the whole call. Any non-2xx response is raised as an `OpenWAApiException`; the static `classify()` factory picks the most specific subclass by status code. An `OpenWAApiException` carries the HTTP status (`getStatus(): int`), the parsed error body (`getBody(): mixed`), and the NestJS `error` kind when present (`getErrorKind(): ?string`), plus the body's `code` (`getErrorCode(): ?string`), the retry delay in seconds from the body's `retryAfterSeconds` or the `Retry-After` header (`getRetryAfterSeconds(): ?int`) and the response headers (`getHeaders(): array`).
+
+| Exception                           | Extends              | Trigger                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenWAException`                   | `\Exception`         | Base for the SDK's own errors (also thrown for missing `baseUrl`/`apiKey` and for a key or default header the HTTP layer would refuse); a transport failure other than a timeout is Guzzle's own (`TransferException`).                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `OpenWAApiException`                | `OpenWAException`    | Any non-2xx (including unfollowed 3xx and other 4xx/5xx).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `OpenWAAuthException`               | `OpenWAApiException` | `401` — missing/invalid API key.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `OpenWAForbiddenException`          | `OpenWAApiException` | `403` — the key's role or scope refuses the call (e.g. operator-only endpoint, or a session, IP or chat outside its allow-lists), or WhatsApp itself refused the operation (for example, missing group admin rights).                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `OpenWANotFoundException`           | `OpenWAApiException` | `404` — resource not found.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `OpenWAConflictException`           | `OpenWAApiException` | `409`: a conflicting state, typically a session that is not ready, or a keyed send pending or unconfirmed (see `code`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `OpenWARateLimitException`          | `OpenWAApiException` | `429` — rate limited. The global rate limiter's 429 lifts when its window expires (seconds for the per-second tier, up to an hour for the hourly tier by default), and `getRetryAfterSeconds()` carries its `Retry-After` header. A 429 whose `getErrorCode()` is `"SEND_PACING_LIMITED"` is usually not transient: do not retry it before `getRetryAfterSeconds()`, which then comes from the body: a few seconds when only sends still in flight caused it, the rest of the failure breaker's cooldown (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes by default) after a run of send failures, otherwise up to the next UTC day. |
+| `OpenWANotImplementedException`     | `OpenWAApiException` | `501` — active engine does not support the operation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `OpenWAServiceUnavailableException` | `OpenWAApiException` | `503` — the gateway could not complete the request now (transport failure, draining, or on Baileys a WhatsApp throttle (429) or timeout (408)); back off and retry later, though a catalog 503 can persist because WhatsApp may never answer that query. In a routed deployment a forward that fails before reaching the owner node answers 503, and a 503 from the owner itself is relayed unchanged (a bounded write it covers may still have been applied); a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on.                                                       |
+| `OpenWATimeoutException`            | `OpenWAException`    | Request exceeded the timeout (`getTimeout(): float`). Not an API error — has no status/body.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+
+```php
+<?php
+use OpenWA\Client;
+use OpenWA\Exceptions\OpenWAConflictException;
+use OpenWA\Exceptions\OpenWARateLimitException;
+use OpenWA\Exceptions\OpenWATimeoutException;
+use OpenWA\Exceptions\OpenWAApiException;
+
+try {
+    $result = $client->messages->sendText($sessionId, [
+        'chatId' => '628123456789@c.us',
+        'text'   => 'Hello!',
+    ]);
+} catch (OpenWAConflictException $e) {
+    // 409: a conflicting state, typically a session that is not ready yet, or a keyed send pending or unconfirmed (see getErrorCode())
+} catch (OpenWARateLimitException $e) {
+    // 429 — back off and retry yourself (no auto-retry)
+} catch (OpenWATimeoutException $e) {
+    fwrite(STDERR, "timed out after {$e->getTimeout()}s\n");
+} catch (OpenWAApiException $e) {
+    // any other non-2xx
+    fwrite(STDERR, "API {$e->getStatus()}: {$e->getMessage()}\n");
+    var_dump($e->getBody());
+}
+```
+
+### Notable Behaviors
+
+- **Redirects are never followed.** Guzzle is configured with `allow_redirects => false`, so a `3xx` surfaces as an `OpenWAApiException` rather than being followed — the `X-API-Key` header is never re-sent to a redirect target.
+- **Auth/JSON headers take precedence.** `defaultHeaders` are merged in first, then `X-API-Key`, `Content-Type: application/json`, and `Accept: application/json` are applied on top, so they can't be clobbered.
+- **Path segments are percent-encoded.** Ids (session/chat/message/group ids) pass through `encodeSegment()`, which `rawurlencode`s the value but keeps the WhatsApp-id-safe characters `@`, `:`, and `+` readable — so a value containing `/`, `#`, or `?` cannot break out of its path position.
+- **Empty and dot segments are refused.** An empty, `.` or `..` id throws `InvalidArgumentException` before anything is sent, because the HTTP stack would otherwise resolve it to the parent resource. A raw `request()` path that does not begin with `/` throws `InvalidArgumentException` too.
+- **Base-URL path prefix is preserved.** The base URL has its trailing `/` trimmed and requests are issued against an absolute `baseUrl . $path`; Guzzle's `base_uri` is intentionally unset, so a prefix like `/v1` behind a reverse proxy is retained.
+- **Null query values are dropped.** Absent optional query parameters (`null`) are filtered out before the request, so they are never sent.
+- **No automatic retries.** A failed request throws immediately; wrap calls in your own backoff if you need retries (notably for `429`). The injectable `httpClient` is the extension point for retry/observability middleware.
+- **Empty/204 responses return `null`.** A `204` or empty body decodes to `null`; resource methods that promise an `array` coalesce this to `[]` (or to the resource object for single-item gets).
+- **Testing without the network.** Inject a Guzzle client built on a `GuzzleHttp\Handler\MockHandler` via the `httpClient` config key — no global state, no live calls. The shipped test suite asserts on the exact path, method, and body.
+- **PSR-4 autoloading.** Everything lives under the `OpenWA\` namespace mapped to `src/`; `composer require rmyndharis/openwa` wires up the autoloader.
+
+## 18.5 n8n Community Node
+
+OpenWA's n8n integration is **not** part of these SDK packages. It is a separate community node maintained in its own repository, which speaks the same REST + webhook contract documented in [API Specification](./06-api-specification.md):
+
+- An **action/HTTP** path that calls the REST endpoints (e.g. `POST /api/sessions/:id/messages/send-text`) with the `X-API-Key` header.
+- A **trigger** path that registers a webhook (the `webhooks` resource) and receives inbound events, verifying the `X-OpenWA-Signature` HMAC.
+
+For installation and node-by-node configuration, see the dedicated [n8n Integration guide](./22-n8n-integration.md). Because the node consumes the public API contract, the verified route/event reference in docs 06 and §6.6 (Webhook Events) is the authority for what it can call and receive.
+
+## 18.6 SDK Versioning & Releases
+
+### Versioning
+
+The five SDKs are versioned **independently of the gateway** and of each other, each following SemVer. An SDK version does **not** track the gateway version — check the registry for the current one rather than inferring it from the gateway's. Pin the SDK version your code is tested against and treat a major SDK bump as potentially breaking.
+
+| SDK                   | Registry             | Package                               |
+| --------------------- | -------------------- | ------------------------------------- |
+| JavaScript/TypeScript | npm                  | `@rmyndharis/openwa`                  |
+| Python                | PyPI                 | `rmyndharis-openwa`                   |
+| PHP                   | Packagist            | `rmyndharis/openwa`                   |
+| Java                  | Maven Central        | `com.rmyndharis:openwa`               |
+| Go                    | (none — module path) | `github.com/rmyndharis/OpenWA/sdk/go` |
+
+### Contract-drift protection
+
+The wire types live in a dedicated module (`types.ts` / `types.py`) so they can later be regenerated by an OpenAPI codegen pass without touching the hand-written resource methods.
+
+**Requests.** Each SDK's test suite mocks the HTTP transport and **asserts on the exact request path, method, and body** — so a drift between an SDK method and the real API (the class of bug that once shipped `messages/text` instead of the real `messages/send-text`) breaks a test rather than reaching users.
+
+**Responses.** That is a different problem, and for a long time nothing covered it — #754 is the proof: the status, label, and channel record types drifted from the engine interface for releases without a single test noticing, because asserting the request says nothing about the reply. `openapi:check` does not cover it either, because it only keeps the snapshot in step with the code. The schemas of those records (`LabelDto`, `ChannelDto`, `ChannelMessageDto`, `StatusDto` and `StatusListResponseDto`) are in `openapi.json`, and `check:contract-shapes` compares the SDKs' label, channel and status records with them field by field. A second check is `sdk/javascript/test/wire-contract.test-d.ts` — a type-level test where `tsc --noEmit` (run by `npm test` ahead of vitest) fails if a record type stops matching the engine-neutral shape as it arrives over JSON. Its `Wire*` types are **maintained by hand**: `sdk-ci.yml` re-runs the job when `whatsapp-engine.interface.ts` changes, but keeping the two in step is a human step, not a generated one.
+
+### Release process
+
+```bash
+# JavaScript (the tests need Node 22.12+; the published package runs on Node 18+)
+cd sdk/javascript && npm test && npm run build && npm run smoke   # smoke = require()+import() packaging plus request check
+# Python
+cd sdk/python && python -m pytest -q
+# PHP
+cd sdk/php && composer install && ./vendor/bin/phpunit
+```
+
+CI runs all five suites (`sdk-ci.yml`), path-filtered to `sdk/**` plus the server-side contract surfaces the SDKs are written against — `src/**/dto/**`, `src/**/*.controller.ts`, `src/**/*.service.ts` and `whatsapp-engine.interface.ts` — so a change to the wire contract re-runs them. The PHP package is mirrored to its own Packagist repository via a `git subtree split`, and that mirror publish is gated on the PHP tests passing, so a broken SDK cannot auto-publish. Bump the version, record the change in the root `CHANGELOG.md` `[Unreleased]` section prefixed with the SDK's name (for example `Java SDK:`), drop the methods it ships from the note at the top of this document, `sdk/README.md` and the "This document describes `main`" note near the top of that SDK's own README, run the suite above, then tag/publish to the relevant registry.

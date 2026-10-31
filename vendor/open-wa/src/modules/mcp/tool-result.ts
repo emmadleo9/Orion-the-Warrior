@@ -1,0 +1,67 @@
+import { randomUUID } from 'node:crypto';
+import { HttpException } from '@nestjs/common';
+import { createLogger } from '../../common/services/logger.service';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+
+const logger = createLogger('Mcp');
+
+/**
+ * Format a tool result, inlining small payloads as text and offloading large
+ * ones (> 4 KB) to an embedded base64 resource so the response stays compact.
+ */
+export function smartToolResult(data: string | object | object[]): CallToolResult {
+  // JSON.stringify(undefined) is undefined, not a string — a handler that resolves void would turn
+  // a completed write into a thrown TypeError here, reported to the agent as a failure it retries.
+  const text = typeof data === 'string' ? data : (JSON.stringify(data) ?? 'null');
+  const mimeType = typeof data === 'string' ? 'text/plain' : 'application/json';
+  const ext = typeof data === 'string' ? 'txt' : 'json';
+  const buffer = Buffer.from(text);
+  if (buffer.byteLength > 4096) {
+    const uri = `mcp://toolResult/${randomUUID()}.${ext}`;
+    return {
+      content: [
+        { type: 'text', text: `Received resource ${uri} with ${buffer.byteLength} bytes` },
+        { type: 'resource', resource: { uri, mimeType, blob: buffer.toString('base64') } },
+      ],
+    };
+  }
+  return { content: [{ type: 'text', text }] };
+}
+
+/** Format a tool result as compact JSON text. */
+export function jsonToolResult(data: object, isError = false): CallToolResult {
+  const result: CallToolResult = { content: [{ type: 'text', text: JSON.stringify(data) }] };
+  if (isError) {
+    result.isError = true;
+  }
+  return result;
+}
+
+/**
+ * Map a thrown error to a tool-error result. Stack traces and raw thrown values
+ * are logged server-side only — never put on the wire, where they would leak
+ * server internals to the MCP client.
+ *
+ * HttpExceptions carry client-safe messages (they mirror REST error responses).
+ * All other errors get a generic wire message to avoid leaking internals.
+ */
+export function handleToolError(error: unknown): CallToolResult {
+  if (error instanceof HttpException) {
+    // A 4xx is the client's mistake (unknown session, bad input, missing role), which REST does not
+    // log at all: a warn line without a stack, so error-level alerting fires on server faults only.
+    if (error.getStatus() >= 500) logger.error(error.message, error.stack);
+    else logger.warn(`MCP tool error ${error.getStatus()}: ${error.message}`);
+    const res = error.getResponse();
+    const message =
+      typeof res === 'object' && res !== null && 'message' in res
+        ? (res as Record<string, unknown>)['message']
+        : error.message;
+    return jsonToolResult({ success: false, name: error.name, message }, true);
+  }
+  if (error instanceof Error) {
+    logger.error(error.message, error.stack);
+    return jsonToolResult({ success: false, name: error.name, message: 'Internal error' }, true);
+  }
+  logger.error('Unknown tool error', String(error));
+  return jsonToolResult({ success: false, name: 'Unknown error', message: 'Internal error' }, true);
+}

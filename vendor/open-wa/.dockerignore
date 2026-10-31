@@ -1,0 +1,83 @@
+# Dependencies — reinstalled inside the image via npm ci
+node_modules/
+dashboard/node_modules/
+# Docker anchors a bare name at the context root, so a tree below it needs its own rule. No build
+# step reads the SDKs, so their sources, dependencies, build output and test caches all stay out.
+**/node_modules/
+sdk/
+
+# Build output — rebuilt inside the image; local output/caches must not leak
+# into the builder's `COPY . .` (a stale tsbuildinfo can poison the build)
+dist/
+dashboard/dist/
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Test coverage
+coverage/
+**/coverage/
+
+# Environment files — secrets, never a build input (every variant, any depth)
+.env*
+**/.env*
+
+# Data files — runtime state (sessions, media, databases, API keys), never
+# part of the build context
+data/
+# The media directory a dashboard save in 0.2.0 to 0.7.3 recorded, which a bare-metal install may
+# still write (src/config/storage-root.ts)
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+# scripts/backup.sh archives and restore.sh safety snapshots: copies of the same state
+backups/
+**/*.pre-restore-*
+
+# VCS metadata — not a build input; keeps history/hooks out of the context
+.git/
+
+# Private working material — internal notes that must never enter the build
+# context, the build cache, or any image layer
+_docs/
+
+# Agent/tool workspaces and caches — local-only, not build inputs
+.agent/
+.claude/
+.kimi-worktrees/
+.playwright-mcp/
+.remember/
+.superpowers/
+.worktrees/
+.wwebjs_cache/
+CLAUDE.md
+docs/plans/
+docs/superpowers/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Temporary files
+tmp/
+temp/
+
+# Docker
+.docker/
+
+# Debug
+.pnpm-debug.log*
+
+# Helm chart — deployment artifact, not a build input
+charts/

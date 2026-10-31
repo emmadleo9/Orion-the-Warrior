@@ -1,0 +1,458 @@
+// Package openwa is the official Go client for OpenWA, the open-source WhatsApp API Gateway (not
+// affiliated with WhatsApp or Meta).
+//
+// The single entry point is New, which returns a *Client whose exported fields
+// are the domain services:
+//
+//	client, err := openwa.New("http://localhost:2785", "owa_k1_…")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	ctx := context.Background()
+//	// Sessions are addressed by the UUID that Create returns, not by name.
+//	session, err := client.Sessions.Create(ctx, openwa.CreateSessionRequest{Name: "my-session"})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if _, err := client.Sessions.Start(ctx, session.ID); err != nil {
+//	    log.Fatal(err)
+//	}
+//	// Link the account before sending: scan Sessions.QRCode (or use Sessions.RequestPairingCode for a number with no linked session),
+//	// then wait for status "ready". An unlinked session answers the send with 409.
+//	res, err := client.Messages.SendText(ctx, session.ID, openwa.SendTextRequest{
+//	    ChatID: "628123456789@c.us",
+//	    Text:   "Hello from the OpenWA Go SDK!",
+//	})
+//
+// Every network method is context-first. Configuration and dependency injection
+// go through functional Options (WithHTTPClient, WithTransport, WithLogger,
+// WithRetry, WithMiddleware). Errors are typed — match them with errors.Is
+// against the sentinels (ErrNotFound, ErrConflict, …) or errors.As against
+// *APIError.
+//
+// Use HTTPS in production: the API key is sent as X-API-Key on every request
+// and is bearer-equivalent. Redirects are never followed, so the key is never
+// re-sent to a redirect target.
+package openwa
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"reflect"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Client is the entry point to the OpenWA API. Construct it with New. It is safe
+// for concurrent use by multiple goroutines. The exported service fields group
+// the API by domain.
+type Client struct {
+	baseURL    string
+	httpClient *http.Client
+	timeout    time.Duration
+
+	// Services.
+	Sessions  *SessionsService
+	Messages  *MessagesService
+	Contacts  *ContactsService
+	Groups    *GroupsService
+	Webhooks  *WebhooksService
+	Chats     *ChatsService
+	Status    *StatusService
+	Labels    *LabelsService
+	Channels  *ChannelsService
+	Catalog   *CatalogService
+	Templates *TemplatesService
+	Health    *HealthService
+	Search    *SearchService
+	Auth      *AuthService
+	Profile   *ProfileService
+	Calls     *CallsService
+	Media     *MediaService
+}
+
+var localhostHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
+
+// New constructs a Client for the API at baseURL, authenticating with apiKey.
+// Both are required. Everything else is configured through Options.
+func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		return nil, errors.New("openwa: baseURL is required")
+	}
+	// A key read from a secret file usually ends in a newline: trimmed, as the other clients do. A control
+	// character left inside is refused here, by the key's name and without repeating it.
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, errors.New("openwa: apiKey is required")
+	}
+	for _, r := range apiKey {
+		if r < 0x20 || r == 0x7f {
+			return nil, errors.New("openwa: apiKey contains a control character; check for a stray newline")
+		}
+	}
+
+	cfg := &config{
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		apiKey:    apiKey,
+		timeout:   DefaultTimeout,
+		logger:    nopLogger{},
+		userAgent: DefaultUserAgent,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	// A zero (or negative) timeout means "use the default" per WithTimeout's
+	// documentation — never an infinite timeout, which would silently pin
+	// goroutines waiting for a dead peer.
+	if cfg.timeout <= 0 {
+		cfg.timeout = DefaultTimeout
+	}
+
+	warnIfInsecure(cfg)
+
+	base := cfg.baseTransport
+	if base == nil {
+		if cfg.httpClient != nil && cfg.httpClient.Transport != nil {
+			base = cfg.httpClient.Transport
+		} else {
+			base = http.DefaultTransport
+		}
+	}
+	pipeline := buildTransport(cfg, base)
+
+	hc := &http.Client{
+		Transport: pipeline,
+		// Never auto-follow redirects: doing so would re-send X-API-Key to the
+		// redirect target. ErrUseLastResponse surfaces the 3xx to do(), which
+		// then treats it as an error.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: cfg.timeout,
+	}
+	if cfg.httpClient != nil {
+		hc.Jar = cfg.httpClient.Jar
+		if cfg.httpClient.Timeout > 0 && !cfg.timeoutSet {
+			hc.Timeout = cfg.httpClient.Timeout
+		}
+	}
+
+	c := &Client{
+		baseURL:    cfg.baseURL,
+		httpClient: hc,
+		timeout:    hc.Timeout,
+	}
+	c.Sessions = &SessionsService{client: c}
+	c.Messages = &MessagesService{client: c}
+	c.Contacts = &ContactsService{client: c}
+	c.Groups = &GroupsService{client: c}
+	c.Webhooks = &WebhooksService{client: c}
+	c.Chats = &ChatsService{client: c}
+	c.Status = &StatusService{client: c}
+	c.Labels = &LabelsService{client: c}
+	c.Channels = &ChannelsService{client: c}
+	c.Catalog = &CatalogService{client: c}
+	c.Templates = &TemplatesService{client: c}
+	c.Health = &HealthService{client: c}
+	c.Search = &SearchService{client: c}
+	c.Auth = &AuthService{client: c}
+	c.Profile = &ProfileService{client: c}
+	c.Calls = &CallsService{client: c}
+	c.Media = &MediaService{client: c}
+	return c, nil
+}
+
+const insecureWarning = "openwa: baseURL uses insecure http:// — the API key is sent in cleartext; use https:// in production"
+
+// warnIfInsecure warns once, at construction, when the API key would travel in
+// cleartext to a non-localhost host.
+//
+// Unlike the SDK's per-request logging, this does not stay silent under the
+// default nopLogger: the caller most likely to point at a plaintext http:// URL
+// by accident is the one who has not wired a logger up yet, so a discarded
+// warning would be no warning at all. An injected logger receives it instead of
+// stderr, and WithInsecureHTTP silences it entirely.
+func warnIfInsecure(cfg *config) {
+	if cfg.allowInsecure {
+		return
+	}
+	u, err := url.Parse(cfg.baseURL)
+	if err != nil {
+		return
+	}
+	host := strings.Trim(u.Hostname(), "[]")
+	if u.Scheme != "http" || localhostHosts[host] {
+		return
+	}
+	if _, isNop := cfg.logger.(nopLogger); isNop {
+		fmt.Fprintf(os.Stderr, "%s (host: %s)\n", insecureWarning, host)
+		return
+	}
+	cfg.logger.Log(context.Background(), LevelWarn, insecureWarning, "host", host)
+}
+
+// Do issues a raw request against the API and decodes the JSON response into
+// out (pass nil to ignore the body). It is the escape hatch for endpoints the
+// typed services do not cover. path must begin with "/"; any other path returns
+// an error and nothing is sent.
+//
+// A 2xx body is assigned verbatim when out is a *[]byte, and a non-JSON 2xx
+// body falls back to the raw text when out is a *string — mirroring the
+// JS/Python/PHP transports, which return the raw text instead of failing.
+// Any other out type still requires a JSON body.
+//
+// A "." or ".." segment (also written %2e) returns an error and nothing is
+// sent; empty segments, such as a trailing slash, are sent as written.
+func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.call(ctx, method, path, query, body, out, true)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.call(ctx, method, path, query, body, out, false)
+}
+
+func (c *Client) call(ctx context.Context, method, path string, query url.Values, body, out any, rawPath bool) error {
+	data, _, err := c.doRaw(ctx, method, path, query, body, rawPath)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(data) == 0 {
+		return nil
+	}
+	// A *[]byte target always takes the body verbatim (media bytes are not JSON).
+	if raw, ok := out.(*[]byte); ok {
+		*raw = data
+		return nil
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		// A *string target accepts a non-JSON 2xx body as raw text rather than
+		// failing to decode.
+		if text, ok := out.(*string); ok {
+			*text = string(data)
+			return nil
+		}
+		return fmt.Errorf("openwa: decoding response: %w", err)
+	}
+	return nil
+}
+
+type idempotencyContextKey struct{}
+
+// WithIdempotencyKey supplies a caller-owned key for one logical send. Reuse
+// this context for its retries and choose another key for an unrelated send.
+// Only the gateway's documented idempotent send routes interpret the header,
+// and the SDK sends it on those routes only.
+func WithIdempotencyKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, idempotencyContextKey{}, key)
+}
+
+// idempotentSendSegments are the message routes that interpret Idempotency-Key. net/http sends a
+// request that carries the header again after a dropped connection, which is only safe where the
+// gateway deduplicates, so the header goes nowhere else.
+var idempotentSendSegments = map[string]bool{
+	"send-text": true, "send-image": true, "send-video": true, "send-audio": true,
+	"send-document": true, "send-sticker": true, "send-location": true, "send-contact": true,
+	"send-template": true, "send-poll": true, "reply": true, "forward": true,
+}
+
+// isIdempotentSendPath reports whether path is /api/sessions/{id}/messages/{segment} for one of them.
+func isIdempotentSendPath(path string) bool {
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	parts := strings.Split(path, "/")
+	return len(parts) == 6 && parts[1] == "api" && parts[2] == "sessions" && parts[4] == "messages" &&
+		idempotentSendSegments[parts[5]]
+}
+
+// doRaw performs the request and returns the response body and Content-Type.
+// Any non-2xx status (including an unfollowed 3xx or a final 1xx) is an error.
+//
+// A path segment that is "." or ".." is refused before sending: a proxy that
+// resolves dot segments would route the request to the parent resource. A
+// typed service path (rawPath false) also refuses an empty segment, which
+// means a required id was blank; a hand-written Do path may keep one.
+func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, body any, rawPath bool) ([]byte, string, error) {
+	// net/http sends the method as written and the gateway answers 400 to a lowercase one. The idempotency
+	// header and the retry policy compare the upper-case names as well.
+	method = strings.ToUpper(method)
+	if err := checkPathSegments(path, rawPath); err != nil {
+		return nil, "", err
+	}
+	var bodyBytes []byte
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", fmt.Errorf("openwa: encoding request body: %w", err)
+		}
+		bodyBytes = b
+		reader = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return nil, "", fmt.Errorf("openwa: building request: %w", err)
+	}
+	// Merged into the parsed URL: appended to the string, the values would land inside a fragment.
+	if len(query) > 0 {
+		if req.URL.RawQuery != "" {
+			req.URL.RawQuery += "&"
+		}
+		req.URL.RawQuery += query.Encode()
+	}
+	// Read through the request: NewRequestWithContext has just refused a nil ctx, which ctx.Value would panic on.
+	if key, hasKey := req.Context().Value(idempotencyContextKey{}).(string); hasKey {
+		if len(key) < 1 || len(key) > 255 || strings.IndexFunc(key, func(r rune) bool { return r < 0x21 || r > 0x7e }) >= 0 {
+			return nil, "", errors.New("openwa: idempotency key must contain 1-255 visible ASCII characters")
+		}
+		if req.Method == http.MethodPost && isIdempotentSendPath(path) {
+			req.Header.Set("Idempotency-Key", key)
+		}
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = int64(len(bodyBytes))
+		// GetBody lets the retry middleware rewind the body on each attempt.
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+		}
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if isTimeout(err) {
+			return nil, "", c.timeoutErr(ctx, err)
+		}
+		return nil, "", fmt.Errorf("openwa: %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if isTimeout(err) {
+			return nil, "", c.timeoutErr(ctx, err)
+		}
+		return nil, "", fmt.Errorf("openwa: reading response body: %w", err)
+	}
+
+	// Any non-2xx (including an unfollowed 3xx or a final 1xx) is an error.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", parseAPIError(resp.StatusCode, data, method+" "+path, resp.Header)
+	}
+	return data, resp.Header.Get("Content-Type"), nil
+}
+
+// timeoutErr names the client timeout only when it is the budget that ran out.
+// The client timeout never cancels ctx, so an expired ctx means the caller's own
+// deadline fired first and the error carries no duration.
+func (c *Client) timeoutErr(ctx context.Context, err error) *TimeoutError {
+	if ctx.Err() != nil {
+		return &TimeoutError{Err: err}
+	}
+	return &TimeoutError{Timeout: c.timeout, Err: err}
+}
+
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeouter interface{ Timeout() bool }
+	if errors.As(err, &timeouter) {
+		return timeouter.Timeout()
+	}
+	return false
+}
+
+// pathEscape percent-encodes a single path segment so a value containing "/",
+// "#", or "?" can't break out of its path position. WhatsApp-JID characters
+// that are already path-safe ("@", ":", "+") are kept readable. An empty, "."
+// or ".." id is left as is and refused by doRaw before anything is sent.
+func pathEscape(segment string) string {
+	escaped := url.PathEscape(segment)
+	return jidRestorer.Replace(escaped)
+}
+
+var jidRestorer = strings.NewReplacer("%40", "@", "%3A", ":", "%2B", "+")
+
+var dotFolder = strings.NewReplacer("%2e", ".", "%2E", ".")
+
+// checkPathSegments refuses a path that does not begin with "/" (appended to the
+// base URL, "@host/x" would move the request and its API key to another host), a
+// "." or ".." segment (also written %2e), and an empty one unless allowEmpty. The
+// query and fragment are not path segments.
+func checkPathSegments(path string, allowEmpty bool) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("openwa: path must begin with \"/\": %q", path)
+	}
+	p := path
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	for _, seg := range strings.Split(p, "/")[1:] {
+		switch dotFolder.Replace(seg) {
+		case ".", "..":
+			return fmt.Errorf("openwa: dot path segment in %q", path)
+		case "":
+			if !allowEmpty {
+				return fmt.Errorf("openwa: empty path segment in %q", path)
+			}
+		}
+	}
+	return nil
+}
+
+// query helpers used by the typed *Query structs.
+
+func setStr(v url.Values, key string, p *string) {
+	if p != nil {
+		v.Set(key, *p)
+	}
+}
+
+func setInt(v url.Values, key string, p *int) {
+	if p != nil {
+		v.Set(key, strconv.Itoa(*p))
+	}
+}
+
+func setBool(v url.Values, key string, p *bool) {
+	if p != nil {
+		if *p {
+			v.Set(key, "true")
+		} else {
+			v.Set(key, "false")
+		}
+	}
+}
+
+func setInt64(v url.Values, key string, p *int64) {
+	if p != nil {
+		v.Set(key, strconv.FormatInt(*p, 10))
+	}
+}
+
+// queryValuer is implemented by the typed *Query structs.
+type queryValuer interface{ values() url.Values }
+
+// valuesOf encodes a query, treating a nil (including a typed-nil pointer) as
+// "no query params".
+func valuesOf(q queryValuer) url.Values {
+	if q == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(q)
+	if rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return nil
+	}
+	return q.values()
+}
