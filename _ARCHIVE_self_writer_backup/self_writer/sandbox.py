@@ -28,6 +28,11 @@ from typing import Callable, Optional
 
 from .model_client import ChatMessage, ModelClient
 
+# Self-writer output directories — isolated from live source to avoid reload loops.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+GENERATED_DIR = PROJECT_ROOT / "generated"
+OUTPUT_DIR = PROJECT_ROOT / "output"
+
 
 @dataclass
 class TestResult:
@@ -340,17 +345,53 @@ class Sandbox:
         return str(backup_path)
 
     def apply(self, diff: DiffResult) -> bool:
-        """Apply an approved diff: back up the old file, write the new one."""
+        """Apply an approved diff: back up the old file, write the new one atomically.
+
+        Writes are isolated to generated/ or output/ directories. Uses a temp
+        file + os.replace() so no half-written file is ever visible.
+        """
         if not diff.approved:
             return False
+
         target = self.root / diff.file_path
+        target_str = str(target)
+
+        # Safety: never write into live source dirs (orion_app/, templates/).
+        # Only generated/ and output/ are allowed for self-writer output.
+        allowed_prefixes = [
+            str((self.root / "generated").resolve()) + os.sep,
+            str((self.root / "output").resolve()) + os.sep,
+            str((self.root / "generated").resolve()),
+            str((self.root / "output").resolve()),
+        ]
+        resolved_target = target.resolve()
+        if not any(
+            resolved_target == p.rstrip(os.sep) or resolved_target.is_relative_to(p.rstrip(os.sep))
+            for p in allowed_prefixes
+        ):
+            # Redirect into generated/ with same filename.
+            target = GENERATED_DIR / target.name
+            resolved_target = target.resolve()
+
         target.parent.mkdir(parents=True, exist_ok=True)
 
         # Back up old content first (if any).
         if diff.old_code is not None:
             diff.backup_path = self.backup(diff.file_path, diff.old_code)
 
-        target.write_text(diff.new_code, encoding="utf-8")
+        # Atomic write: temp file in same dir, then os.replace().
+        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".tmp_", suffix=".py")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(diff.new_code)
+            os.replace(tmp_path, str(resolved_target))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
         diff.applied = True
         return True
 

@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import json
 import os
+import platform
 import queue
 import threading
 from contextlib import asynccontextmanager
@@ -780,14 +781,61 @@ def create_task(payload: dict) -> dict:
     )
 
 
+def _format_uptime(seconds: int) -> str:
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours}h {minutes}m"
+
+
+def _system_payload() -> dict:
+    """Build a system telemetry payload in both flat and nested formats."""
+    tel = get_system_telemetry()
+    cpu_percent = float(tel.get("cpu_percent", 0.0))
+    memory_percent = float(tel.get("memory_percent", 0.0))
+    disk_percent = float(tel.get("disk_percent", 0.0))
+    uptime = tel.get("uptime", {})
+    uptime_seconds = int(uptime.get("seconds", 0)) if isinstance(uptime, dict) else 0
+    host = platform.node()
+    return {
+        "status": "online",
+        "host": host,
+        "cpu_percent": cpu_percent,
+        "memory_percent": memory_percent,
+        "disk_percent": disk_percent,
+        "cpu": cpu_percent,
+        "memory": memory_percent,
+        "disk": disk_percent,
+        "cpu_load": cpu_percent,
+        "ram_percent": memory_percent,
+        "uptime": _format_uptime(uptime_seconds),
+        "uptime_seconds": uptime_seconds,
+        "cpu_nested": tel.get("cpu", {}),
+        "memory_nested": tel.get("memory", {}),
+        "disk_nested": tel.get("disk", {}),
+        "uptime_nested": uptime if isinstance(uptime, dict) else {},
+        "platform": tel.get("platform", ""),
+        "timestamp": tel.get("timestamp", ""),
+    }
+
+
 @app.get("/api/system")
 def api_system() -> dict:
-    return get_system_telemetry()
+    return _system_payload()
 
 
 @app.get("/api/system/metrics")
 def system_metrics() -> dict:
-    return get_system_telemetry()
+    return _system_payload()
+
+
+@app.get("/api/stats")
+def api_stats() -> dict:
+    return _system_payload()
+
+
+@app.get("/api/metrics")
+def api_metrics() -> dict:
+    return _system_payload()
 
 
 @app.get("/api/system/processes")
@@ -1027,22 +1075,23 @@ app.include_router(telegram_router)
 
 
 # ---------------------------------------------------------------------------
-# Self-Writer module (admin-gated code rewriting)
+# Self-Writer module — DISABLED/REMOVED
 # ---------------------------------------------------------------------------
-from orion.core.self_writer.routes import router as self_writer_router  # noqa: E402
-
-app.include_router(self_writer_router)
-
-
-@app.get("/api/system")
-def api_system():
-    return get_system_telemetry()
+# from orion.core.self_writer.routes import router as self_writer_router  # noqa: E402
+# app.include_router(self_writer_router)
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("orion_app.main:app", host="0.0.0.0", port=8000, reload=False)
+
+
 @app.get("/api/system")
-def system_alias():
-    # Alias for diagnostics so frontend gets live numbers
-    return get_system_diagnostics() if 'get_system_diagnostics' in globals() else diagnostics()
+@app.get("/api/stats")
+def api_system():
+    import psutil, platform, time
+    cpu = psutil.cpu_percent(interval=0.2)
+    mem = psutil.virtual_memory().percent
+    disk = psutil.disk_usage('/').percent
+    uptime = int(time.time() - psutil.boot_time())
+    return {"cpu_percent": cpu, "memory_percent": mem, "disk_percent": disk, "cpu": cpu, "memory": mem, "disk": disk, "uptime": f"{uptime//3600}h {(uptime%3600)//60}m", "host": platform.node(), "status": "online"}

@@ -13,12 +13,16 @@ Flow:
 
 The engine is stack-aware: it detects Orion is a Python/FastAPI app and targets
 the correct directories (orion_app/, static/, etc.).
+
+All self-written output is isolated to D:\\Orion\\generated/ or D:\\Orion\\output/
+to avoid reload loops and file-locking issues when uvicorn runs with reload=True.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -31,8 +35,10 @@ from .sandbox import DiffResult, Sandbox, SandboxConfig
 # Root of the Orion project (parent of this package: .../Orion The Warrior)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-# Where self-written changes land. Orion is a Python/FastAPI app, so source lives
-# under orion_app/ and static assets under orion_app/static/.
+# All self-writer output lands here — never inside orion_app/ or templates/.
+GENERATED_DIR = PROJECT_ROOT / "generated"
+OUTPUT_DIR = PROJECT_ROOT / "output"
+
 SOURCE_DIRS = ["orion_app", "static", "scripts"]
 BACKUP_DIR = PROJECT_ROOT / "orion" / "backups"
 
@@ -85,6 +91,10 @@ class SelfWriter:
             model_client=self.model,
         )
         self._snapshot_text: Optional[str] = None
+        self._last_write_time: float = 0.0
+        self._debounce_seconds: float = 2.0
+        GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -100,6 +110,9 @@ class SelfWriter:
         target_rel_path : str | None
             Optional hint for which file to write. If omitted, the model picks
             the best target based on the command and codebase.
+
+        All output is isolated to generated/ or output/ and written atomically
+        (temp file + os.replace) with a 2-second debounce between writes.
         """
         try:
             return self._run(admin_command, target_rel_path)
@@ -112,6 +125,8 @@ class SelfWriter:
         return {
             "root": str(self.root),
             "backup_dir": str(BACKUP_DIR),
+            "generated_dir": str(GENERATED_DIR),
+            "output_dir": str(OUTPUT_DIR),
             "model": self.model.available(),
             "max_fix_loops": self.max_fix_loops,
         }
@@ -120,6 +135,13 @@ class SelfWriter:
     # Internal orchestration
     # ------------------------------------------------------------------ #
     def _run(self, admin_command: str, target_rel_path: Optional[str]) -> WriteResult:
+        # Debounce: wait at least 2 seconds between writes.
+        now = time.time()
+        elapsed = now - self._last_write_time
+        if elapsed < self._debounce_seconds:
+            time.sleep(self._debounce_seconds - elapsed)
+        self._last_write_time = time.time()
+
         # 1. Scan codebase (cached within one run).
         if self._snapshot_text is None:
             snapshot = scan_codebase(self.root, include_content=True)

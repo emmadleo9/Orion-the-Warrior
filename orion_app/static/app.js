@@ -142,10 +142,10 @@ async function fetchJson(url, options = {}) {
    ========================================================================== */
 async function loadMetrics() {
   try {
-    const res = await fetch('/api/diagnostics', { cache: 'no-store' });
-    if (!res.ok) throw new Error('diagnostics failed ' + res.status);
+    const res = await fetch('/api/system', { cache: 'no-store' });
+    if (!res.ok) throw new Error('system failed ' + res.status);
     const data = await res.json();
-    console.log('[ORION] diagnostics data:', data);
+    console.log('[ORION] system data:', data);
 
     const cpu = Number(data.cpu?.usage_percent ?? data.cpu_percent ?? 0);
     const ram = Number(data.memory?.usage_percent ?? data.memory_percent ?? data.ram_percent ?? 0);
@@ -231,13 +231,16 @@ async function loadMetrics() {
     const diskBar = document.getElementById('telem-disk-bar');
     if (diskBar) diskBar.style.width = `${diskFix}%`;
 
-    const uptimeStr = data.uptime?.formatted || (data.uptime?.seconds ? `${Math.floor(data.uptime.seconds / 3600)}h ${Math.floor((data.uptime.seconds % 3600) / 60)}m` : 'Active');
+    const uptimeStr = data.uptime ?? data.uptime_nested?.formatted || (data.uptime_seconds ? `${Math.floor(data.uptime_seconds / 3600)}h ${Math.floor((data.uptime_seconds % 3600) / 60)}m` : 'Active');
     const telemUptime = document.getElementById('telem-uptime-val');
     if (telemUptime) telemUptime.textContent = uptimeStr;
     const sbUptime = document.getElementById('sb-uptime-val');
     if (sbUptime) sbUptime.textContent = uptimeStr;
+
+    // Host
+    const hostStr = data.host || data.platform || 'Host';
     const osEl = document.getElementById('telem-os-val');
-    if (osEl) osEl.textContent = `${data.platform?.system || data.platform || 'Host'} · Python ${data.platform?.python_version || ''}`;
+    if (osEl) osEl.textContent = hostStr;
 
   } catch (err) {
     console.error('[ORION] metrics error:', err);

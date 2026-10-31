@@ -1,6 +1,6 @@
 """Orion core subpackage.
 
-Holds the self-writing module and any future admin-gated core extensions.
+Holds core extensions.
 """
 
-__all__ = ["self_writer"]
+__all__ = []

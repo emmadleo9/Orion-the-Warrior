@@ -25,7 +25,7 @@ echo Open http://100.116.4.49:8000 on your phone via Tailscale (anywhere in the 
 echo Or http://localhost:8000 on this PC.
 echo Press Ctrl+C in this window to stop Orion.
 echo.
-"%ORION_PYTHON%" "%~dp0main.py"
+"%ORION_PYTHON%" -m uvicorn orion_app.main:app --host 127.0.0.1 --port 8000
 set "ORION_EXIT_CODE=%ERRORLEVEL%"
 if not "%ORION_EXIT_CODE%"=="0" (
     echo.
