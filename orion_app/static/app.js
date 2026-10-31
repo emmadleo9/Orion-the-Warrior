@@ -2073,7 +2073,8 @@ if (instagramCallback.get('view') === 'social') {
   window.history.replaceState({}, document.title, '/');
 }
 
-BINARY MATRIX RAIN — works on desktop and mobile phones
+/* ==========================================================================
+   BINARY MATRIX RAIN — works on desktop and mobile phones
    ========================================================================== */
 (function initMatrixRain() {
   const canvas = document.querySelector('.matrix-rain');
