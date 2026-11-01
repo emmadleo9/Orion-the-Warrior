@@ -48,6 +48,10 @@
             <i data-lucide="activity" class="w-4 h-4"></i>
             <span>Tasks</span>
           </button>
+          <a class="nav" href="/anti-gravity" style="text-decoration: none; color: inherit; display: flex; align-items: center; gap: 10px;" aria-label="Anti-Gravity Lab">
+            <i data-lucide="orbit" class="w-4 h-4" style="color: #00ff88;"></i>
+            <span style="color: #00ff88; font-weight: bold;">Anti-Gravity</span>
+          </a>
         </nav>
 
         <section class="sidebar-diagnostics" aria-label="Diagnostics">
@@ -214,17 +218,33 @@
           </section>
 
           <section class="grid summary-grid">
+            <div class="panel ag-lab-card" style="grid-column: 1 / -1; border: 1px solid #00ff88; box-shadow: 0 0 25px rgba(0, 255, 136, 0.22); background: radial-gradient(circle at top right, rgba(0, 255, 136, 0.12), transparent 70%), var(--bg-panel);">
+              <div class="chat-heading">
+                <div>
+                  <p class="eyebrow" style="color: #00ff88; font-weight: bold; letter-spacing: 1.5px;">PHYSICS CONTAINMENT // AG-01</p>
+                  <h3 style="color: #e6fff0; font-size: 1.25rem;">AG-01 ANTI-GRAVITY LAB</h3>
+                </div>
+                <span class="status-pill" style="border-color: #00ff88; color: #00ff88; background: rgba(0, 255, 136, 0.12); font-weight: bold; letter-spacing: 1px;">[ONLINE]</span>
+              </div>
+              <p style="color: var(--muted); font-size: 0.9rem; margin: 10px 0 16px 0; line-height: 1.5;">Zero-G kinetic levitation chamber. Interactive real-time vacuum simulation with 8 floating test masses, variable graviton array (0-100%), orbital vortex mode, and telemetry stabilization.</p>
+              <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid rgba(0, 255, 136, 0.2); padding-top: 14px;">
+                <span style="font-family: monospace; font-size: 0.82rem; color: #52f7a3; letter-spacing: 1px;">CONTAINMENT: READY</span>
+                <a href="/anti-gravity" class="btn-primary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; font-weight: bold; font-size: 0.85rem; letter-spacing: 1.5px; border-radius: 6px; background: #00ff88; color: #010805; border: 1px solid #00ff88; box-shadow: 0 0 15px rgba(0, 255, 136, 0.4);">
+                  ENTER LAB &rarr;
+                </a>
+              </div>
+            </div>
             <div class="panel">
               <div class="chat-heading">
                 <h3>Devices</h3>
-                <button class="btn-ghost" type="button" onclick="document.querySelector('.nav[data-view=\"devices-view\"]').click()">Manage</button>
+                <button class="btn-ghost" type="button" onclick="document.querySelector('.nav[data-view=devices-view]').click()">Manage</button>
               </div>
               <ul id="device-list"></ul>
             </div>
             <div class="panel">
               <div class="chat-heading">
                 <h3>Task Queue</h3>
-                <button class="btn-ghost" type="button" onclick="document.querySelector('.nav[data-view=\"devices-view\"]').click()">Manage</button>
+                <button class="btn-ghost" type="button" onclick="document.querySelector('.nav[data-view=devices-view]').click()">Manage</button>
               </div>
               <ul id="task-list"></ul>
             </div>
@@ -750,8 +770,6 @@
               <p class="hint">Loading recent activity...</p>
             </div>
           </section>
-        </section>
-
         </section>
       </main>
     </div>

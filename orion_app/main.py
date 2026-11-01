@@ -12,7 +12,7 @@ from typing import Callable, Literal, TypeVar
 
 from .whatsapp_adapter import send_whatsapp_message
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -81,7 +81,20 @@ app.add_middleware(
 
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates = Jinja2Templates(directory=[str(BASE_DIR.parent / "templates"), str(BASE_DIR / "templates")])
+
+# Compatibility wrapper supporting (name, context) and (request, name, context)
+_orig_template_response = templates.TemplateResponse
+def _adaptive_template_response(*args, **kwargs):
+    if len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], dict):
+        return _orig_template_response(request=args[1].get("request"), name=args[0], context=args[1])
+    elif len(args) == 1 and isinstance(args[0], str):
+        return _orig_template_response(request=kwargs.get("request"), name=args[0], context=kwargs.get("context"))
+    return _orig_template_response(*args, **kwargs)
+templates.TemplateResponse = _adaptive_template_response
+
+from .anti_gravity import router as ag_router
+app.include_router(ag_router)
 
 
 def run_tracked(title: str, category: str, operation: Callable[[], Result]) -> Result:
@@ -185,6 +198,11 @@ def read_telegram() -> HTMLResponse:
     if not tg_html.is_file():
         raise HTTPException(status_code=404, detail="Telegram module not found")
     return HTMLResponse(content=tg_html.read_text(encoding="utf-8"))
+
+
+@app.get("/anti-gravity")
+async def ag_page(request: Request):
+    return templates.TemplateResponse("anti_gravity.html", {"request": request})
 
 
 @app.get("/manifest.json")

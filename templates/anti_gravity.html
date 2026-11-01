@@ -1,0 +1,1400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ANTI-GRAVITY CHAMBER // AG-01 // ORION</title>
+  <link rel="icon" type="image/png" href="/static/orion-logo.png" />
+  <style>
+    :root {
+      --bg: #010805;
+      --bg-panel: rgba(4, 22, 14, 0.92);
+      --bg-panel-dark: rgba(2, 14, 9, 0.96);
+      --line: rgba(0, 255, 136, 0.28);
+      --line-bright: rgba(0, 255, 136, 0.7);
+      --accent: #00ff88;
+      --accent-glow: rgba(0, 255, 136, 0.45);
+      --accent-dim: rgba(0, 255, 136, 0.15);
+      --text: #e6fff0;
+      --text-muted: #8ad6a8;
+      --danger: #ff4757;
+      --danger-glow: rgba(255, 71, 87, 0.45);
+      --warning: #ffa502;
+      --font-mono: 'Consolas', 'Courier New', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(ellipse at 50% 0%, rgba(0, 255, 136, 0.12), transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(0, 255, 136, 0.05), transparent 40%),
+        linear-gradient(180deg, #010a06 0%, var(--bg) 100%);
+      color: var(--text);
+      font-family: var(--font-mono);
+      min-height: 100vh;
+      overflow-x: hidden;
+      position: relative;
+    }
+
+    /* Subtle scanline overlay */
+    body::before {
+      content: "";
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(0, 0, 0, 0.15),
+        rgba(0, 0, 0, 0.15) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      z-index: 999;
+      opacity: 0.5;
+    }
+
+    /* Header */
+    .top-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--bg-panel-dark);
+      backdrop-filter: blur(10px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border: 1px solid var(--line);
+      background: var(--accent-dim);
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.8rem;
+      font-weight: bold;
+      letter-spacing: 1px;
+      border-radius: 4px;
+      transition: all 0.2s ease;
+    }
+
+    .back-btn:hover {
+      background: var(--accent);
+      color: #010805;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .header-title-box h1 {
+      font-size: 1.1rem;
+      letter-spacing: 2px;
+      color: var(--accent);
+      text-shadow: 0 0 10px var(--accent-glow);
+    }
+
+    .header-title-box p {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      letter-spacing: 1.5px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .system-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--accent);
+      background: rgba(0, 255, 136, 0.08);
+      font-size: 0.75rem;
+      letter-spacing: 1.5px;
+      color: var(--accent);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      animation: pulseDot 1.5s infinite ease-in-out;
+    }
+
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    /* Main Container */
+    .chamber-container {
+      max-width: 1440px;
+      margin: 20px auto;
+      padding: 0 20px;
+      display: grid;
+      grid-template-columns: 820px 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+
+    @media (max-width: 1280px) {
+      .chamber-container {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Left: Lab Viewport */
+    .lab-card {
+      background: var(--bg-panel-dark);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+      transition: all 0.3s ease;
+    }
+
+    .lab-card.active-field {
+      border-color: var(--accent);
+      box-shadow: 0 0 35px rgba(0, 255, 136, 0.35), inset 0 0 20px rgba(0, 255, 136, 0.15);
+      animation: pulseBorder 3s infinite alternate ease-in-out;
+    }
+
+    @keyframes pulseBorder {
+      0% {
+        box-shadow: 0 0 20px rgba(0, 255, 136, 0.25), inset 0 0 10px rgba(0, 255, 136, 0.1);
+        border-color: rgba(0, 255, 136, 0.6);
+      }
+      100% {
+        box-shadow: 0 0 45px rgba(0, 255, 136, 0.5), inset 0 0 30px rgba(0, 255, 136, 0.25);
+        border-color: #00ff88;
+      }
+    }
+
+    .lab-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0, 0, 0, 0.6);
+      font-size: 0.75rem;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+    }
+
+    .chamber-viewport-wrap {
+      position: relative;
+      background: #000000;
+      width: 100%;
+      height: 500px;
+      overflow: hidden;
+    }
+
+    #lab {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #000000;
+    }
+
+    /* Chamber HUD overlay corners */
+    .hud-corner {
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .hud-tl { top: 8px; left: 8px; border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+    .hud-tr { top: 8px; right: 8px; border-top: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+    .hud-bl { bottom: 8px; left: 8px; border-bottom: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+    .hud-br { bottom: 8px; right: 8px; border-bottom: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+
+    .hud-chamber-stats {
+      position: absolute;
+      bottom: 12px;
+      left: 16px;
+      display: flex;
+      gap: 16px;
+      font-size: 0.7rem;
+      color: rgba(0, 255, 136, 0.8);
+      background: rgba(0, 0, 0, 0.7);
+      padding: 4px 10px;
+      border-radius: 3px;
+      border: 1px solid rgba(0, 255, 136, 0.2);
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .hud-mode-pill {
+      position: absolute;
+      top: 12px;
+      right: 16px;
+      font-size: 0.72rem;
+      padding: 4px 10px;
+      border-radius: 3px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      pointer-events: none;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.75);
+      border: 1px solid var(--line);
+      color: var(--text-muted);
+    }
+    .hud-mode-pill.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+
+    /* Right: Control Panel */
+    .controls-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .panel-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 20px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .panel-card-title {
+      font-size: 0.82rem;
+      letter-spacing: 1.5px;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 8px;
+    }
+
+    /* Live Telemetry Grid */
+    .telemetry-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .tele-stat {
+      background: rgba(0, 10, 6, 0.8);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: all 0.2s ease;
+    }
+
+    .tele-stat:hover {
+      border-color: var(--accent);
+    }
+
+    .tele-label {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      letter-spacing: 1px;
+    }
+
+    .tele-val {
+      font-size: 1.35rem;
+      font-weight: bold;
+      color: var(--text);
+      letter-spacing: 1px;
+      font-family: var(--font-mono);
+    }
+
+    .tele-val.accent {
+      color: var(--accent);
+      text-shadow: 0 0 8px var(--accent-glow);
+    }
+
+    .stability-bar-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+
+    .stability-bar-fill {
+      height: 100%;
+      width: 100%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      transition: width 0.3s ease, background-color 0.3s ease;
+    }
+
+    /* Slider Container */
+    .slider-section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 6px;
+    }
+
+    .slider-label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      letter-spacing: 1px;
+    }
+
+    .slider-val-badge {
+      font-size: 0.95rem;
+      color: var(--accent);
+      font-weight: bold;
+    }
+
+    .custom-range {
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 10px;
+      background: #021a10;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      outline: none;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .custom-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid #000;
+      box-shadow: 0 0 10px var(--accent);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .custom-range::-webkit-slider-thumb:hover {
+      transform: scale(1.15);
+      box-shadow: 0 0 16px var(--accent);
+    }
+
+    .custom-range::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid #000;
+      box-shadow: 0 0 10px var(--accent);
+      cursor: pointer;
+    }
+
+    .presets-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .preset-btn {
+      flex: 1;
+      padding: 5px;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      background: rgba(0, 255, 136, 0.05);
+      border: 1px solid var(--line);
+      color: var(--text-muted);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .preset-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(0, 255, 136, 0.15);
+    }
+
+    /* Buttons row */
+    .action-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .btn {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: bold;
+      letter-spacing: 1.5px;
+      padding: 12px 18px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      transition: all 0.2s ease;
+      text-transform: uppercase;
+      outline: none;
+    }
+
+    .btn-toggle {
+      background: rgba(0, 255, 136, 0.1);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 15px rgba(0, 255, 136, 0.15);
+    }
+
+    .btn-toggle:hover {
+      background: var(--accent);
+      color: #010805;
+      box-shadow: 0 0 25px var(--accent-glow);
+    }
+
+    .btn-toggle.active {
+      background: var(--accent);
+      color: #010805;
+      box-shadow: 0 0 25px var(--accent-glow);
+    }
+
+    .btn-row-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .btn-stabilize {
+      background: rgba(0, 255, 136, 0.05);
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+
+    .btn-stabilize:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 15px var(--accent-dim);
+    }
+
+    .btn-cut {
+      background: rgba(255, 71, 87, 0.1);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+    }
+
+    .btn-cut:hover {
+      background: var(--danger);
+      color: #fff;
+      box-shadow: 0 0 20px var(--danger-glow);
+    }
+
+    /* Diagnostics Log */
+    .console-log-box {
+      background: rgba(0, 6, 3, 0.9);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      height: 100px;
+      overflow-y: auto;
+      font-size: 0.7rem;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+
+    .console-log-box .log-line {
+      margin-bottom: 2px;
+    }
+
+    .console-log-box .log-time {
+      color: rgba(0, 255, 136, 0.5);
+      margin-right: 6px;
+    }
+
+    .console-log-box .log-highlight {
+      color: var(--accent);
+    }
+
+    .console-log-box .log-warn {
+      color: var(--warning);
+    }
+
+    .console-log-box .log-danger {
+      color: var(--danger);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navigation Header -->
+  <header class="top-header">
+    <div class="header-left">
+      <a href="/" class="back-btn" title="Return to Mission Control">
+        &larr; MISSION CONTROL
+      </a>
+      <div class="header-title-box">
+        <h1>ANTI-GRAVITY CHAMBER // AG-01 // ONLINE</h1>
+        <p>ZERO-G EXPERIMENTAL CONTAINMENT VESSEL</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="system-status-badge">
+        <span class="status-dot" id="system-dot"></span>
+        <span id="system-status-text">CHAMBER READY</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Viewport and Controls -->
+  <main class="chamber-container">
+
+    <!-- Left: Canvas Viewport -->
+    <div class="lab-card" id="lab-card">
+      <div class="lab-card-header">
+        <span>&diams; KINETIC VACUUM SIMULATION &diams;</span>
+        <span id="orbit-indicator">NORMAL DYNAMICS</span>
+        <span>RESOLUTION: 800 &times; 500</span>
+      </div>
+
+      <div class="chamber-viewport-wrap">
+        <!-- HUD Corners -->
+        <div class="hud-corner hud-tl"></div>
+        <div class="hud-corner hud-tr"></div>
+        <div class="hud-corner hud-bl"></div>
+        <div class="hud-corner hud-br"></div>
+
+        <!-- Mode Pill -->
+        <div class="hud-mode-pill" id="hud-mode-pill">FIELD OFFLINE</div>
+
+        <!-- Live Chamber HUD overlay -->
+        <div class="hud-chamber-stats">
+          <span>G-FORCE: <strong id="hud-g-val">1.00 G</strong></span>
+          <span>&bull;</span>
+          <span>VORTEX: <strong id="hud-vortex-val">INACTIVE</strong></span>
+          <span>&bull;</span>
+          <span>OBJECTS: <strong>8 LEVITATING</strong></span>
+        </div>
+
+        <canvas id="lab" width="800" height="500"></canvas>
+      </div>
+    </div>
+
+    <!-- Right: Controls Panel -->
+    <div class="controls-panel">
+
+      <!-- Telemetry Card -->
+      <div class="panel-card">
+        <div class="panel-card-title">
+          <span>Telemetry Readout</span>
+          <span style="font-size: 0.7rem; color: var(--text-muted);">POLL: 300MS</span>
+        </div>
+
+        <div class="telemetry-grid">
+          <div class="tele-stat">
+            <span class="tele-label">GRAVITY (m/s&sup2;)</span>
+            <span class="tele-val accent" id="val-gravity">9.81</span>
+          </div>
+          <div class="tele-stat">
+            <span class="tele-label">FIELD STRENGTH</span>
+            <span class="tele-val accent" id="val-strength">0%</span>
+          </div>
+          <div class="tele-stat">
+            <span class="tele-label">POWER OUTPUT</span>
+            <span class="tele-val" id="val-power">0.0 kW</span>
+          </div>
+          <div class="tele-stat">
+            <span class="tele-label">ALTITUDE</span>
+            <span class="tele-val" id="val-altitude">0.00 m</span>
+          </div>
+        </div>
+
+        <div class="tele-stat" style="margin-top: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="tele-label">CONTAINMENT STABILITY</span>
+            <span style="font-size: 0.9rem; font-weight: bold;" id="val-stability">100.0%</span>
+          </div>
+          <div class="stability-bar-track">
+            <div class="stability-bar-fill" id="stability-bar" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls Card -->
+      <div class="panel-card">
+        <div class="panel-card-title">
+          <span>Graviton Field Control</span>
+          <span id="power-indicator" style="font-size: 0.7rem; color: var(--text-muted);">STANDBY</span>
+        </div>
+
+        <!-- Slider Section -->
+        <div class="slider-section">
+          <div class="slider-label-row">
+            <span>FIELD STRENGTH</span>
+            <span class="slider-val-badge" id="slider-display">0%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value="0"
+            class="custom-range"
+            id="strength-slider"
+            aria-label="Field Strength Slider"
+          />
+          <div class="presets-row">
+            <button type="button" class="preset-btn" onclick="setStrength(0)">0%</button>
+            <button type="button" class="preset-btn" onclick="setStrength(25)">25%</button>
+            <button type="button" class="preset-btn" onclick="setStrength(50)">50%</button>
+            <button type="button" class="preset-btn" onclick="setStrength(85)">85% (ORBIT)</button>
+            <button type="button" class="preset-btn" onclick="setStrength(100)">100% (MAX)</button>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+          <button type="button" class="btn btn-toggle" id="btn-toggle" onclick="toggleField()">
+            ACTIVATE FIELD
+          </button>
+          <div class="btn-row-split">
+            <button type="button" class="btn btn-stabilize" id="btn-stabilize" onclick="stabilizeField()">
+              STABILIZE
+            </button>
+            <button type="button" class="btn btn-cut" id="btn-cut" onclick="cutPower()">
+              CUT POWER
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Diagnostics Console -->
+      <div class="panel-card">
+        <div class="panel-card-title">
+          <span>Chamber Diagnostics Stream</span>
+          <button type="button" style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.68rem;" onclick="clearLogs()">CLEAR</button>
+        </div>
+        <div class="console-log-box" id="console-logs">
+          <div class="log-line"><span class="log-time">[BOOT]</span> AG-01 Anti-Gravity Chamber initialized.</div>
+          <div class="log-line"><span class="log-time">[STATUS]</span> 8 test masses loaded in kinetic vacuum.</div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <script>
+    // --- STATE MANAGEMENT ---
+    let state = {
+      enabled: false,
+      field_strength: 0,
+      gravity: 9.81,
+      stability: 100,
+      power: 0,
+      altitude: 0
+    };
+
+    let isUserDraggingSlider = false;
+    let shockwaveRadius = 0;
+    let shockwaveMaxRadius = 400;
+    let shockwaveActive = false;
+
+    // --- DOM REFERENCES ---
+    const labCard = document.getElementById("lab-card");
+    const canvas = document.getElementById("lab");
+    const ctx = canvas.getContext("2d");
+    const valGravity = document.getElementById("val-gravity");
+    const valStrength = document.getElementById("val-strength");
+    const valPower = document.getElementById("val-power");
+    const valAltitude = document.getElementById("val-altitude");
+    const valStability = document.getElementById("val-stability");
+    const stabilityBar = document.getElementById("stability-bar");
+    const strengthSlider = document.getElementById("strength-slider");
+    const sliderDisplay = document.getElementById("slider-display");
+    const btnToggle = document.getElementById("btn-toggle");
+    const hudModePill = document.getElementById("hud-mode-pill");
+    const hudGVal = document.getElementById("hud-g-val");
+    const hudVortexVal = document.getElementById("hud-vortex-val");
+    const systemStatusText = document.getElementById("system-status-text");
+    const powerIndicator = document.getElementById("power-indicator");
+    const orbitIndicator = document.getElementById("orbit-indicator");
+    const consoleLogs = document.getElementById("console-logs");
+
+    // --- LOG HELPER ---
+    function logMsg(text, type = "normal") {
+      const now = new Date();
+      const timeStr = now.toTimeString().split(" ")[0];
+      const div = document.createElement("div");
+      div.className = "log-line";
+      let classType = "";
+      if (type === "highlight") classType = "log-highlight";
+      else if (type === "warn") classType = "log-warn";
+      else if (type === "danger") classType = "log-danger";
+      div.innerHTML = `<span class="log-time">[${timeStr}]</span> <span class="${classType}">${text}</span>`;
+      consoleLogs.appendChild(div);
+      consoleLogs.scrollTop = consoleLogs.scrollHeight;
+    }
+
+    function clearLogs() {
+      consoleLogs.innerHTML = "";
+    }
+
+    // --- PARTICLES ---
+    const particles = [];
+    const NUM_PARTICLES = 70;
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      particles.push({
+        x: Math.random() * 800,
+        y: Math.random() * 500,
+        vy: -(1 + Math.random() * 2),
+        size: 1 + Math.random() * 2,
+        alpha: Math.random() * 0.8 + 0.2
+      });
+    }
+
+    // --- 8 FLOATING OBJECTS ---
+    // Types: "cube", "sphere", "orion_logo", "cube_wire", "sphere_plasma", "tech_prism", "hyper_cube", "gyro"
+    const objects = [
+      {
+        type: "cube",
+        x: 120, y: 440, vy: 0, vx: 0,
+        size: 32,
+        offset: 0.2,
+        wobble: 1.2,
+        orbitRadius: 180,
+        orbitAngle: 0,
+        rotation: 0,
+        color: "#00ff88"
+      },
+      {
+        type: "sphere",
+        x: 210, y: 450, vy: 0, vx: 0,
+        size: 26,
+        offset: 1.1,
+        wobble: 1.5,
+        orbitRadius: 240,
+        orbitAngle: Math.PI / 4,
+        rotation: 0,
+        color: "#52f7a3"
+      },
+      {
+        type: "orion_logo", // Mini Orion logo
+        x: 310, y: 435, vy: 0, vx: 0,
+        size: 36,
+        offset: 2.3,
+        wobble: 1.1,
+        orbitRadius: 120,
+        orbitAngle: Math.PI / 2,
+        rotation: 0,
+        color: "#00ff88"
+      },
+      {
+        type: "cube_wire",
+        x: 410, y: 440, vy: 0, vx: 0,
+        size: 30,
+        offset: 3.4,
+        wobble: 1.8,
+        orbitRadius: 280,
+        orbitAngle: (3 * Math.PI) / 4,
+        rotation: 0,
+        color: "#7cffb0"
+      },
+      {
+        type: "sphere_plasma",
+        x: 500, y: 455, vy: 0, vx: 0,
+        size: 24,
+        offset: 4.2,
+        wobble: 1.4,
+        orbitRadius: 160,
+        orbitAngle: Math.PI,
+        rotation: 0,
+        color: "#00ffc8"
+      },
+      {
+        type: "tech_prism",
+        x: 590, y: 445, vy: 0, vx: 0,
+        size: 28,
+        offset: 5.1,
+        wobble: 1.6,
+        orbitRadius: 220,
+        orbitAngle: (5 * Math.PI) / 4,
+        rotation: 0,
+        color: "#52f7a3"
+      },
+      {
+        type: "hyper_cube",
+        x: 680, y: 440, vy: 0, vx: 0,
+        size: 34,
+        offset: 6.0,
+        wobble: 1.3,
+        orbitRadius: 260,
+        orbitAngle: (3 * Math.PI) / 2,
+        rotation: 0,
+        color: "#00ff9d"
+      },
+      {
+        type: "sphere",
+        x: 730, y: 450, vy: 0, vx: 0,
+        size: 22,
+        offset: 7.2,
+        wobble: 1.7,
+        orbitRadius: 190,
+        orbitAngle: (7 * Math.PI) / 4,
+        rotation: 0,
+        color: "#9dffb8"
+      }
+    ];
+
+    // --- API CALLS ---
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/api/anti-gravity/status");
+        if (!res.ok) return;
+        const data = await res.json();
+        state = data;
+        updateUI();
+      } catch (err) {
+        console.error("Status fetch error:", err);
+      }
+    }
+
+    async function toggleField() {
+      try {
+        const res = await fetch("/api/anti-gravity/toggle", { method: "POST" });
+        const data = await res.json();
+        state = data;
+        updateUI();
+        if (state.enabled) {
+          logMsg("ANTIGRAVITY FIELD ACTIVATED // GRAVITON ARRAY ONLINE", "highlight");
+        } else {
+          logMsg("ANTIGRAVITY FIELD DEACTIVATED // RESTORING NORMAL GRAVITY", "warn");
+        }
+      } catch (err) {
+        logMsg("Failed to toggle field: " + err, "danger");
+      }
+    }
+
+    async function setStrength(val) {
+      val = Math.max(0, Math.min(100, parseInt(val, 10) || 0));
+      strengthSlider.value = val;
+      sliderDisplay.textContent = val + "%";
+      try {
+        const res = await fetch(`/api/anti-gravity/set-strength/${val}`, { method: "POST" });
+        const data = await res.json();
+        state.field_strength = data.field_strength;
+        if (val > 85) {
+          logMsg(`FIELD STRENGTH > 85% (${val}%) // ORBITAL VORTEX ENGAGED`, "highlight");
+        }
+      } catch (err) {
+        console.error("Error setting strength:", err);
+      }
+    }
+
+    async function cutPower() {
+      try {
+        const res = await fetch("/api/anti-gravity/cut", { method: "POST" });
+        const data = await res.json();
+        state = data;
+        strengthSlider.value = 0;
+        sliderDisplay.textContent = "0%";
+        updateUI();
+        logMsg("EMERGENCY CUT POWER ENGAGED // GRAVITY COLLAPSE", "danger");
+      } catch (err) {
+        console.error("Error cutting power:", err);
+      }
+    }
+
+    async function stabilizeField() {
+      try {
+        const res = await fetch("/api/anti-gravity/stabilize", { method: "POST" });
+        const data = await res.json();
+        state.stability = data.stability || 100;
+        shockwaveRadius = 10;
+        shockwaveActive = true;
+        updateUI();
+        logMsg("HARMONIC STABILIZATION PULSE DISPATCHED // 100% STABLE", "highlight");
+      } catch (err) {
+        console.error("Error stabilizing field:", err);
+      }
+    }
+
+    // Slider listener
+    strengthSlider.addEventListener("input", (e) => {
+      isUserDraggingSlider = true;
+      const val = e.target.value;
+      sliderDisplay.textContent = val + "%";
+      setStrength(val);
+    });
+
+    strengthSlider.addEventListener("change", () => {
+      isUserDraggingSlider = false;
+    });
+
+    // --- UI UPDATER ---
+    function updateUI() {
+      valGravity.textContent = (state.gravity !== undefined ? state.gravity.toFixed(2) : "9.81");
+      valStrength.textContent = (state.field_strength || 0) + "%";
+      valPower.textContent = (state.power !== undefined ? state.power.toFixed(1) : "0.0") + " kW";
+      valAltitude.textContent = (state.altitude !== undefined ? Math.max(0, state.altitude).toFixed(2) : "0.00") + " m";
+
+      const stab = state.stability !== undefined ? Math.max(0, Math.min(100, state.stability)) : 100;
+      valStability.textContent = stab.toFixed(1) + "%";
+      stabilityBar.style.width = stab + "%";
+
+      if (stab < 40) {
+        stabilityBar.style.backgroundColor = "var(--danger)";
+        stabilityBar.style.boxShadow = "0 0 10px var(--danger)";
+      } else if (stab < 70) {
+        stabilityBar.style.backgroundColor = "var(--warning)";
+        stabilityBar.style.boxShadow = "0 0 10px var(--warning)";
+      } else {
+        stabilityBar.style.backgroundColor = "var(--accent)";
+        stabilityBar.style.boxShadow = "0 0 10px var(--accent)";
+      }
+
+      if (!isUserDraggingSlider) {
+        strengthSlider.value = state.field_strength || 0;
+        sliderDisplay.textContent = (state.field_strength || 0) + "%";
+      }
+
+      // Visual classes and indicators
+      if (state.enabled) {
+        labCard.classList.add("active-field");
+        btnToggle.classList.add("active");
+        btnToggle.textContent = "DEACTIVATE FIELD";
+        hudModePill.classList.add("active");
+        hudModePill.textContent = "FIELD ONLINE";
+        systemStatusText.textContent = "ACTIVE LEVITATION";
+        powerIndicator.textContent = "EMITTING";
+        powerIndicator.style.color = "var(--accent)";
+
+        const gRatio = (state.gravity / 9.81).toFixed(2);
+        hudGVal.textContent = `${gRatio} G`;
+
+        if (state.field_strength > 85) {
+          hudVortexVal.textContent = "ORBITAL RING";
+          hudVortexVal.style.color = "#00ff88";
+          orbitIndicator.textContent = "VORTEX ROTATION ACTIVE";
+          orbitIndicator.style.color = "var(--accent)";
+        } else {
+          hudVortexVal.textContent = "SUB-ORBITAL";
+          hudVortexVal.style.color = "var(--text-muted)";
+          orbitIndicator.textContent = "LEVITATING";
+          orbitIndicator.style.color = "var(--text-muted)";
+        }
+      } else {
+        labCard.classList.remove("active-field");
+        btnToggle.classList.remove("active");
+        btnToggle.textContent = "ACTIVATE FIELD";
+        hudModePill.classList.remove("active");
+        hudModePill.textContent = "FIELD OFFLINE";
+        systemStatusText.textContent = "CHAMBER STANDBY";
+        powerIndicator.textContent = "STANDBY";
+        powerIndicator.style.color = "var(--text-muted)";
+        hudGVal.textContent = "1.00 G";
+        hudVortexVal.textContent = "INACTIVE";
+        hudVortexVal.style.color = "var(--text-muted)";
+        orbitIndicator.textContent = "NORMAL DYNAMICS";
+        orbitIndicator.style.color = "var(--text-muted)";
+      }
+    }
+
+    // --- DRAWING OBJECT HELPERS ---
+    function drawCube(ctx, x, y, size, rot, color, wireOnly = false) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+
+      const half = size / 2;
+      if (!wireOnly) {
+        ctx.fillStyle = "rgba(0, 255, 136, 0.12)";
+        ctx.fillRect(-half, -half, size, size);
+      }
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-half, -half, size, size);
+
+      // Inner tech cross
+      ctx.beginPath();
+      ctx.moveTo(-half / 2, 0); ctx.lineTo(half / 2, 0);
+      ctx.moveTo(0, -half / 2); ctx.lineTo(0, half / 2);
+      ctx.strokeStyle = "rgba(0, 255, 136, 0.4)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawSphere(ctx, x, y, radius, rot, color, plasma = false) {
+      ctx.save();
+      ctx.translate(x, y);
+
+      const grad = ctx.createRadialGradient(0, 0, radius * 0.1, 0, 0, radius);
+      if (plasma) {
+        grad.addColorStop(0, "#ffffff");
+        grad.addColorStop(0.4, color);
+        grad.addColorStop(1, "rgba(0, 255, 200, 0.1)");
+      } else {
+        grad.addColorStop(0, "rgba(255, 255, 255, 0.8)");
+        grad.addColorStop(0.3, color);
+        grad.addColorStop(1, "rgba(0, 255, 136, 0.08)");
+      }
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Orbital electron ring
+      ctx.rotate(rot * 2);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, radius * 1.4, radius * 0.4, rot, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(0, 255, 136, 0.5)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawOrionLogo(ctx, x, y, size, rot) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+
+      // Outer glowing tech octagonal ring
+      ctx.strokeStyle = "#00ff88";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Stylized ORION "O" crosshair
+      ctx.fillStyle = "rgba(0, 255, 136, 0.25)";
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Crosshairs
+      ctx.strokeStyle = "#52f7a3";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-size * 0.65, 0); ctx.lineTo(-size * 0.35, 0);
+      ctx.moveTo(size * 0.35, 0); ctx.lineTo(size * 0.65, 0);
+      ctx.moveTo(0, -size * 0.65); ctx.lineTo(0, -size * 0.35);
+      ctx.moveTo(0, size * 0.35); ctx.lineTo(0, size * 0.65);
+      ctx.stroke();
+
+      // Central core dot
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(0, 0, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawTechPrism(ctx, x, y, size, rot, color) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+
+      const h = size * 0.866;
+      ctx.beginPath();
+      ctx.moveTo(0, -h / 2);
+      ctx.lineTo(size / 2, h / 2);
+      ctx.lineTo(-size / 2, h / 2);
+      ctx.closePath();
+
+      ctx.fillStyle = "rgba(0, 255, 136, 0.15)";
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawHyperCube(ctx, x, y, size, rot, color) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+
+      // Outer square
+      const half = size / 2;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(-half, -half, size, size);
+
+      // Inner tilted square (tesseract projection)
+      ctx.rotate(rot * 0.5);
+      const innerHalf = half * 0.6;
+      ctx.strokeStyle = "rgba(0, 255, 200, 0.8)";
+      ctx.strokeRect(-innerHalf, -innerHalf, innerHalf * 2, innerHalf * 2);
+
+      // Connect corners
+      ctx.beginPath();
+      ctx.moveTo(-half, -half); ctx.lineTo(-innerHalf, -innerHalf);
+      ctx.moveTo(half, -half); ctx.lineTo(innerHalf, -innerHalf);
+      ctx.moveTo(half, half); ctx.lineTo(innerHalf, innerHalf);
+      ctx.moveTo(-half, half); ctx.lineTo(-innerHalf, innerHalf);
+      ctx.strokeStyle = "rgba(0, 255, 136, 0.4)";
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // --- ANIMATION LOOP ---
+    let startTime = performance.now();
+
+    function render(currentTime) {
+      const time = (currentTime - startTime) / 1000;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const enabled = state.enabled;
+      const fieldStrength = state.field_strength || 0;
+      const gravity = state.gravity !== undefined ? state.gravity : 9.81;
+
+      // 1. Draw Chamber Grid Floor & Ceiling Emitters
+      ctx.strokeStyle = "rgba(0, 255, 136, 0.08)";
+      ctx.lineWidth = 1;
+
+      // Perspective floor lines
+      for (let x = 0; x <= canvas.width; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= canvas.height; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+
+      // Ceiling emitter line
+      ctx.strokeStyle = enabled ? "rgba(0, 255, 136, 0.8)" : "rgba(0, 255, 136, 0.2)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 10);
+      ctx.lineTo(canvas.width, 10);
+      ctx.stroke();
+
+      // Floor collector line
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height - 10);
+      ctx.lineTo(canvas.width, canvas.height - 10);
+      ctx.stroke();
+
+      // Center crosshair
+      ctx.strokeStyle = "rgba(0, 255, 136, 0.2)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(centerX - 30, centerY); ctx.lineTo(centerX + 30, centerY);
+      ctx.moveTo(centerX, centerY - 30); ctx.lineTo(centerX, centerY + 30);
+      ctx.stroke();
+
+      // Center chamber circle
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, 50, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // 2. Shockwave effect on stabilize
+      if (shockwaveActive) {
+        shockwaveRadius += 8;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, shockwaveRadius, 0, Math.PI * 2);
+        const shockAlpha = Math.max(0, 1 - shockwaveRadius / shockwaveMaxRadius);
+        ctx.strokeStyle = `rgba(0, 255, 136, ${shockAlpha})`;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.restore();
+        if (shockwaveRadius >= shockwaveMaxRadius) {
+          shockwaveActive = false;
+        }
+      }
+
+      // 3. Upward Graviton Particles (Active Field)
+      if (enabled) {
+        ctx.save();
+        ctx.shadowColor = "#00ff88";
+        ctx.shadowBlur = 8;
+        particles.forEach((p) => {
+          // Speed up with field strength
+          const speed = 1.5 + (fieldStrength / 100) * 4;
+          p.y -= speed;
+          p.x += Math.sin(time + p.y * 0.05) * 0.4;
+
+          if (fieldStrength > 85) {
+            // Swirl towards center
+            const dx = centerX - p.x;
+            p.x += dx * 0.02;
+          }
+
+          if (p.y < 12) {
+            p.y = canvas.height - 15;
+            p.x = Math.random() * canvas.width;
+          }
+
+          ctx.fillStyle = `rgba(0, 255, 136, ${p.alpha})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.restore();
+      }
+
+      // 4. Update and Draw 8 Objects
+      const floorY = canvas.height - 40;
+      const ceilingY = 50;
+
+      objects.forEach((obj, idx) => {
+        // Physics update per requirements
+        if (!enabled) {
+          // if enabled == false: y += gravity*0.1 (fall to bottom)
+          obj.y += gravity * 0.1;
+
+          // Stop at floor
+          if (obj.y > floorY) {
+            obj.y = floorY;
+            obj.rotation *= 0.95;
+          }
+        } else {
+          // if enabled == true:
+          // y -= field_strength*0.05 + sin(time + offset)*wobble
+          // x += sin(time)*0.5
+          // add glow/shadow, particles going up
+          // When field_strength > 85, make objects rotate and orbit center
+
+          if (fieldStrength > 85) {
+            // Orbital mode
+            obj.orbitAngle += 0.02 + (fieldStrength / 100) * 0.03;
+            obj.rotation += 0.06;
+
+            const targetX = centerX + Math.cos(obj.orbitAngle + obj.offset) * obj.orbitRadius;
+            const targetY = centerY + Math.sin(obj.orbitAngle + obj.offset) * (obj.orbitRadius * 0.42);
+
+            // Interpolate smoothly into orbit
+            obj.x += (targetX - obj.x) * 0.08;
+            obj.y += (targetY - obj.y) * 0.08;
+          } else {
+            // Standard levitation mode
+            const upwardLift = fieldStrength * 0.05;
+            const wobbleEffect = Math.sin(time * 2 + obj.offset) * obj.wobble;
+            obj.y -= (upwardLift + wobbleEffect);
+
+            // Horizontal sway
+            obj.x += Math.sin(time + obj.offset) * 0.5;
+
+            // Rotation
+            obj.rotation += 0.01 + (fieldStrength / 100) * 0.02;
+
+            // Clamp inside chamber boundaries
+            if (obj.y < ceilingY) obj.y = ceilingY;
+            if (obj.y > floorY) obj.y = floorY;
+            if (obj.x < 40) obj.x = 40;
+            if (obj.x > canvas.width - 40) obj.x = canvas.width - 40;
+          }
+        }
+
+        // Object Shadow on the Floor
+        const distFromFloor = floorY - obj.y;
+        const shadowScale = Math.max(0.2, 1 - distFromFloor / 350);
+        const shadowAlpha = Math.max(0.05, 0.4 * shadowScale);
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.ellipse(obj.x, floorY + 12, obj.size * shadowScale, (obj.size / 3) * shadowScale, 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0, 255, 136, ${shadowAlpha})`;
+        ctx.fill();
+        ctx.restore();
+
+        // Object Glow
+        ctx.save();
+        if (enabled) {
+          ctx.shadowColor = obj.color;
+          ctx.shadowBlur = 12 + (fieldStrength / 100) * 18;
+        } else {
+          ctx.shadowColor = "rgba(0, 255, 136, 0.3)";
+          ctx.shadowBlur = 4;
+        }
+
+        // Draw by Type
+        switch (obj.type) {
+          case "cube":
+            drawCube(ctx, obj.x, obj.y, obj.size, obj.rotation, obj.color);
+            break;
+          case "cube_wire":
+            drawCube(ctx, obj.x, obj.y, obj.size, obj.rotation, obj.color, true);
+            break;
+          case "sphere":
+            drawSphere(ctx, obj.x, obj.y, obj.size / 2, obj.rotation, obj.color, false);
+            break;
+          case "sphere_plasma":
+            drawSphere(ctx, obj.x, obj.y, obj.size / 2, obj.rotation, obj.color, true);
+            break;
+          case "orion_logo":
+            drawOrionLogo(ctx, obj.x, obj.y, obj.size, obj.rotation);
+            break;
+          case "tech_prism":
+            drawTechPrism(ctx, obj.x, obj.y, obj.size, obj.rotation, obj.color);
+            break;
+          case "hyper_cube":
+            drawHyperCube(ctx, obj.x, obj.y, obj.size, obj.rotation, obj.color);
+            break;
+          default:
+            drawCube(ctx, obj.x, obj.y, obj.size, obj.rotation, obj.color);
+        }
+
+        ctx.restore();
+      });
+
+      requestAnimationFrame(render);
+    }
+
+    // --- INITIALIZATION ---
+    fetchStatus();
+    setInterval(fetchStatus, 300);
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
