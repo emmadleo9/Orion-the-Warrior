@@ -1,3 +1,4 @@
 {
-    "claudeCodeChat.permissions.yoloMode": false
+    "claudeCodeChat.permissions.yoloMode": false,
+    "python.terminal.useEnvFile": true
 }

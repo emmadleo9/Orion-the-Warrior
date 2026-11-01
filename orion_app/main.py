@@ -172,9 +172,9 @@ class InstagramPublishRequest(BaseModel):
     caption: str = Field(default="", max_length=2200)
 
 
-@app.get("/")
-def read_index() -> FileResponse:
-    return FileResponse(BASE_DIR / "static" / "index.html")
+@app.get("/", response_class=HTMLResponse)
+def read_index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/instagram", response_class=HTMLResponse)
