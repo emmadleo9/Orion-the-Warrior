@@ -19,7 +19,7 @@ resource methods; the PHP SDK has no types layer and returns plain arrays.
 | JavaScript / TypeScript | [`@rmyndharis/openwa`](javascript/)          | dual ESM/CJS, bundled types                                 |
 | Python                  | [`rmyndharis-openwa`](python/)               | sync (httpx), PEP 561 typed                                 |
 | PHP                     | [`rmyndharis/openwa`](php/)                  | sync (Guzzle, PHP 8.1+)                                     |
-| Java                    | [`com.rmyndharis:openwa`](java/)             | sync (java.net.http + Gson, Java 17)                        |
+| Java                    | [`com.rmyndharis:openwa`](java/)             | sync (java.net.http + Gson, Java 25)                        |
 | Go                      | [`github.com/rmyndharis/OpenWA/sdk/go`](go/) | stdlib-only, context-first, injectable transport (Go 1.22+) |
 
 ## Coverage
@@ -201,7 +201,7 @@ MessageResponse result = client.messages.sendText(session.id(),
 System.out.println(result.messageId());
 ```
 
-Requires Java 17+. Errors are a typed, unchecked hierarchy — branch with
+Requires Java 25+. Errors are a typed, unchecked hierarchy — branch with
 `instanceof OpenWANotFoundError` / `OpenWAConflictError`. For testing, inject a
 custom `HttpTransport` that records the request — no network. See
 [`java/README.md`](java/README.md) for the full guide.

@@ -9,7 +9,7 @@ affiliated with or endorsed by WhatsApp or Meta.
 Hand-written against the exact API surface (paths, DTOs, response shapes) and
 unit-tested with a mock HTTP transport that asserts on the precise request URL,
 method, and body — so contract drift is caught at test time. Synchronous,
-Java 17+, one runtime dependency ([Gson](https://github.com/google/gson)).
+Java 25+, one runtime dependency ([Gson](https://github.com/google/gson)).
 
 ## Install
 
