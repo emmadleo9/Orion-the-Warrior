@@ -1,6 +1,8 @@
 # Orion the Warrior
 
-Orion the Warrior is a local-first command center and personal automation starter for consolidating communication, device management, and a local AI assistant called ORI-9.0-GEN-1.
+**Status: FAILED / ARCHIVED.** This project is no longer maintained and exists only as a reference for resource reuse.
+
+Orion the Warrior was a local-first command center and personal automation starter for consolidating communication, device management, and a local AI assistant called ORI-9.0-GEN-1.
 
 ## Features
 
