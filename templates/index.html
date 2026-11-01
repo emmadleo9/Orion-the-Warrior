@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ORION — AI Control Center</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">ORION</div>
+      <div class="system-badge">
+        <span class="dot"></span>
+        <span id="status">ONLINE</span>
+        <span id="uptime">—</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">CPU</div>
+        <div class="big" id="cpu">--%</div>
+        <div class="sub">Processor utilization</div>
+        <div class="meter"><div class="meter-fill" id="cpu-fill"></div></div>
+      </div>
+      <div class="card">
+        <div class="label">RAM</div>
+        <div class="big" id="ram">--%</div>
+        <div class="sub">Memory utilization</div>
+        <div class="meter"><div class="meter-fill" id="ram-fill"></div></div>
+      </div>
+      <div class="card">
+        <div class="label">DISK</div>
+        <div class="big" id="disk">--%</div>
+        <div class="sub">Storage utilization</div>
+        <div class="meter"><div class="meter-fill" id="disk-fill"></div></div>
+      </div>
+      <div class="card status-card">
+        <div class="label">BOT STATUS</div>
+        <div class="big" id="bot-status">ONLINE</div>
+        <div class="sub">ORION control center</div>
+        <div class="pill"><span class="dot"></span><span>API reachable</span></div>
+      </div>
+    </div>
+
+    <div class="logs-section">
+      <div class="logs-header">
+        <div class="label">SYSTEM LOGS</div>
+        <div class="muted-text">auto-updating</div>
+      </div>
+      <div class="logs-list" id="logs"></div>
+    </div>
+  </div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
